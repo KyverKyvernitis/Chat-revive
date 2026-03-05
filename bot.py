@@ -65,7 +65,6 @@ def health():
 
 
 def run_web():
-    # Na Render, o host precisa ser 0.0.0.0
     app.run(host="0.0.0.0", port=PORT)
 
 
@@ -93,7 +92,7 @@ class MyBot(commands.Bot):
         # { guild_id: {"anti_mzk_enabled": bool} }
         self.guild_settings: Dict[int, Dict[str, Any]] = {}
 
-        # Lock pra evitar TTS simultâneo (por guild)
+        # Lock por servidor para não tocar TTS sobreposto
         self.tts_locks: Dict[int, asyncio.Lock] = {}
 
     async def setup_hook(self) -> None:
@@ -173,51 +172,97 @@ async def get_target_member(guild: discord.Guild, user_id: int) -> Optional[disc
 async def speak_in_user_voice_channel(message: discord.Message, text: str) -> None:
     """
     Entra no canal de voz do autor e fala o texto usando gTTS em português.
-    Requer ffmpeg disponível no ambiente.
+    Responde no chat caso dê erro (permissão, não estar em call, ffmpeg, etc.).
     """
     if not message.guild:
         return
 
     voice_state = getattr(message.author, "voice", None)
     if not voice_state or not voice_state.channel:
-        return  # autor não está em call
+        await message.reply("⚠️ Você precisa estar em um canal de voz para eu falar.")
+        return
 
     channel: discord.VoiceChannel = voice_state.channel
 
+    # Checar permissões do bot no canal
+    me = message.guild.me
+    if me is None:
+        me = message.guild.get_member(bot.user.id) if bot.user else None
+
+    if me is None:
+        await message.reply("❌ Não consegui identificar meu usuário no servidor.")
+        return
+
+    perms = channel.permissions_for(me)
+    if not perms.connect:
+        await message.reply("❌ Eu não tenho permissão **Conectar** nesse canal de voz.")
+        return
+    if not perms.speak:
+        await message.reply("❌ Eu não tenho permissão **Falar** nesse canal de voz.")
+        return
+
+    # Conectar/mover para o canal do autor
     vc = message.guild.voice_client
-    if vc is None:
-        vc = await channel.connect()
-    elif vc.channel and vc.channel.id != channel.id:
-        await vc.move_to(channel)
+    try:
+        if vc is None:
+            vc = await channel.connect()
+        elif vc.channel and vc.channel.id != channel.id:
+            await vc.move_to(channel)
+    except discord.Forbidden:
+        await message.reply("❌ O Discord bloqueou minha entrada na call (permissão insuficiente).")
+        return
+    except Exception as e:
+        await message.reply(f"❌ Não consegui entrar na call. Erro: `{type(e).__name__}`")
+        print(f"Erro ao conectar/mover: {repr(e)}")
+        return
 
     lock = bot.get_tts_lock(message.guild.id)
 
     async with lock:
-        if vc.is_playing():
-            vc.stop()
-
-        # Limite simples pra evitar abuso
-        text = text.strip()
-        if not text:
-            return
-        if len(text) > 250:
-            text = text[:250]
-
-        tmp_path = None
+        tmp_path: Optional[str] = None
         try:
+            if vc.is_playing():
+                vc.stop()
+
+            text = (text or "").strip()
+            if not text:
+                await message.reply("⚠️ Escreva algo depois da vírgula. Ex: `,olá pessoal`")
+                return
+
+            # Limite simples pra evitar abuso
+            if len(text) > 250:
+                text = text[:250]
+
+            # Criar arquivo temporário
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
                 tmp_path = fp.name
 
-            # Voz Google (gTTS) em português
-            tts = gTTS(text=text, lang="pt", tld="com.br")
-            tts.save(tmp_path)
+            # Gerar mp3 com gTTS (Google TTS)
+            try:
+                tts = gTTS(text=text, lang="pt", tld="com.br")
+                tts.save(tmp_path)
+            except Exception as e:
+                await message.reply("❌ Falhei ao gerar a voz (gTTS). O servidor pode estar sem acesso à internet.")
+                print(f"Erro gTTS: {repr(e)}")
+                return
 
-            audio = discord.FFmpegPCMAudio(tmp_path)
+            # Tocar com ffmpeg
+            try:
+                audio = discord.FFmpegPCMAudio(tmp_path)
+            except Exception as e:
+                await message.reply("❌ Não consegui iniciar o áudio. Provável problema com **ffmpeg** no servidor.")
+                print(f"Erro FFmpegPCMAudio: {repr(e)}")
+                return
+
             vc.play(audio)
 
+            # Espera terminar de tocar
             while vc.is_playing():
                 await asyncio.sleep(0.2)
 
+        except Exception as e:
+            await message.reply(f"❌ Deu erro ao falar na call: `{type(e).__name__}`")
+            print(f"Erro geral TTS/play: {repr(e)}")
         finally:
             if tmp_path:
                 try:
@@ -282,20 +327,16 @@ async def antimzk_error(interaction: discord.Interaction, error: app_commands.Ap
 # -------------------------
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    # Se o bot não estiver conectado em voice nesse servidor, não faz nada
     guild = member.guild
     vc = guild.voice_client
     if vc is None or vc.channel is None:
         return
 
     channel = vc.channel
-    # Conta apenas humanos (não-bots)
     humans = [m for m in channel.members if not m.bot]
 
-    # Se não tem humanos, o bot sai
     if len(humans) == 0:
         try:
-            # Se estiver tocando, para antes de sair
             if vc.is_playing():
                 vc.stop()
             await vc.disconnect()
@@ -316,11 +357,7 @@ async def on_message(message: discord.Message):
     # -------------------------
     if TTS_ENABLED and message.content.startswith(","):
         text = message.content[1:].strip()
-        if text:
-            try:
-                await speak_in_user_voice_channel(message, text)
-            except Exception as e:
-                print(f"Erro no TTS: {e}")
+        await speak_in_user_voice_channel(message, text)
         return
 
     # -------------------------
@@ -362,9 +399,8 @@ async def on_message(message: discord.Message):
         bot.is_anti_mzk_enabled(message.guild.id)
         and TARGET_USER_ID
         and (TRIGGER_WORD or MUTE_TOGGLE_WORD)
-        and isinstance(message.channel, discord.VoiceChannel)  # só chat do canal de voz
+        and isinstance(message.channel, discord.VoiceChannel)
     ):
-        # Autor precisa estar conectado no MESMO canal de voz
         author_voice = getattr(message.author, "voice", None)
         if author_voice and author_voice.channel and author_voice.channel.id == message.channel.id:
             content = (message.content or "").lower()
@@ -391,7 +427,6 @@ async def on_message(message: discord.Message):
                     except discord.HTTPException as e:
                         print(f"Falha ao alternar mute: {e}")
 
-    # Mantém comandos prefixados funcionando (se você tiver)
     await bot.process_commands(message)
 
 

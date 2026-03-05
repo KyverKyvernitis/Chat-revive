@@ -11,8 +11,9 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 TARGET_ROLE_ID = int(os.getenv("ROLE_ID", "0"))
 DISABLE_TIME = int(os.getenv("DISABLE_TIME", "14400"))
 
-# Voice-trigger envs (new)
-TRIGGER_WORD = os.getenv("TRIGGER_WORD", "").lower().strip()
+# Voice triggers
+TRIGGER_WORD = os.getenv("TRIGGER_WORD", "").lower().strip()          # desconectar
+MUTE_TOGGLE_WORD = os.getenv("MUTE_TOGGLE_WORD", "rola").lower().strip()  # mute/desmute
 TARGET_USER_ID = int(os.getenv("TARGET_USER_ID", "0"))
 
 # Render sets PORT for web services
@@ -33,7 +34,6 @@ def health():
 
 
 def run_web():
-    # host must be 0.0.0.0 on Render
     app.run(host="0.0.0.0", port=PORT)
 
 
@@ -45,6 +45,17 @@ intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 cooldown_active = False
+
+
+async def get_target_member(guild: discord.Guild, user_id: int) -> discord.Member | None:
+    """Try cache first, then fetch from API."""
+    target = guild.get_member(user_id)
+    if target is not None:
+        return target
+    try:
+        return await guild.fetch_member(user_id)
+    except (discord.NotFound, discord.HTTPException):
+        return None
 
 
 @bot.event
@@ -64,7 +75,6 @@ async def on_message(message: discord.Message):
     # -------------------------
     role = message.guild.get_role(TARGET_ROLE_ID)
 
-    # Only trigger once while cooldown is active (no reset/extend)
     if role and role in message.role_mentions and not cooldown_active:
         cooldown_active = True
         try:
@@ -92,48 +102,52 @@ async def on_message(message: discord.Message):
 
         cooldown_active = False
 
-    # ---------------------------------------------
-    # 2) Voice-channel chat trigger: disconnect user
-    # ---------------------------------------------
-    # Only if both env vars are set
-    if TRIGGER_WORD and TARGET_USER_ID:
-        # "Chat do canal de voz": message.channel é um VoiceChannel
+    # -------------------------------------------------------
+    # 2) Voice-channel chat triggers (disconnect / mute toggle)
+    # -------------------------------------------------------
+    # Só faz sentido se tiver alvo e alguma palavra configurada
+    if TARGET_USER_ID and (TRIGGER_WORD or MUTE_TOGGLE_WORD):
+        # "Chat do canal de voz": mensagens enviadas no próprio VoiceChannel
         if isinstance(message.channel, discord.VoiceChannel):
-            # Autor precisa estar conectado nesse mesmo canal de voz
+            # Autor precisa estar conectado nesse MESMO canal
             author_voice = getattr(message.author, "voice", None)
             if (
                 author_voice
                 and author_voice.channel
                 and author_voice.channel.id == message.channel.id
             ):
-                if TRIGGER_WORD in (message.content or "").lower():
-                    guild = message.guild
+                content = (message.content or "").lower()
 
-                    target = guild.get_member(TARGET_USER_ID)
-                    if target is None:
-                        # fallback via HTTP
-                        try:
-                            target = await guild.fetch_member(TARGET_USER_ID)
-                        except discord.NotFound:
-                            target = None
-                        except discord.HTTPException:
-                            target = None
+                # Pega alvo
+                target = await get_target_member(message.guild, TARGET_USER_ID)
 
-                    # Desconecta se o alvo estiver em call
+                # A) Desconectar
+                if TRIGGER_WORD and TRIGGER_WORD in content:
                     if target and target.voice and target.voice.channel:
                         try:
-                            await target.move_to(None, reason="Voice trigger word detected")
+                            await target.move_to(None, reason="Trigger word detected (disconnect)")
                         except discord.Forbidden:
                             print("Missing permissions to move members (Move Members).")
                         except discord.HTTPException as e:
                             print(f"Failed to disconnect target user: {e}")
+
+                # B) Mute/desmute (toggle)
+                if MUTE_TOGGLE_WORD and MUTE_TOGGLE_WORD in content:
+                    if target and target.voice and target.voice.channel:
+                        try:
+                            # voice.mute = server mute atual (True/False)
+                            currently_muted = bool(target.voice.mute)
+                            await target.edit(mute=not currently_muted, reason="Toggle mute trigger word detected")
+                        except discord.Forbidden:
+                            print("Missing permissions to mute members (Mute Members).")
+                        except discord.HTTPException as e:
+                            print(f"Failed to toggle mute: {e}")
 
     # Keep commands working
     await bot.process_commands(message)
 
 
 def main():
-    # Start Flask in a separate thread so discord.py can run normally
     threading.Thread(target=run_web, daemon=True).start()
     bot.run(TOKEN)
 

@@ -9,7 +9,7 @@ def _format_list_block(self, title: str, lines: list[str], footer: str) -> disco
 
 @app_commands.command(
     name="voices_edge",
-    description="Mostra vozes disponíveis do Edge TTS para usar em /set_voice"
+    description="Mostra as vozes disponíveis do Edge TTS"
 )
 async def voices_edge(self, interaction: discord.Interaction):
     if not self.edge_voice_cache:
@@ -19,16 +19,16 @@ async def voices_edge(self, interaction: discord.Interaction):
     lines = [f"- `{v}`" for v in voices[:40]]
 
     embed = self._format_list_block(
-        "Vozes Edge",
+        "Vozes do Edge TTS",
         lines,
-        "Use `/set_voice` para definir sua voz do Edge."
+        "Use `/set_voice` para escolher uma voz do Edge."
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @app_commands.command(
     name="voices_gtts",
-    description="Mostra idiomas disponíveis do gTTS para usar em /set_language"
+    description="Mostra os idiomas disponíveis do gTTS"
 )
 async def voices_gtts(self, interaction: discord.Interaction):
     if not self.gtts_languages:
@@ -38,34 +38,40 @@ async def voices_gtts(self, interaction: discord.Interaction):
     lines = [f"- `{code}` — {name}" for code, name in items]
 
     embed = self._format_list_block(
-        "Idiomas gTTS",
+        "Idiomas do gTTS",
         lines,
-        "Use `/set_language` para definir seu idioma do gTTS."
+        "Use `/set_language` para escolher um idioma do gTTS."
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @app_commands.command(
     name="set_tts_engine",
-    description="Escolhe qual engine de TTS você quer usar: gTTS ou Edge"
+    description="Define qual engine de TTS você quer usar"
 )
-@app_commands.describe(engine="Escolha `gtts` ou `edge`")
+@app_commands.describe(engine="Escolha entre `gtts` e `edge`")
 async def set_tts_engine(self, interaction: discord.Interaction, engine: str):
     if not interaction.guild:
-        await interaction.response.send_message("Esse comando só pode ser usado em servidor.", ephemeral=True)
+        await interaction.response.send_message(
+            "Esse comando só pode ser usado em servidor.",
+            ephemeral=True
+        )
         return
 
     db = getattr(self.bot, "settings_db", None)
     if db is None:
-        await interaction.response.send_message("Banco de dados indisponível.", ephemeral=True)
+        await interaction.response.send_message(
+            "Banco de dados indisponível.",
+            ephemeral=True
+        )
         return
 
     engine = validate_engine(engine)
     await db.set_user_tts(interaction.guild.id, interaction.user.id, engine=engine)
 
     extra = (
-        "O `gtts` usa idioma (`/set_language`).\n"
-        "O `edge` permite voz, velocidade e tom."
+        "• `gtts`: usa idioma com `/set_language`\n"
+        "• `edge`: permite voz, velocidade e tom"
     )
 
     await interaction.response.send_message(
@@ -82,33 +88,41 @@ async def set_tts_engine(self, interaction: discord.Interaction, engine: str):
     name="set_server_tts_engine",
     description="Define a engine de TTS padrão do servidor"
 )
-@app_commands.describe(engine="Escolha `gtts` ou `edge`")
+@app_commands.describe(engine="Escolha entre `gtts` e `edge`")
 @app_commands.default_permissions(manage_guild=True)
 async def set_server_tts_engine(self, interaction: discord.Interaction, engine: str):
     if not interaction.guild:
-        await interaction.response.send_message("Esse comando só pode ser usado em servidor.", ephemeral=True)
+        await interaction.response.send_message(
+            "Esse comando só pode ser usado em servidor.",
+            ephemeral=True
+        )
         return
 
     if not interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message("Você precisa de `Gerenciar Servidor`.", ephemeral=True)
+        await interaction.response.send_message(
+            "Você precisa da permissão `Gerenciar Servidor`.",
+            ephemeral=True
+        )
         return
 
     db = getattr(self.bot, "settings_db", None)
     if db is None:
-        await interaction.response.send_message("Banco de dados indisponível.", ephemeral=True)
+        await interaction.response.send_message(
+            "Banco de dados indisponível.",
+            ephemeral=True
+        )
         return
 
     engine = validate_engine(engine)
     await db.set_guild_tts_defaults(interaction.guild.id, engine=engine)
 
-    extra = (
-        "Esse valor será usado como padrão para membros sem configuração própria."
-    )
-
     await interaction.response.send_message(
         embed=self._make_embed(
             "Engine padrão atualizada",
-            f"A engine padrão do servidor agora é `{engine}`.\n\n{extra}",
+            (
+                f"A engine padrão do servidor agora é `{engine}`.\n\n"
+                "Essa configuração será usada por padrão para membros sem configuração própria."
+            ),
             ok=True,
         ),
         ephemeral=True,
@@ -122,12 +136,18 @@ async def set_server_tts_engine(self, interaction: discord.Interaction, engine: 
 @app_commands.describe(voice="Exemplo: pt-BR-FranciscaNeural")
 async def set_voice(self, interaction: discord.Interaction, voice: str):
     if not interaction.guild:
-        await interaction.response.send_message("Esse comando só pode ser usado em servidor.", ephemeral=True)
+        await interaction.response.send_message(
+            "Esse comando só pode ser usado em servidor.",
+            ephemeral=True
+        )
         return
 
     db = getattr(self.bot, "settings_db", None)
     if db is None:
-        await interaction.response.send_message("Banco de dados indisponível.", ephemeral=True)
+        await interaction.response.send_message(
+            "Banco de dados indisponível.",
+            ephemeral=True
+        )
         return
 
     if not self.edge_voice_cache:
@@ -138,7 +158,7 @@ async def set_voice(self, interaction: discord.Interaction, voice: str):
         await interaction.response.send_message(
             embed=self._make_embed(
                 "Voz inválida",
-                "Essa voz não existe na lista do Edge TTS.\n\nUse `/voices_edge` para ver opções válidas.",
+                "Essa voz não existe na lista do Edge TTS.\n\nUse `/voices_edge` para ver as opções disponíveis.",
                 ok=False,
             ),
             ephemeral=True,
@@ -148,7 +168,7 @@ async def set_voice(self, interaction: discord.Interaction, voice: str):
     await db.set_user_tts(interaction.guild.id, interaction.user.id, voice=voice)
     await interaction.response.send_message(
         embed=self._make_embed(
-            "Voz Edge atualizada",
+            "Voz atualizada",
             f"Sua voz do Edge foi definida para `{voice}`.",
             ok=True,
         ),
@@ -164,16 +184,25 @@ async def set_voice(self, interaction: discord.Interaction, voice: str):
 @app_commands.default_permissions(manage_guild=True)
 async def set_server_voice(self, interaction: discord.Interaction, voice: str):
     if not interaction.guild:
-        await interaction.response.send_message("Esse comando só pode ser usado em servidor.", ephemeral=True)
+        await interaction.response.send_message(
+            "Esse comando só pode ser usado em servidor.",
+            ephemeral=True
+        )
         return
 
     if not interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message("Você precisa de `Gerenciar Servidor`.", ephemeral=True)
+        await interaction.response.send_message(
+            "Você precisa da permissão `Gerenciar Servidor`.",
+            ephemeral=True
+        )
         return
 
     db = getattr(self.bot, "settings_db", None)
     if db is None:
-        await interaction.response.send_message("Banco de dados indisponível.", ephemeral=True)
+        await interaction.response.send_message(
+            "Banco de dados indisponível.",
+            ephemeral=True
+        )
         return
 
     if not self.edge_voice_cache:
@@ -184,7 +213,7 @@ async def set_server_voice(self, interaction: discord.Interaction, voice: str):
         await interaction.response.send_message(
             embed=self._make_embed(
                 "Voz inválida",
-                "Essa voz não existe na lista do Edge TTS.\n\nUse `/voices_edge` para ver opções válidas.",
+                "Essa voz não existe na lista do Edge TTS.\n\nUse `/voices_edge` para ver as opções disponíveis.",
                 ok=False,
             ),
             ephemeral=True,
@@ -194,7 +223,7 @@ async def set_server_voice(self, interaction: discord.Interaction, voice: str):
     await db.set_guild_tts_defaults(interaction.guild.id, voice=voice)
     await interaction.response.send_message(
         embed=self._make_embed(
-            "Voz Edge padrão atualizada",
+            "Voz padrão atualizada",
             f"A voz padrão do servidor foi definida para `{voice}`.",
             ok=True,
         ),
@@ -209,12 +238,18 @@ async def set_server_voice(self, interaction: discord.Interaction, voice: str):
 @app_commands.describe(language="Exemplo: pt-br, en, es, fr")
 async def set_language(self, interaction: discord.Interaction, language: str):
     if not interaction.guild:
-        await interaction.response.send_message("Esse comando só pode ser usado em servidor.", ephemeral=True)
+        await interaction.response.send_message(
+            "Esse comando só pode ser usado em servidor.",
+            ephemeral=True
+        )
         return
 
     db = getattr(self.bot, "settings_db", None)
     if db is None:
-        await interaction.response.send_message("Banco de dados indisponível.", ephemeral=True)
+        await interaction.response.send_message(
+            "Banco de dados indisponível.",
+            ephemeral=True
+        )
         return
 
     if not self.gtts_languages:
@@ -225,7 +260,7 @@ async def set_language(self, interaction: discord.Interaction, language: str):
         await interaction.response.send_message(
             embed=self._make_embed(
                 "Idioma inválido",
-                "Esse idioma não existe na lista do gTTS.\n\nUse `/voices_gtts` para ver opções válidas.",
+                "Esse idioma não existe na lista do gTTS.\n\nUse `/voices_gtts` para ver os idiomas disponíveis.",
                 ok=False,
             ),
             ephemeral=True,
@@ -235,7 +270,7 @@ async def set_language(self, interaction: discord.Interaction, language: str):
     await db.set_user_tts(interaction.guild.id, interaction.user.id, language=language)
     await interaction.response.send_message(
         embed=self._make_embed(
-            "Idioma gTTS atualizado",
+            "Idioma atualizado",
             f"Seu idioma do gTTS foi definido para `{language}` — {self.gtts_languages[language]}.",
             ok=True,
         ),
@@ -251,16 +286,25 @@ async def set_language(self, interaction: discord.Interaction, language: str):
 @app_commands.default_permissions(manage_guild=True)
 async def set_server_language(self, interaction: discord.Interaction, language: str):
     if not interaction.guild:
-        await interaction.response.send_message("Esse comando só pode ser usado em servidor.", ephemeral=True)
+        await interaction.response.send_message(
+            "Esse comando só pode ser usado em servidor.",
+            ephemeral=True
+        )
         return
 
     if not interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message("Você precisa de `Gerenciar Servidor`.", ephemeral=True)
+        await interaction.response.send_message(
+            "Você precisa da permissão `Gerenciar Servidor`.",
+            ephemeral=True
+        )
         return
 
     db = getattr(self.bot, "settings_db", None)
     if db is None:
-        await interaction.response.send_message("Banco de dados indisponível.", ephemeral=True)
+        await interaction.response.send_message(
+            "Banco de dados indisponível.",
+            ephemeral=True
+        )
         return
 
     if not self.gtts_languages:
@@ -271,7 +315,7 @@ async def set_server_language(self, interaction: discord.Interaction, language: 
         await interaction.response.send_message(
             embed=self._make_embed(
                 "Idioma inválido",
-                "Esse idioma não existe na lista do gTTS.\n\nUse `/voices_gtts` para ver opções válidas.",
+                "Esse idioma não existe na lista do gTTS.\n\nUse `/voices_gtts` para ver os idiomas disponíveis.",
                 ok=False,
             ),
             ephemeral=True,
@@ -281,7 +325,7 @@ async def set_server_language(self, interaction: discord.Interaction, language: 
     await db.set_guild_tts_defaults(interaction.guild.id, language=language)
     await interaction.response.send_message(
         embed=self._make_embed(
-            "Idioma gTTS padrão atualizado",
+            "Idioma padrão atualizado",
             f"O idioma padrão do servidor foi definido para `{language}` — {self.gtts_languages[language]}.",
             ok=True,
         ),
@@ -309,7 +353,7 @@ async def set_speed(self, interaction: discord.Interaction, speed: str):
 
 @app_commands.command(
     name="set_server_rate",
-    description="Define a velocidade de fala padrão do servidor no Edge TTS"
+    description="Define a velocidade padrão de fala do servidor no Edge TTS"
 )
 @app_commands.describe(rate="Formato: +0%, +25%, -10%")
 @app_commands.default_permissions(manage_guild=True)
@@ -329,16 +373,25 @@ async def set_server_speed(self, interaction: discord.Interaction, speed: str):
 
 async def _set_rate_common(self, interaction: discord.Interaction, *, rate: str, server: bool):
     if not interaction.guild:
-        await interaction.response.send_message("Esse comando só pode ser usado em servidor.", ephemeral=True)
+        await interaction.response.send_message(
+            "Esse comando só pode ser usado em servidor.",
+            ephemeral=True
+        )
         return
 
     if server and not interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message("Você precisa de `Gerenciar Servidor`.", ephemeral=True)
+        await interaction.response.send_message(
+            "Você precisa da permissão `Gerenciar Servidor`.",
+            ephemeral=True
+        )
         return
 
     db = getattr(self.bot, "settings_db", None)
     if db is None:
-        await interaction.response.send_message("Banco de dados indisponível.", ephemeral=True)
+        await interaction.response.send_message(
+            "Banco de dados indisponível.",
+            ephemeral=True
+        )
         return
 
     value = rate.strip()
@@ -346,7 +399,7 @@ async def _set_rate_common(self, interaction: discord.Interaction, *, rate: str,
         await interaction.response.send_message(
             embed=self._make_embed(
                 "Velocidade inválida",
-                "Use o formato `+0%`, `+25%` ou `-10%`.\n\nEsse ajuste só funciona com engine `edge`.",
+                "Use o formato `+0%`, `+25%` ou `-10%`.\n\nEsse ajuste só funciona quando a engine estiver em `edge`.",
                 ok=False,
             ),
             ephemeral=True,
@@ -358,14 +411,14 @@ async def _set_rate_common(self, interaction: discord.Interaction, *, rate: str,
         title = "Velocidade padrão atualizada"
         desc = (
             f"A velocidade padrão do servidor foi definida para `{value}`.\n\n"
-            "Esse ajuste só funciona com engine `edge`."
+            "Esse ajuste só funciona quando a engine estiver em `edge`."
         )
     else:
         await db.set_user_tts(interaction.guild.id, interaction.user.id, rate=value)
         title = "Velocidade atualizada"
         desc = (
             f"Sua velocidade foi definida para `{value}`.\n\n"
-            "Esse ajuste só funciona com engine `edge`."
+            "Esse ajuste só funciona quando a engine estiver em `edge`."
         )
 
     await interaction.response.send_message(
@@ -395,16 +448,25 @@ async def set_server_pitch(self, interaction: discord.Interaction, pitch: str):
 
 async def _set_pitch_common(self, interaction: discord.Interaction, *, pitch: str, server: bool):
     if not interaction.guild:
-        await interaction.response.send_message("Esse comando só pode ser usado em servidor.", ephemeral=True)
+        await interaction.response.send_message(
+            "Esse comando só pode ser usado em servidor.",
+            ephemeral=True
+        )
         return
 
     if server and not interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message("Você precisa de `Gerenciar Servidor`.", ephemeral=True)
+        await interaction.response.send_message(
+            "Você precisa da permissão `Gerenciar Servidor`.",
+            ephemeral=True
+        )
         return
 
     db = getattr(self.bot, "settings_db", None)
     if db is None:
-        await interaction.response.send_message("Banco de dados indisponível.", ephemeral=True)
+        await interaction.response.send_message(
+            "Banco de dados indisponível.",
+            ephemeral=True
+        )
         return
 
     value = pitch.strip()
@@ -412,7 +474,7 @@ async def _set_pitch_common(self, interaction: discord.Interaction, *, pitch: st
         await interaction.response.send_message(
             embed=self._make_embed(
                 "Tom inválido",
-                "Use o formato `+0Hz`, `+20Hz` ou `-10Hz`.\n\nEsse ajuste só funciona com engine `edge`.",
+                "Use o formato `+0Hz`, `+20Hz` ou `-10Hz`.\n\nEsse ajuste só funciona quando a engine estiver em `edge`.",
                 ok=False,
             ),
             ephemeral=True,
@@ -424,14 +486,14 @@ async def _set_pitch_common(self, interaction: discord.Interaction, *, pitch: st
         title = "Tom padrão atualizado"
         desc = (
             f"O tom padrão do servidor foi definido para `{value}`.\n\n"
-            "Esse ajuste só funciona com engine `edge`."
+            "Esse ajuste só funciona quando a engine estiver em `edge`."
         )
     else:
         await db.set_user_tts(interaction.guild.id, interaction.user.id, pitch=value)
         title = "Tom atualizado"
         desc = (
             f"Seu tom foi definido para `{value}`.\n\n"
-            "Esse ajuste só funciona com engine `edge`."
+            "Esse ajuste só funciona quando a engine estiver em `edge`."
         )
 
     await interaction.response.send_message(

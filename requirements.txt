@@ -3,3 +3,4 @@ flask
 motor
 edge-tts
 gTTS
+psutil

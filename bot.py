@@ -13,7 +13,6 @@ import config
 from db import SettingsDB
 from webserver import create_app
 
-
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
@@ -25,9 +24,11 @@ class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
         self.settings_db: SettingsDB | None = None
+        self.started_at = None
 
     async def setup_hook(self):
         print("SETUP_HOOK INICIOU")
+        self.started_at = discord.utils.utcnow()
 
         if not config.MONGODB_URI:
             raise RuntimeError("Faltou MONGODB_URI")
@@ -43,6 +44,7 @@ class MyBot(commands.Bot):
         await self.load_extension("cogs.role_cooldown")
         await self.load_extension("cogs.antimzk")
         await self.load_extension("cogs.tts_voice")
+        await self.load_extension("cogs.utility")
 
         if config.GUILD_IDS:
             for gid in config.GUILD_IDS:
@@ -67,7 +69,6 @@ async def on_app_command_error(
     traceback.print_exception(type(error), error, error.__traceback__)
 
     msg = f"Erro ao executar o comando: `{error}`"
-
     try:
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
@@ -98,5 +99,4 @@ async def main():
 if __name__ == "__main__":
     if not config.TOKEN:
         raise RuntimeError("Faltou DISCORD_TOKEN")
-
     asyncio.run(main())

@@ -8,12 +8,10 @@ class SettingsDB:
         self.db = self.client[db_name]
         self.coll = self.db[coll_name]
 
-        # cache em memória
         self.guild_cache: Dict[int, Dict[str, Any]] = {}
         self.user_cache: Dict[tuple[int, int], Dict[str, Any]] = {}  # (guild_id, user_id)
 
     async def init(self):
-        # índices
         try:
             await self.coll.create_index("type")
             await self.coll.create_index([("guild_id", 1), ("type", 1)], unique=False)
@@ -65,6 +63,7 @@ class SettingsDB:
         g = self.guild_cache.get(guild_id, {})
         tts = g.get("tts_defaults", {}) or {}
         return {
+            "engine": str(tts.get("engine", "") or ""),
             "voice": str(tts.get("voice", "") or ""),
             "rate": str(tts.get("rate", "") or ""),
             "pitch": str(tts.get("pitch", "") or ""),
@@ -74,6 +73,7 @@ class SettingsDB:
         self,
         guild_id: int,
         *,
+        engine: Optional[str] = None,
         voice: Optional[str] = None,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
@@ -83,6 +83,8 @@ class SettingsDB:
         doc["guild_id"] = guild_id
 
         tts = doc.get("tts_defaults", {}) or {}
+        if engine is not None:
+            tts["engine"] = engine
         if voice is not None:
             tts["voice"] = voice
         if rate is not None:
@@ -106,6 +108,7 @@ class SettingsDB:
         u = self.user_cache.get((guild_id, user_id), {})
         tts = u.get("tts", {}) or {}
         return {
+            "engine": str(tts.get("engine", "") or ""),
             "voice": str(tts.get("voice", "") or ""),
             "rate": str(tts.get("rate", "") or ""),
             "pitch": str(tts.get("pitch", "") or ""),
@@ -116,6 +119,7 @@ class SettingsDB:
         guild_id: int,
         user_id: int,
         *,
+        engine: Optional[str] = None,
         voice: Optional[str] = None,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
@@ -127,6 +131,8 @@ class SettingsDB:
         doc["user_id"] = user_id
 
         tts = doc.get("tts", {}) or {}
+        if engine is not None:
+            tts["engine"] = engine
         if voice is not None:
             tts["voice"] = voice
         if rate is not None:
@@ -153,7 +159,12 @@ class SettingsDB:
         def pick(k: str, fallback: str) -> str:
             return (user.get(k) or "").strip() or (guild.get(k) or "").strip() or fallback
 
+        engine = pick("engine", "gtts").lower()
+        if engine not in ("edge", "gtts"):
+            engine = "gtts"
+
         return {
+            "engine": engine,
             "voice": pick("voice", "pt-BR-FranciscaNeural"),
             "rate": pick("rate", "+0%"),
             "pitch": pick("pitch", "+0Hz"),

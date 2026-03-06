@@ -26,29 +26,25 @@ class AntiMzkCog(commands.Cog):
             description="✅ Censura anti-mzk ativada" if new_value else "❌ Censura anti-mzk desativada",
             color=discord.Color(ON_COLOR) if new_value else discord.Color(OFF_COLOR),
         )
-        await interaction.response.send_message(embed=embed)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @antimzk.error
     async def antimzk_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingPermissions):
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    "Você não tem permissão (precisa de **Mover Membros**).",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    "Você não tem permissão (precisa de **Mover Membros**).",
-                    ephemeral=True,
-                )
-            return
-
         print(f"Erro no /antimzk: {repr(error)}")
 
-        if interaction.response.is_done():
-            await interaction.followup.send("Ocorreu um erro.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Ocorreu um erro.", ephemeral=True)
+        msg = "Ocorreu um erro."
+
+        if isinstance(error, app_commands.MissingPermissions):
+            msg = "Você não tem permissão (precisa de **Mover Membros**)."
+
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except Exception as followup_error:
+            print(f"Falha ao responder erro do /antimzk: {repr(followup_error)}")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

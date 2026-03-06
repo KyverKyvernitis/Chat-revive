@@ -23,12 +23,12 @@ class MyBot(commands.Bot):
         self.settings_db = SettingsDB(config.MONGODB_URI, config.MONGODB_DB, config.MONGODB_COLLECTION)
         await self.settings_db.init()
 
-        # Carregar cogs
+        # Cogs
         await self.load_extension("cogs.role_cooldown")
         await self.load_extension("cogs.antimzk")
         await self.load_extension("cogs.tts_voice")
 
-        # Sync rápido por guild (aqui é o lugar certo)
+        # Sync rápido por guild
         for gid in config.GUILD_IDS:
             guild_obj = discord.Object(id=gid)
             self.tree.copy_global_to(guild=guild_obj)

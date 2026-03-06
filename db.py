@@ -39,7 +39,7 @@ class SettingsDB:
                 self.user_cache[(gid, uid)] = doc
 
     # -------------------------
-    # anti-mzk (igual antes)
+    # anti-mzk
     # -------------------------
     def anti_mzk_enabled(self, guild_id: int) -> bool:
         g = self.guild_cache.get(guild_id, {})

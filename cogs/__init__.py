@@ -1,1 +1,0 @@
-# pacote de cogs

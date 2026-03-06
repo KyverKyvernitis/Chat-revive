@@ -1,8 +1,7 @@
 import asyncio
-import inspect
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import discord
@@ -12,9 +11,8 @@ from gtts import gTTS
 import config
 from tts_helpers import validate_voice
 
-
+TTS_IDLE_DISCONNECT_SECONDS = getattr(config, "TTS_IDLE_DISCONNECT_SECONDS", 30)
 GTTS_DEFAULT_LANGUAGE = getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
-TTS_IDLE_DISCONNECT_SECONDS = getattr(config, "TTS_IDLE_DISCONNECT_SECONDS", 180)
 
 
 @dataclass
@@ -32,29 +30,12 @@ class QueueItem:
 
 @dataclass
 class GuildTTSState:
-    queue: asyncio.Queue
+    queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     worker_task: Optional[asyncio.Task] = None
     last_text_channel_id: Optional[int] = None
 
 
 class TTSAudioMixin:
-    def _get_state(self, guild_id: int) -> GuildTTSState:
-        state = self.guild_states.get(guild_id)
-        if state is None:
-            state = GuildTTSState(queue=asyncio.Queue())
-            self.guild_states[guild_id] = state
-        return state
-
-    def _ensure_worker(self, guild_id: int) -> None:
-        state = self._get_state(guild_id)
-        if state.worker_task is None or state.worker_task.done():
-            state.worker_task = asyncio.create_task(self._worker_loop(guild_id))
-
-    async def _maybe_await(self, value):
-        if inspect.isawaitable(value):
-            return await value
-        return value
-
     def _normalize_edge_rate(self, raw: str) -> str:
         value = str(raw or "").strip()
         value = value.replace("％", "%").replace("−", "-").replace("–", "-").replace("—", "-")
@@ -82,7 +63,8 @@ class TTSAudioMixin:
         value = value.replace("−", "-").replace("–", "-").replace("—", "-")
         value = value.replace(" ", "")
 
-        if value.lower().endswith("hz"):
+        lower = value.lower()
+        if lower.endswith("hz"):
             value = value[:-2]
 
         if not value:
@@ -186,85 +168,78 @@ class TTSAudioMixin:
             item.language or GTTS_DEFAULT_LANGUAGE,
         )
 
-    async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:
+    def _get_state(self, guild_id: int) -> GuildTTSState:
+        if not hasattr(self, "_tts_states"):
+            self._tts_states = {}
+        state = self._tts_states.get(guild_id)
+        if state is None:
+            state = GuildTTSState()
+            self._tts_states[guild_id] = state
+        return state
+
+    def _ensure_worker(self, guild_id: int) -> None:
+        state = self._get_state(guild_id)
+        if state.worker_task is None or state.worker_task.done():
+            state.worker_task = asyncio.create_task(self._worker_loop(guild_id))
+
+    async def _play_file(self, voice_client: discord.VoiceClient, path: str) -> None:
         loop = asyncio.get_running_loop()
         finished = loop.create_future()
 
-        def _after_playback(error: Optional[Exception]) -> None:
+        def _after_play(error: Optional[Exception]):
             if error:
-                loop.call_soon_threadsafe(finished.set_exception, error)
+                if not finished.done():
+                    loop.call_soon_threadsafe(finished.set_exception, error)
             else:
-                loop.call_soon_threadsafe(finished.set_result, None)
+                if not finished.done():
+                    loop.call_soon_threadsafe(finished.set_result, None)
 
         source = discord.FFmpegPCMAudio(path)
-        vc.play(source, after=_after_playback)
+        voice_client.play(source, after=_after_play)
         await finished
-
-    async def _disconnect_idle(self, guild: discord.Guild) -> None:
-        vc = guild.voice_client
-        if vc and vc.is_connected():
-            try:
-                await vc.disconnect(force=False)
-                print(f"[tts_voice] Desconectado por inatividade | guild={guild.id}")
-            except Exception as e:
-                print(f"[tts_voice] Erro ao desconectar por inatividade na guild {guild.id}: {e}")
 
     async def _worker_loop(self, guild_id: int) -> None:
         state = self._get_state(guild_id)
 
-        try:
-            while True:
+        while True:
+            try:
+                item: QueueItem = await asyncio.wait_for(
+                    state.queue.get(),
+                    timeout=TTS_IDLE_DISCONNECT_SECONDS,
+                )
+            except asyncio.TimeoutError:
                 guild = self.bot.get_guild(guild_id)
-                if guild is None:
-                    print(f"[tts_voice] Guild não encontrada no worker | guild={guild_id}")
-                    return
-
-                try:
-                    item = await asyncio.wait_for(
-                        state.queue.get(),
-                        timeout=TTS_IDLE_DISCONNECT_SECONDS,
-                    )
-                except asyncio.TimeoutError:
-                    await self._disconnect_idle(guild)
-                    return
-
-                try:
-                    if hasattr(self, "_should_block_for_voice_bot"):
-                        target_channel = guild.get_channel(item.channel_id)
-                        if target_channel is not None:
-                            blocked = await self._maybe_await(
-                                self._should_block_for_voice_bot(guild, target_channel)
-                            )
-                            if blocked:
-                                print(
-                                    f"[tts_voice] Worker bloqueado por outro bot de voz | "
-                                    f"guild={guild_id} channel={item.channel_id}"
-                                )
-                                if hasattr(self, "_disconnect_if_blocked"):
-                                    await self._maybe_await(self._disconnect_if_blocked(guild))
-                                continue
-
-                    vc = await self._maybe_await(
-                        self._ensure_connected(guild, guild.get_channel(item.channel_id))
-                    )
-                    if vc is None:
-                        print(
-                            f"[tts_voice] Worker não conseguiu conectar | "
-                            f"guild={guild_id} channel={item.channel_id}"
-                        )
-                        continue
-
-                    path = await self._generate_audio_file(item)
+                if guild and guild.voice_client and guild.voice_client.is_connected():
                     try:
-                        await self._play_file(vc, path)
-                    finally:
-                        try:
-                            os.remove(path)
-                        except Exception:
-                            pass
-                except Exception as e:
-                    print(f"[tts_voice] Erro no worker da guild {guild_id}: {e}")
-                finally:
-                    state.queue.task_done()
-        finally:
-            state.worker_task = None
+                        await guild.voice_client.disconnect(force=True)
+                    except Exception:
+                        pass
+                state.worker_task = None
+                return
+
+            guild = self.bot.get_guild(item.guild_id)
+            if guild is None:
+                continue
+
+            channel = guild.get_channel(item.channel_id)
+            if channel is None:
+                print(f"[tts_voice] Canal de voz não encontrado | guild={item.guild_id} channel={item.channel_id}")
+                continue
+
+            vc = await self._ensure_connected(guild, channel)
+            if vc is None:
+                print(f"[tts_voice] Worker não conseguiu conectar | guild={item.guild_id} channel={item.channel_id}")
+                continue
+
+            audio_path = None
+            try:
+                audio_path = await self._generate_audio_file(item)
+                await self._play_file(vc, audio_path)
+            except Exception as e:
+                print(f"[tts_voice] Erro no worker da guild {guild_id}: {e}")
+            finally:
+                if audio_path:
+                    try:
+                        os.remove(audio_path)
+                    except Exception:
+                        pass

@@ -38,7 +38,6 @@ class MyBot(commands.Bot):
         await self.load_extension("cogs.antimzk")
         await self.load_extension("cogs.tts_voice")
 
-        # Sync por guild quando GUILD_IDS estiver configurado
         if config.GUILD_IDS:
             for gid in config.GUILD_IDS:
                 guild_obj = discord.Object(id=gid)
@@ -46,7 +45,6 @@ class MyBot(commands.Bot):
                 await self.tree.sync(guild=guild_obj)
                 print(f"[SYNC] Slash commands sincronizados na guild {gid}")
         else:
-            # Sync global se não houver guilds configuradas
             await self.tree.sync()
             print("[SYNC] Slash commands sincronizados globalmente")
 

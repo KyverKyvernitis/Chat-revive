@@ -36,9 +36,6 @@ class SettingsDB:
                 uid = int(doc["user_id"])
                 self.user_cache[(gid, uid)] = doc
 
-    # -------------------------
-    # anti-mzk
-    # -------------------------
     def anti_mzk_enabled(self, guild_id: int) -> bool:
         g = self.guild_cache.get(guild_id, {})
         return bool(g.get("anti_mzk_enabled", True))
@@ -56,9 +53,6 @@ class SettingsDB:
             upsert=True,
         )
 
-    # -------------------------
-    # bloqueio por outro bot de voz
-    # -------------------------
     def block_voice_bot_enabled(self, guild_id: int) -> bool:
         g = self.guild_cache.get(guild_id, {})
         return bool(g.get("block_voice_bot_enabled", True))
@@ -76,9 +70,6 @@ class SettingsDB:
             upsert=True,
         )
 
-    # -------------------------
-    # TTS defaults do servidor
-    # -------------------------
     def get_guild_tts_defaults(self, guild_id: int) -> Dict[str, str]:
         g = self.guild_cache.get(guild_id, {})
         tts = g.get("tts_defaults", {}) or {}
@@ -121,9 +112,6 @@ class SettingsDB:
             upsert=True,
         )
 
-    # -------------------------
-    # TTS overrides por usuário
-    # -------------------------
     def get_user_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
         u = self.user_cache.get((guild_id, user_id), {})
         tts = u.get("tts", {}) or {}
@@ -169,9 +157,6 @@ class SettingsDB:
             upsert=True,
         )
 
-    # -------------------------
-    # Resolve config final
-    # -------------------------
     def resolve_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
         user = self.get_user_tts(guild_id, user_id)
         guild = self.get_guild_tts_defaults(guild_id)

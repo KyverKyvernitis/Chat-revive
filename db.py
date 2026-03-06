@@ -54,6 +54,10 @@ class SettingsDB:
             upsert=True,
         )
 
+    # =========================
+    # Anti-MZK
+    # =========================
+
     def anti_mzk_enabled(self, guild_id: int) -> bool:
         g = self.guild_cache.get(guild_id, {})
         return bool(g.get("anti_mzk_enabled", True))
@@ -63,6 +67,10 @@ class SettingsDB:
         doc["anti_mzk_enabled"] = bool(value)
         await self._save_guild_doc(guild_id, doc)
 
+    # =========================
+    # Block voice bot
+    # =========================
+
     def block_voice_bot_enabled(self, guild_id: int) -> bool:
         g = self.guild_cache.get(guild_id, {})
         return bool(g.get("block_voice_bot_enabled", True))
@@ -71,6 +79,10 @@ class SettingsDB:
         doc = self._get_guild_doc(guild_id)
         doc["block_voice_bot_enabled"] = bool(value)
         await self._save_guild_doc(guild_id, doc)
+
+    # =========================
+    # Guild TTS defaults
+    # =========================
 
     def get_guild_tts_defaults(self, guild_id: int) -> Dict[str, str]:
         g = self.guild_cache.get(guild_id, {})
@@ -105,6 +117,10 @@ class SettingsDB:
 
         doc["tts_defaults"] = tts
         await self._save_guild_doc(guild_id, doc)
+
+    # =========================
+    # User TTS
+    # =========================
 
     def get_user_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
         u = self.user_cache.get((guild_id, user_id), {})

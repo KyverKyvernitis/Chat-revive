@@ -17,10 +17,9 @@ from tts_helpers import (
     make_embed,
     validate_engine,
 )
-from tts_voice_events import TTSVoiceEventsMixin
 
 
-class TTSVoice(TTSAudioMixin, TTSVoiceEventsMixin, commands.Cog):
+class TTSVoice(TTSAudioMixin, commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.guild_states: dict[int, GuildTTSState] = {}
@@ -77,6 +76,174 @@ class TTSVoice(TTSAudioMixin, TTSVoiceEventsMixin, commands.Cog):
             await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
         else:
             await interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+
+    def _get_db(self):
+        return getattr(self.bot, "settings_db", None)
+
+    def _target_voice_bot_in_channel(self, voice_channel: discord.abc.Connectable) -> bool:
+        if not BLOCK_VOICE_BOT_ID:
+            return False
+        for member in getattr(voice_channel, "members", []):
+            if member.id == BLOCK_VOICE_BOT_ID:
+                return True
+        return False
+
+    def _guild_state(self, guild_id: int) -> GuildTTSState:
+        state = self.guild_states.get(guild_id)
+        if state is None:
+            state = GuildTTSState()
+            self.guild_states[guild_id] = state
+        return state
+
+    async def _is_block_voice_bot_enabled(self, guild_id: int) -> bool:
+        db = self._get_db()
+        if db is None:
+            return False
+        try:
+            value = db.block_voice_bot_enabled(guild_id)
+            if asyncio.iscoroutine(value):
+                value = await value
+            return bool(value)
+        except Exception as e:
+            print(f"[tts_voice] Erro ao ler block_voice_bot_enabled da guild {guild_id}: {e}")
+            return False
+
+    async def _should_block_for_voice_bot(self, guild: discord.Guild, voice_channel: discord.abc.Connectable) -> bool:
+        if not await self._is_block_voice_bot_enabled(guild.id):
+            return False
+        return self._target_voice_bot_in_channel(voice_channel)
+
+    async def _disconnect_and_clear(self, guild: discord.Guild):
+        state = self._guild_state(guild.id)
+        try:
+            while not state.queue.empty():
+                state.queue.get_nowait()
+        except Exception:
+            pass
+
+        vc = guild.voice_client
+        if vc and vc.is_connected():
+            try:
+                if vc.is_playing():
+                    vc.stop()
+            except Exception:
+                pass
+            try:
+                await vc.disconnect(force=False)
+            except Exception as e:
+                print(f"[tts_voice] Erro ao desconectar e limpar na guild {guild.id}: {e}")
+
+    async def _disconnect_if_blocked(self, guild: discord.Guild):
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected() or vc.channel is None:
+            return
+        if await self._should_block_for_voice_bot(guild, vc.channel):
+            print(
+                f"[tts_voice] Saindo da call por bloqueio de bot de voz | "
+                f"guild={guild.id} channel={vc.channel.id} target_bot_id={BLOCK_VOICE_BOT_ID}"
+            )
+            await self._disconnect_and_clear(guild)
+
+    async def _ensure_connected(self, guild: discord.Guild, voice_channel: discord.abc.Connectable):
+        vc = guild.voice_client
+
+        if vc and vc.channel and vc.channel.id == voice_channel.id and vc.is_connected():
+            return vc
+
+        try:
+            if vc and vc.is_connected():
+                await vc.move_to(voice_channel)
+                print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                return vc
+
+            new_vc = await voice_channel.connect(self_deaf=True)
+            print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
+            return new_vc
+        except Exception as e:
+            print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
+            return None
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild or not message.content:
+            return
+
+        if not message.content.startswith(','):
+            return
+
+        print(
+            f"[tts_voice] on_message recebido | guild={message.guild.id} "
+            f"channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}"
+        )
+
+        author_voice = getattr(message.author, 'voice', None)
+        if author_voice is None or author_voice.channel is None:
+            print(f"[tts_voice] Ignorado | usuário não está em call | guild={message.guild.id} user={message.author.id}")
+            return
+
+        voice_channel = author_voice.channel
+
+        if await self._should_block_for_voice_bot(message.guild, voice_channel):
+            await self._disconnect_if_blocked(message.guild)
+            print(f"[tts_voice] Ignorado por bloqueio de bot de voz | guild={message.guild.id}")
+            return
+
+        db = self._get_db()
+        if db is None:
+            print('[tts_voice] settings_db indisponível')
+            return
+
+        resolved = db.resolve_tts(message.guild.id, message.author.id)
+        if asyncio.iscoroutine(resolved):
+            resolved = await resolved
+
+        text = message.content[1:].strip()
+        if not text:
+            return
+
+        state = self._guild_state(message.guild.id)
+        state.last_text_channel_id = getattr(message.channel, 'id', None)
+
+        from tts_audio import QueueItem
+
+        await state.queue.put(
+            QueueItem(
+                guild_id=message.guild.id,
+                channel_id=voice_channel.id,
+                author_id=message.author.id,
+                text=text,
+                engine=resolved['engine'],
+                voice=resolved['voice'],
+                language=resolved['language'],
+                rate=resolved['rate'],
+                pitch=resolved['pitch'],
+            )
+        )
+
+        print(
+            f"[tts_voice] Mensagem enfileirada | guild={message.guild.id} user={message.author.id} "
+            f"msg_channel={getattr(message.channel, 'id', None)} canal_voz={voice_channel.id} "
+            f"engine={resolved['engine']} texto={text!r}"
+        )
+
+        self._ensure_worker(message.guild.id)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        guild = member.guild
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected() or vc.channel is None:
+            return
+
+        if not await self._is_block_voice_bot_enabled(guild.id):
+            return
+
+        if self._target_voice_bot_in_channel(vc.channel):
+            print(
+                f"[tts_voice] Bot de voz alvo detectado na call | "
+                f"guild={guild.id} channel={vc.channel.id} target_bot_id={BLOCK_VOICE_BOT_ID}"
+            )
+            await self._disconnect_and_clear(guild)
 
     @app_commands.command(name="tts_status", description="Mostra as configurações atuais de TTS")
     async def tts_status(self, interaction: discord.Interaction):

@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import asyncio
+import inspect
 import os
 import tempfile
 from dataclasses import dataclass
@@ -10,13 +9,8 @@ import discord
 import edge_tts
 from gtts import gTTS
 
-from tts_helpers import (
-    GTTS_DEFAULT_LANGUAGE,
-    validate_language,
-    validate_pitch,
-    validate_rate,
-    validate_voice,
-)
+from config import GTTS_DEFAULT_LANGUAGE, TTS_IDLE_DISCONNECT_SECONDS
+from tts_helpers import validate_voice
 
 
 @dataclass
@@ -32,25 +26,92 @@ class QueueItem:
     pitch: str
 
 
+@dataclass
 class GuildTTSState:
-    def __init__(self):
-        self.queue: asyncio.Queue[QueueItem] = asyncio.Queue()
-        self.worker_task: Optional[asyncio.Task] = None
-        self.last_text_channel_id: Optional[int] = None
+    queue: asyncio.Queue
+    worker_task: Optional[asyncio.Task] = None
+    last_text_channel_id: Optional[int] = None
 
 
 class TTSAudioMixin:
-    guild_states: dict[int, GuildTTSState]
-    edge_voice_names: set[str]
-    gtts_languages: dict[str, str]
-    bot: discord.Client
-
     def _get_state(self, guild_id: int) -> GuildTTSState:
         state = self.guild_states.get(guild_id)
         if state is None:
-            state = GuildTTSState()
+            state = GuildTTSState(queue=asyncio.Queue())
             self.guild_states[guild_id] = state
         return state
+
+    def _ensure_worker(self, guild_id: int) -> None:
+        state = self._get_state(guild_id)
+        if state.worker_task is None or state.worker_task.done():
+            state.worker_task = asyncio.create_task(self._worker_loop(guild_id))
+
+    async def _maybe_await(self, value):
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    def _normalize_edge_rate(self, raw: str) -> str:
+        value = str(raw or "").strip()
+        value = value.replace("％", "%").replace("−", "-").replace("–", "-").replace("—", "-")
+        value = value.replace(" ", "")
+
+        if value.endswith("%"):
+            value = value[:-1]
+
+        if not value:
+            return "+0%"
+
+        if value[0] not in "+-":
+            value = f"+{value}"
+
+        sign = value[0]
+        number = value[1:]
+
+        if not number.isdigit():
+            return "+0%"
+
+        return f"{sign}{number}%"
+
+    def _normalize_edge_pitch(self, raw: str) -> str:
+        value = str(raw or "").strip()
+        value = value.replace("−", "-").replace("–", "-").replace("—", "-")
+        value = value.replace(" ", "")
+
+        if value.lower().endswith("hz"):
+            value = value[:-2]
+
+        if not value:
+            return "+0Hz"
+
+        if value[0] not in "+-":
+            value = f"+{value}"
+
+        sign = value[0]
+        number = value[1:]
+
+        if not number.isdigit():
+            return "+0Hz"
+
+        return f"{sign}{number}Hz"
+
+    async def _generate_gtts_file(self, text: str, language: str) -> str:
+        language = (language or GTTS_DEFAULT_LANGUAGE).strip().lower()
+        print(f"[tts_voice] gTTS synth | language={language!r} text={text[:80]!r}")
+
+        fd, path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+
+        try:
+            tts = gTTS(text=text, lang=language)
+            tts.save(path)
+            return path
+        except Exception:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            raise
 
     async def _generate_edge_file(self, text: str, voice: str, rate: str, pitch: str) -> str:
         original_voice = voice
@@ -58,8 +119,8 @@ class TTSAudioMixin:
         original_pitch = pitch
 
         voice = validate_voice(voice, self.edge_voice_names)
-        rate = validate_rate(rate)
-        pitch = validate_pitch(pitch)
+        rate = self._normalize_edge_rate(rate)
+        pitch = self._normalize_edge_pitch(pitch)
 
         print(
             "[tts_voice] Edge synth | "
@@ -86,28 +147,6 @@ class TTSAudioMixin:
                 "[tts_voice] Edge synth falhou | "
                 f"voice={voice!r} rate={rate!r} pitch={pitch!r} erro={e}"
             )
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-            raise
-
-    async def _generate_gtts_file(self, text: str, language: str) -> str:
-        fd, path = tempfile.mkstemp(suffix=".mp3")
-        os.close(fd)
-
-        language = validate_language(language, self.gtts_languages)
-        print(f"[tts_voice] gTTS synth | language={language!r} text={text[:80]!r}")
-
-        def _save():
-            tts = gTTS(text=text, lang=language)
-            tts.save(path)
-
-        try:
-            await asyncio.to_thread(_save)
-            return path
-        except Exception as e:
-            print(f"[tts_voice] gTTS synth falhou | language={language!r} erro={e}")
             try:
                 os.remove(path)
             except Exception:
@@ -143,71 +182,85 @@ class TTSAudioMixin:
             item.language or GTTS_DEFAULT_LANGUAGE,
         )
 
-    async def _play_file(self, vc: discord.VoiceClient, file_path: str):
+    async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:
         loop = asyncio.get_running_loop()
         finished = loop.create_future()
 
-        def after_playing(error: Optional[Exception]):
+        def _after_playback(error: Optional[Exception]) -> None:
             if error:
                 loop.call_soon_threadsafe(finished.set_exception, error)
             else:
-                loop.call_soon_threadsafe(finished.set_result, True)
+                loop.call_soon_threadsafe(finished.set_result, None)
 
-        source = discord.FFmpegPCMAudio(file_path)
-        vc.play(source, after=after_playing)
+        source = discord.FFmpegPCMAudio(path)
+        vc.play(source, after=_after_playback)
         await finished
 
-    def _ensure_worker(self, guild_id: int):
-        state = self._get_state(guild_id)
-        if state.worker_task is None or state.worker_task.done():
-            state.worker_task = asyncio.create_task(self._worker_loop(guild_id))
-
-    async def _worker_loop(self, guild_id: int):
-        state = self._get_state(guild_id)
-
-        while True:
-            item = await state.queue.get()
-            file_path = None
-
+    async def _disconnect_idle(self, guild: discord.Guild) -> None:
+        vc = guild.voice_client
+        if vc and vc.is_connected():
             try:
-                guild = self.bot.get_guild(item.guild_id)
-                if guild is None:
-                    print(f"[tts_voice] Worker ignorou guild ausente: {item.guild_id}")
-                    continue
-
-                voice_channel = guild.get_channel(item.channel_id)
-                if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
-                    print(
-                        "[tts_voice] Worker ignorou canal inválido | "
-                        f"guild={item.guild_id} channel={item.channel_id}"
-                    )
-                    continue
-
-                blocked = await self._should_block_for_voice_bot(guild, voice_channel)
-                if blocked:
-                    print(
-                        "[tts_voice] Worker bloqueado por outro bot de voz | "
-                        f"guild={item.guild_id} channel={item.channel_id}"
-                    )
-                    await self._disconnect_if_blocked(guild)
-                    continue
-
-                vc = await self._ensure_connected(guild, voice_channel)
-                if vc is None:
-                    print(
-                        "[tts_voice] Worker não conseguiu conectar | "
-                        f"guild={item.guild_id} channel={item.channel_id}"
-                    )
-                    continue
-
-                file_path = await self._generate_audio_file(item)
-                await self._play_file(vc, file_path)
+                await vc.disconnect(force=False)
+                print(f"[tts_voice] Desconectado por inatividade | guild={guild.id}")
             except Exception as e:
-                print(f"[tts_voice] Worker error guild {guild_id}: {e}")
-            finally:
-                if file_path and os.path.exists(file_path):
+                print(f"[tts_voice] Erro ao desconectar por inatividade na guild {guild.id}: {e}")
+
+    async def _worker_loop(self, guild_id: int) -> None:
+        state = self._get_state(guild_id)
+
+        try:
+            while True:
+                guild = self.bot.get_guild(guild_id)
+                if guild is None:
+                    print(f"[tts_voice] Guild não encontrada no worker | guild={guild_id}")
+                    return
+
+                try:
+                    item = await asyncio.wait_for(
+                        state.queue.get(),
+                        timeout=TTS_IDLE_DISCONNECT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    await self._disconnect_idle(guild)
+                    return
+
+                try:
+                    if hasattr(self, "_should_block_for_voice_bot"):
+                        target_channel = guild.get_channel(item.channel_id)
+                        if target_channel is not None:
+                            blocked = await self._maybe_await(
+                                self._should_block_for_voice_bot(guild, target_channel)
+                            )
+                            if blocked:
+                                print(
+                                    f"[tts_voice] Worker bloqueado por outro bot de voz | "
+                                    f"guild={guild_id} channel={item.channel_id}"
+                                )
+                                if hasattr(self, "_disconnect_if_blocked"):
+                                    await self._maybe_await(self._disconnect_if_blocked(guild))
+                                continue
+
+                    vc = await self._maybe_await(
+                        self._ensure_connected(guild, guild.get_channel(item.channel_id))
+                    )
+                    if vc is None:
+                        print(
+                            f"[tts_voice] Worker não conseguiu conectar | "
+                            f"guild={guild_id} channel={item.channel_id}"
+                        )
+                        continue
+
+                    path = await self._generate_audio_file(item)
                     try:
-                        os.remove(file_path)
-                    except Exception:
-                        pass
-                state.queue.task_done()
+                        await self._play_file(vc, path)
+                    finally:
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"[tts_voice] Erro no worker da guild {guild_id}: {e}")
+                finally:
+                    state.queue.task_done()
+        finally:
+            state.worker_task = None

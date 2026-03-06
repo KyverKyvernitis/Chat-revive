@@ -4,6 +4,8 @@ import asyncio
 import threading
 import traceback
 
+print("BOT.PY INICIOU")
+
 import discord
 from discord.ext import commands
 
@@ -25,6 +27,8 @@ class MyBot(commands.Bot):
         self.settings_db: SettingsDB | None = None
 
     async def setup_hook(self):
+        print("SETUP_HOOK INICIOU")
+
         if not config.MONGODB_URI:
             raise RuntimeError("Faltou MONGODB_URI")
 
@@ -35,6 +39,7 @@ class MyBot(commands.Bot):
         )
         await self.settings_db.init()
 
+        print("Carregando cogs...")
         await self.load_extension("cogs.role_cooldown")
         await self.load_extension("cogs.antimzk")
         await self.load_extension("cogs.tts_voice")
@@ -73,6 +78,7 @@ async def on_app_command_error(
 
 
 def run_web():
+    print("WEB SERVER INICIANDO")
     app = create_app()
     app.run(host="0.0.0.0", port=config.PORT)
 
@@ -84,6 +90,7 @@ async def on_ready():
 
 
 async def main():
+    print("MAIN INICIOU")
     threading.Thread(target=run_web, daemon=True).start()
     await bot.start(config.TOKEN)
 

@@ -33,6 +33,14 @@ class SettingsDB:
                     except Exception as e:
                         print(f"[db] Falha ao remover índice guild_id_1: {e}")
 
+            idx = indexes.get("guild_id_1_type_1")
+            if idx:
+                try:
+                    await self.coll.drop_index("guild_id_1_type_1")
+                    print("[db] Índice antigo guild_id_1_type_1 removido.")
+                except Exception as e:
+                    print(f"[db] Falha ao remover índice guild_id_1_type_1: {e}")
+
             await self.coll.create_index("type")
             await self.coll.create_index(
                 [("guild_id", 1), ("type", 1)],

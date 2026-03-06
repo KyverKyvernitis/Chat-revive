@@ -9,7 +9,7 @@ class SettingsDB:
         self.coll = self.db[coll_name]
 
         self.guild_cache: Dict[int, Dict[str, Any]] = {}
-        self.user_cache: Dict[tuple[int, int], Dict[str, Any]] = {}  # (guild_id, user_id)
+        self.user_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
 
     async def init(self):
         try:
@@ -48,6 +48,26 @@ class SettingsDB:
         doc["type"] = "guild"
         doc["guild_id"] = guild_id
         doc["anti_mzk_enabled"] = bool(value)
+        self.guild_cache[guild_id] = doc
+
+        await self.coll.update_one(
+            {"type": "guild", "guild_id": guild_id},
+            {"$set": doc},
+            upsert=True,
+        )
+
+    # -------------------------
+    # bloqueio por outro bot de voz
+    # -------------------------
+    def block_voice_bot_enabled(self, guild_id: int) -> bool:
+        g = self.guild_cache.get(guild_id, {})
+        return bool(g.get("block_voice_bot_enabled", True))
+
+    async def set_block_voice_bot_enabled(self, guild_id: int, value: bool):
+        doc = self.guild_cache.get(guild_id, {"type": "guild", "guild_id": guild_id})
+        doc["type"] = "guild"
+        doc["guild_id"] = guild_id
+        doc["block_voice_bot_enabled"] = bool(value)
         self.guild_cache[guild_id] = doc
 
         await self.coll.update_one(

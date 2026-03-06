@@ -12,7 +12,7 @@ from discord.ext import commands
 import config
 from config import BLOCK_VOICE_BOT_ID, OFF_COLOR, ON_COLOR
 from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin
-from tts_helpers import EDGE_DEFAULT_VOICE, get_gtts_languages, make_embed, validate_engine
+from tts_helpers import EDGE_DEFAULT_VOICE, clean_text, get_gtts_languages, make_embed, validate_engine
 
 
 class TTSVoice(TTSAudioMixin, commands.Cog):
@@ -109,42 +109,32 @@ class TTSVoice(TTSAudioMixin, commands.Cog):
         value = str(raw).strip()
         value = value.replace("％", "%").replace("−", "-").replace("–", "-").replace("—", "-")
         value = value.replace(" ", "")
-
         if value.endswith("%"):
             value = value[:-1]
-
         if not value:
             return None
-
         if value[0] not in "+-":
             value = f"+{value}"
-
         sign = value[0]
         number = value[1:]
         if not number.isdigit():
             return None
-
         return f"{sign}{number}%"
 
     def _normalize_pitch_value(self, raw: str) -> str | None:
         value = str(raw).strip()
         value = value.replace("−", "-").replace("–", "-").replace("—", "-")
         value = value.replace(" ", "")
-
         if value.lower().endswith("hz"):
             value = value[:-2]
-
         if not value:
             return None
-
         if value[0] not in "+-":
             value = f"+{value}"
-
         sign = value[0]
         number = value[1:]
         if not number.isdigit():
             return None
-
         return f"{sign}{number}Hz"
 
     async def _resolved_engine(self, guild_id: int, user_id: int) -> str:
@@ -152,73 +142,110 @@ class TTSVoice(TTSAudioMixin, commands.Cog):
         engine = (resolved.get("engine") or "gtts").strip().lower()
         return engine
 
-    async def _should_block_for_voice_bot(
-        self,
-        guild: discord.Guild,
-        voice_channel: discord.abc.GuildChannel | discord.Thread | Any,
-    ) -> bool:
+    async def _should_block_for_voice_bot(self, guild: discord.Guild, voice_channel: Any) -> bool:
         if not guild or not BLOCK_VOICE_BOT_ID:
             return False
-
         enabled = await self._db_block_voice_bot_enabled(guild.id)
         if not enabled:
             return False
-
+        target_id = int(BLOCK_VOICE_BOT_ID)
         for member in getattr(voice_channel, "members", []):
-            if member.id == int(BLOCK_VOICE_BOT_ID):
+            if member.id == target_id:
                 return True
         return False
+
+    async def _disconnect_and_clear(self, guild: discord.Guild):
+        state = self._get_state(guild.id)
+        while not state.queue.empty():
+            try:
+                state.queue.get_nowait()
+                state.queue.task_done()
+            except Exception:
+                break
+        vc = guild.voice_client
+        if vc:
+            try:
+                if vc.is_playing():
+                    vc.stop()
+            except Exception:
+                pass
+            try:
+                await vc.disconnect(force=True)
+            except Exception as e:
+                print(f"[tts_voice] Falha ao desconectar na guild {guild.id}: {e}")
 
     async def _disconnect_if_blocked(self, guild: discord.Guild):
         if not guild or not guild.voice_client or not guild.voice_client.channel:
             return
-
         if await self._should_block_for_voice_bot(guild, guild.voice_client.channel):
-            try:
-                await guild.voice_client.disconnect(force=True)
-                print(f"[tts_voice] Desconectado da guild {guild.id} por bloqueio de outro bot de voz")
-            except Exception as e:
-                print(f"[tts_voice] Falha ao desconectar por bloqueio na guild {guild.id}: {e}")
+            await self._disconnect_and_clear(guild)
+            print(f"[tts_voice] Desconectado da guild {guild.id} por bloqueio de outro bot de voz")
+
+    async def _ensure_connected(self, guild: discord.Guild, voice_channel: discord.abc.Connectable) -> Optional[discord.VoiceClient]:
+        vc = guild.voice_client
+        if vc and vc.channel and vc.channel.id == voice_channel.id:
+            return vc
+        try:
+            if vc and vc.is_connected():
+                await vc.move_to(voice_channel)
+                print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                return vc
+            new_vc = await voice_channel.connect(self_deaf=True)
+            print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
+            return new_vc
+        except Exception as e:
+            print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
+            return None
 
     @commands.Cog.listener()
-    async def on_voice_state_update(
-        self,
-        member: discord.Member,
-        before: discord.VoiceState,
-        after: discord.VoiceState,
-    ):
-        if not member.guild or member.bot is False:
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        if not member.guild:
             return
-
+        guild = member.guild
+        vc = guild.voice_client
+        if vc and vc.channel and isinstance(vc.channel, (discord.VoiceChannel, discord.StageChannel)):
+            humans = [m for m in vc.channel.members if not m.bot]
+            if len(humans) == 0:
+                await self._disconnect_and_clear(guild)
+                print(f"[tts_voice] Saindo da call na guild {guild.id} por não haver humanos no canal.")
+                return
         block_bot_id = int(BLOCK_VOICE_BOT_ID) if BLOCK_VOICE_BOT_ID else None
         if block_bot_id is None or member.id != block_bot_id:
             return
-
         if after.channel is not None:
-            await self._disconnect_if_blocked(member.guild)
+            await self._disconnect_if_blocked(guild)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not getattr(config, "TTS_ENABLED", True):
             return
-
         if message.author.bot:
             return
-
         if not message.guild:
             return
-
-        if not message.content or not message.content.startswith(","):
+        if not message.content:
             return
+        if not message.content.lstrip().startswith(","):
+            return
+
+        print(
+            f"[tts_voice] on_message recebido | guild={message.guild.id} "
+            f"channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}"
+        )
 
         author_voice = getattr(message.author, "voice", None)
         if author_voice is None or author_voice.channel is None:
+            print(f"[tts_voice] Ignorado: usuário {message.author.id} não está em canal de voz")
             return
 
         voice_channel = author_voice.channel
+        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+            print(f"[tts_voice] Ignorado: canal de voz incompatível na guild {message.guild.id}: {type(voice_channel).__name__}")
+            return
 
         blocked = await self._should_block_for_voice_bot(message.guild, voice_channel)
         if blocked:
+            print(f"[tts_voice] Entrada bloqueada por outro bot de voz na guild {message.guild.id}")
             await self._disconnect_if_blocked(message.guild)
             return
 
@@ -232,34 +259,36 @@ class TTSVoice(TTSAudioMixin, commands.Cog):
             print(f"[tts_voice] resolve_tts vazio | guild={message.guild.id} user={message.author.id}")
             return
 
-        text = message.content[1:].strip()
+        text = clean_text(message.content.lstrip()[1:])
         if not text:
+            print(f"[tts_voice] Ignorado: texto vazio após limpeza | guild={message.guild.id} user={message.author.id}")
             return
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = getattr(message.channel, "id", None)
 
-        await state.queue.put(
-            QueueItem(
-                guild_id=message.guild.id,
-                channel_id=voice_channel.id,
-                author_id=message.author.id,
-                text=text,
-                engine=resolved.get("engine", "gtts"),
-                voice=resolved.get("voice", EDGE_DEFAULT_VOICE),
-                language=resolved.get("language", "pt-br"),
-                rate=resolved.get("rate", "+0%"),
-                pitch=resolved.get("pitch", "+0Hz"),
+        try:
+            await state.queue.put(
+                QueueItem(
+                    guild_id=message.guild.id,
+                    channel_id=voice_channel.id,
+                    author_id=message.author.id,
+                    text=text,
+                    engine=resolved.get("engine", "gtts"),
+                    voice=resolved.get("voice", EDGE_DEFAULT_VOICE),
+                    language=resolved.get("language", "pt-br"),
+                    rate=resolved.get("rate", "+0%"),
+                    pitch=resolved.get("pitch", "+0Hz"),
+                )
             )
-        )
-
-        print(
-            f"[tts_voice] Mensagem enfileirada | guild={message.guild.id} "
-            f"user={message.author.id} msg_channel={getattr(message.channel, 'id', None)} "
-            f"canal_voz={voice_channel.id} engine={resolved.get('engine', 'gtts')} texto={text!r}"
-        )
-
-        self._ensure_worker(message.guild.id)
+            print(
+                f"[tts_voice] Mensagem enfileirada | guild={message.guild.id} "
+                f"user={message.author.id} msg_channel={getattr(message.channel, 'id', None)} "
+                f"canal_voz={voice_channel.id} engine={resolved.get('engine', 'gtts')} texto={text!r}"
+            )
+            self._ensure_worker(message.guild.id)
+        except Exception as e:
+            print(f"[tts_voice] Falha ao enfileirar mensagem na guild {message.guild.id}: {e}")
 
     @app_commands.command(name="tts_status", description="Mostra as configurações atuais de TTS")
     async def tts_status(self, interaction: discord.Interaction):

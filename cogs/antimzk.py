@@ -5,6 +5,7 @@ from discord import app_commands
 from config import TRIGGER_WORD, MUTE_TOGGLE_WORD, TARGET_USER_ID, ON_COLOR, OFF_COLOR
 from db import SettingsDB
 
+
 class AntiMzkCog(commands.Cog):
     def __init__(self, bot: commands.Bot, db: SettingsDB):
         self.bot = bot
@@ -14,7 +15,8 @@ class AntiMzkCog(commands.Cog):
     @app_commands.checks.has_permissions(move_members=True)
     async def antimzk(self, interaction: discord.Interaction):
         if interaction.guild is None:
-            return await interaction.response.send_message("Use esse comando em um servidor.", ephemeral=True)
+            await interaction.response.send_message("Use esse comando em um servidor.", ephemeral=True)
+            return
 
         gid = interaction.guild.id
         new_value = not self.db.anti_mzk_enabled(gid)
@@ -29,10 +31,22 @@ class AntiMzkCog(commands.Cog):
     @antimzk.error
     async def antimzk_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "Você não tem permissão (precisa de **Mover Membros**).",
-                ephemeral=True
-            )
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Você não tem permissão (precisa de **Mover Membros**).",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Você não tem permissão (precisa de **Mover Membros**).",
+                    ephemeral=True,
+                )
+            return
+
+        print(f"Erro no /antimzk: {repr(error)}")
+
+        if interaction.response.is_done():
+            await interaction.followup.send("Ocorreu um erro.", ephemeral=True)
         else:
             await interaction.response.send_message("Ocorreu um erro.", ephemeral=True)
 
@@ -56,7 +70,6 @@ class AntiMzkCog(commands.Cog):
 
         content = (message.content or "").lower()
 
-        # buscar alvo (cache -> fetch)
         target = message.guild.get_member(TARGET_USER_ID)
         if target is None:
             try:
@@ -64,7 +77,6 @@ class AntiMzkCog(commands.Cog):
             except Exception:
                 return
 
-        # desconectar
         if TRIGGER_WORD and TRIGGER_WORD in content:
             if target.voice and target.voice.channel:
                 try:
@@ -72,13 +84,13 @@ class AntiMzkCog(commands.Cog):
                 except Exception:
                     pass
 
-        # toggle mute
         if MUTE_TOGGLE_WORD and MUTE_TOGGLE_WORD in content:
             if target.voice and target.voice.channel:
                 try:
                     await target.edit(mute=not bool(target.voice.mute), reason="anti-mzk toggle mute")
                 except Exception:
                     pass
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AntiMzkCog(bot, bot.settings_db))

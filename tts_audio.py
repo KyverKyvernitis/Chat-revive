@@ -9,8 +9,12 @@ import discord
 import edge_tts
 from gtts import gTTS
 
-from config import GTTS_DEFAULT_LANGUAGE, TTS_IDLE_DISCONNECT_SECONDS
+import config
 from tts_helpers import validate_voice
+
+
+GTTS_DEFAULT_LANGUAGE = getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
+TTS_IDLE_DISCONNECT_SECONDS = getattr(config, "TTS_IDLE_DISCONNECT_SECONDS", 180)
 
 
 @dataclass

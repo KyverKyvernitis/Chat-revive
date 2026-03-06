@@ -198,26 +198,66 @@ class TTSAudioMixin:
         voice_client.play(source, after=_after_play)
         await finished
 
+    def _voice_channel_has_humans(self, guild: discord.Guild) -> bool:
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected() or vc.channel is None:
+            return False
+
+        for member in getattr(vc.channel, "members", []):
+            if not member.bot:
+                return True
+        return False
+
+    def _voice_channel_has_only_bots_or_is_empty(self, guild: discord.Guild) -> bool:
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected() or vc.channel is None:
+            return True
+
+        members = list(getattr(vc.channel, "members", []))
+        if not members:
+            return True
+
+        return all(member.bot for member in members)
+
+    async def _disconnect_idle(self, guild: discord.Guild) -> bool:
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected():
+            return True
+
+        if self._voice_channel_has_humans(guild):
+            print(f"[tts_voice] Idle timeout ignorado | ainda há humanos na call | guild={guild.id}")
+            return False
+
+        try:
+            await vc.disconnect(force=False)
+            print(f"[tts_voice] Desconectado por inatividade | sem humanos na call | guild={guild.id}")
+            return True
+        except Exception as e:
+            print(f"[tts_voice] Erro ao desconectar por inatividade na guild {guild.id}: {e}")
+            return False
+
     async def _worker_loop(self, guild_id: int) -> None:
         state = self._get_state(guild_id)
 
         while True:
+            guild = self.bot.get_guild(guild_id)
             try:
                 item: QueueItem = await asyncio.wait_for(
                     state.queue.get(),
                     timeout=TTS_IDLE_DISCONNECT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                guild = self.bot.get_guild(guild_id)
-                if guild and guild.voice_client and guild.voice_client.is_connected():
-                    try:
-                        await guild.voice_client.disconnect(force=True)
-                    except Exception:
-                        pass
-                state.worker_task = None
-                return
+                if guild is None:
+                    state.worker_task = None
+                    return
 
-            guild = self.bot.get_guild(item.guild_id)
+                disconnected = await self._disconnect_idle(guild)
+                if disconnected:
+                    state.worker_task = None
+                    return
+
+                continue
+
             if guild is None:
                 continue
 

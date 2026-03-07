@@ -86,9 +86,15 @@ class Utility(commands.Cog):
         target_user_id = getattr(config, "ONLY_TTS_USER_ID", 0)
 
         if enabled:
-            desc = "Só a Cuca pode falar nesse caralho, fodasse os betas.\n\n" + f"ID alvo da env: `{target_user_id}`"
+            desc = (
+                "Só a Cuca pode falar nesse caralho, fodasse os betas.\n\n"
+                f"ID alvo da env: `{target_user_id}`"
+            )
         else:
-            desc = "Agora os betinhas podem usar também.\n\n" + f"ID alvo da env: `{target_user_id}`"
+            desc = (
+                "Agora os betinhas podem usar também.\n\n"
+                f"ID alvo da env: `{target_user_id}`"
+            )
 
         await self._respond(
             interaction,

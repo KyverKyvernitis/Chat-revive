@@ -121,6 +121,47 @@ class SettingsDB:
         if engine not in ("edge", "gtts"): engine = "gtts"
         return {"engine": engine, "voice": pick("voice", "pt-BR-FranciscaNeural"), "language": pick("language", "pt-br"), "rate": pick("rate", "+0%"), "pitch": pick("pitch", "+0Hz")}
 
+    def get_panel_history(self, guild_id: int, user_id: int) -> Dict[str, str]:
+        guild_doc = self.guild_cache.get(guild_id, {})
+        guild_panel = guild_doc.get("panel_history", {}) or {}
+        user_doc = self.user_cache.get((guild_id, user_id), {})
+        user_panel = user_doc.get("panel_history", {}) or {}
+
+        return {
+            "user_last_change": str(user_panel.get("last_change", "") or ""),
+            "server_last_change": str(guild_panel.get("server_last_change", "") or ""),
+            "toggle_last_change": str(guild_panel.get("toggle_last_change", "") or ""),
+        }
+
+    async def set_user_panel_last_change(self, guild_id: int, user_id: int, text: str):
+        key = (guild_id, user_id)
+        doc = self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id})
+        panel = doc.get("panel_history", {}) or {}
+        panel["last_change"] = str(text or "")
+        doc["type"] = "user"
+        doc["guild_id"] = guild_id
+        doc["user_id"] = user_id
+        doc["panel_history"] = panel
+        self.user_cache[key] = doc
+        await self.coll.update_one(
+            {"type": "user", "guild_id": guild_id, "user_id": user_id},
+            {"$set": doc},
+            upsert=True,
+        )
+
+    async def set_guild_panel_last_change(self, guild_id: int, *, server_last_change: str | None = None, toggle_last_change: str | None = None):
+        doc = self._get_guild_doc(guild_id)
+        panel = doc.get("panel_history", {}) or {}
+
+        if server_last_change is not None:
+            panel["server_last_change"] = str(server_last_change or "")
+        if toggle_last_change is not None:
+            panel["toggle_last_change"] = str(toggle_last_change or "")
+
+        doc["panel_history"] = panel
+        await self._save_guild_doc(guild_id, doc)
+
+
     def get_role_cooldown(self, guild_id: int) -> Dict[str, Any]:
         g = self.guild_cache.get(guild_id, {}); data = g.get("role_cooldown", {}) or {}
         return {"active": bool(data.get("active", False)), "ends_at": str(data.get("ends_at", "") or ""), "role_id": int(data.get("role_id", 0) or 0), "role_was_mentionable": data.get("role_was_mentionable", None)}

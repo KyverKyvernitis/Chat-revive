@@ -232,11 +232,6 @@ class TTSMainPanelView(_BaseTTSView):
     async def pitch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Escolha o tom", "Selecione um tom pronto para o modo edge.", PitchSelect(self.cog, server=self.server)).send(interaction)
 
-    @discord.ui.button(label="Atualizar painel", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
-    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = await self.cog._build_settings_embed(interaction.guild.id, interaction.user.id, server=self.server)
-        await interaction.response.edit_message(embed=embed, view=self)
-
     @discord.ui.button(label="Sair da call", style=discord.ButtonStyle.secondary, emoji="📤", row=2)
     async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog._leave_from_panel(interaction)
@@ -250,11 +245,6 @@ class TTSTogglePanelView(_BaseTTSView):
     @discord.ui.button(label="Modo Cuca", style=discord.ButtonStyle.secondary, emoji="👑", row=0)
     async def only_target_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Modo Cuca", "Quando ativado, a Cuca continua normal e os outros usuários são forçados para gtts.", ToggleSelect(self.cog, "only_target_user")).send(interaction)
-
-    @discord.ui.button(label="Atualizar painel", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
-    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = await self.cog._build_settings_embed(interaction.guild.id, interaction.user.id, server=False)
-        await interaction.response.edit_message(embed=embed, view=self)
 
 
 def get_gtts_languages() -> dict[str, str]:
@@ -772,11 +762,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._defer_ephemeral(interaction)
         if not await self._require_guild(interaction):
             return
-        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=False)
-        await self._respond(interaction, embed=embed, view=TTSMainPanelView(self, interaction.user.id, interaction.guild.id, server=False), ephemeral=True)
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=False, panel_kind="user")
+        await self._respond(interaction, embed=embed, view=self._build_panel_view(interaction.user.id, interaction.guild.id, server=False), ephemeral=True)
 
 
-    async def _build_settings_embed(self, guild_id: int, user_id: int, *, server: bool = False) -> discord.Embed:
+    async def _build_settings_embed(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        server: bool = False,
+        panel_kind: str = "user",
+        last_change: str | None = None,
+    ) -> discord.Embed:
         db = self._get_db()
         guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id)) if db else {}
         user_settings = await self._maybe_await(db.get_user_tts(guild_id, user_id)) if db else {}
@@ -785,6 +783,18 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         guild_defaults = guild_defaults or {}
         user_settings = user_settings or {}
         resolved = resolved or {}
+
+        panel_history = await self._maybe_await(db.get_panel_history(guild_id, user_id)) if db and hasattr(db, "get_panel_history") else {}
+        stored_last_change = ""
+        if panel_kind == "server":
+            stored_last_change = str((panel_history or {}).get("server_last_change", "") or "")
+        elif panel_kind == "toggle":
+            stored_last_change = str((panel_history or {}).get("toggle_last_change", "") or "")
+        else:
+            stored_last_change = str((panel_history or {}).get("user_last_change", "") or "")
+
+        if last_change is None:
+            last_change = stored_last_change
 
         target_user_id = getattr(config, "ONLY_TTS_USER_ID", 0)
         only_target_user = bool(guild_defaults.get("only_target_user", False))
@@ -802,6 +812,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         embed.add_field(name="Idioma gTTS ativo", value=f"`{resolved.get('language', 'Não definido')}`", inline=True)
         embed.add_field(name="Velocidade ativa", value=f"`{resolved.get('rate', '+0%')}`", inline=True)
         embed.add_field(name="Tom ativo", value=f"`{resolved.get('pitch', '+0Hz')}`", inline=True)
+        if last_change:
+            embed.add_field(name="Última alteração", value=last_change, inline=False)
+
         embed.set_footer(text="As alterações feitas por menus também ficam salvas no banco.")
         return embed
 
@@ -833,10 +846,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, engine=value))
             desc = f"O seu modo de TTS agora é `{value}`."
 
-        await interaction.response.send_message(
-            embed=self._make_embed("Modo atualizado", desc, ok=True),
-            ephemeral=True,
-        )
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=server, last_change=desc)
+        await interaction.response.edit_message(embed=embed, view=interaction.message.components and self._build_panel_view(interaction.user.id, interaction.guild.id, server=server))
 
     async def _apply_voice_from_panel(self, interaction: discord.Interaction, voice: str, *, server: bool):
         if server and not interaction.user.guild_permissions.manage_guild:
@@ -872,10 +883,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, voice=voice))
             desc = f"A sua voz do Edge agora é `{voice}`."
 
-        await interaction.response.send_message(
-            embed=self._make_embed("Voz atualizada", desc, ok=True),
-            ephemeral=True,
-        )
+        if server:
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+        else:
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=server, panel_kind="server" if server else "user", last_change=desc)
+        await interaction.response.edit_message(embed=embed, view=self._build_panel_view(interaction.user.id, interaction.guild.id, server=server))
 
     async def _apply_language_from_panel(self, interaction: discord.Interaction, language: str, *, server: bool):
         if server and not interaction.user.guild_permissions.manage_guild:
@@ -904,10 +917,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, language=language))
             desc = f"O seu idioma do gtts agora é `{language}`."
 
-        await interaction.response.send_message(
-            embed=self._make_embed("Idioma atualizado", desc, ok=True),
-            ephemeral=True,
-        )
+        if server:
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+        else:
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=server, panel_kind="server" if server else "user", last_change=desc)
+        await interaction.response.edit_message(embed=embed, view=self._build_panel_view(interaction.user.id, interaction.guild.id, server=server))
 
     async def _apply_speed_from_panel(self, interaction: discord.Interaction, speed: str, *, server: bool):
         if server and not interaction.user.guild_permissions.manage_guild:
@@ -936,10 +951,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, rate=speed))
             desc = f"A sua velocidade agora é `{speed}`."
 
-        await interaction.response.send_message(
-            embed=self._make_embed("Velocidade atualizada", desc, ok=True),
-            ephemeral=True,
-        )
+        if server:
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+        else:
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=server, panel_kind="server" if server else "user", last_change=desc)
+        await interaction.response.edit_message(embed=embed, view=self._build_panel_view(interaction.user.id, interaction.guild.id, server=server))
 
     async def _apply_pitch_from_panel(self, interaction: discord.Interaction, pitch: str, *, server: bool):
         if server and not interaction.user.guild_permissions.manage_guild:
@@ -968,10 +985,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, pitch=pitch))
             desc = f"O seu tom agora é `{pitch}`."
 
-        await interaction.response.send_message(
-            embed=self._make_embed("Tom atualizado", desc, ok=True),
-            ephemeral=True,
-        )
+        if server:
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+        else:
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=server, panel_kind="server" if server else "user", last_change=desc)
+        await interaction.response.edit_message(embed=embed, view=self._build_panel_view(interaction.user.id, interaction.guild.id, server=server))
 
     async def _apply_only_target_from_panel(self, interaction: discord.Interaction, enabled: bool):
         if not interaction.user.guild_permissions.kick_members:
@@ -994,17 +1013,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, only_target_user=bool(enabled)))
-        target_user_id = getattr(config, "ONLY_TTS_USER_ID", 0)
+        desc = "Modo Cuca ativado." if enabled else "Modo Cuca desativado."
 
-        if enabled:
-            desc = "Só a Cuca pode falar nesse caralho.\n\n" + f"Todo mundo que não for o ID `{target_user_id}` será forçado para `gtts`."
-        else:
-            desc = "Agora os betinhas podem usar também.\n\nTodo mundo voltou a usar as próprias configurações."
-
-        await interaction.response.send_message(
-            embed=self._make_embed("Modo Cuca atualizado", desc, ok=True),
-            ephemeral=True,
-        )
+        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=desc))
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=False, panel_kind="toggle", last_change=desc)
+        await interaction.response.edit_message(embed=embed, view=self._build_toggle_view(interaction.user.id, interaction.guild.id))
 
     async def _apply_block_voice_bot_from_panel(self, interaction: discord.Interaction, enabled: bool):
         if not interaction.user.guild_permissions.manage_guild:
@@ -1027,10 +1040,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, block_voice_bot=bool(enabled)))
-        await interaction.response.send_message(
-            embed=self._make_embed("Bloqueio atualizado", f"O bloqueio por outro bot de voz agora está em `{enabled}`.", ok=True),
-            ephemeral=True,
-        )
+        desc = f"Bloqueio por outro bot {'ativado' if enabled else 'desativado'}."
+
+        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=desc))
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=False, panel_kind="toggle", last_change=desc)
+        await interaction.response.edit_message(embed=embed, view=self._build_toggle_view(interaction.user.id, interaction.guild.id))
 
         if enabled:
             await self._disconnect_if_blocked(interaction.guild)
@@ -1161,11 +1175,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if not await self._require_manage_guild(interaction):
             return
 
-        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=True)
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=True, panel_kind="server")
         await self._respond(
             interaction,
             embed=embed,
-            view=TTSMainPanelView(self, interaction.user.id, interaction.guild.id, server=True),
+            view=self._build_panel_view(interaction.user.id, interaction.guild.id, server=True),
             ephemeral=True,
         )
 
@@ -1217,7 +1231,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._defer_ephemeral(interaction)
         if not await self._require_guild(interaction):
             return
-        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=False)
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=False, panel_kind="user")
         await self._respond(interaction, embed=embed, view=TTSTogglePanelView(self, interaction.user.id, interaction.guild.id), ephemeral=True)
 
     @toggle.command(name="block_voice_bot", description="Liga ou desliga o bloqueio quando o outro bot de voz entrar na call")

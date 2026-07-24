@@ -47,6 +47,8 @@ interface SectionEditorProps {
   guildOptions: DashboardOptionsPayload | null;
   previewBotName?: string;
   previewBotAvatarUrl?: string | null;
+  previewGuildName?: string;
+  previewGuildAvatarUrl?: string | null;
   onChange(field: DashboardFieldDefinition, raw: unknown): void;
   onMessageEditorActiveChange?(active: boolean): void;
   onBack(): void;
@@ -57,6 +59,8 @@ interface ActiveMessageEditor {
   label: string;
   description?: string;
   fields: DashboardFieldDefinition[];
+  senderFieldIds?: string[];
+  presentation?: DashboardMessageEditorDefinition["presentation"];
   variables?: DashboardTemplateVariables;
   baseline: Record<string, unknown>;
 }
@@ -160,7 +164,7 @@ function createLegacyEditor(group: string, fields: DashboardFieldDefinition[]): 
 
 export function SectionEditor({
   section, module, values, draft, guildOptions, previewBotName, previewBotAvatarUrl,
-  onChange, onMessageEditorActiveChange, onBack,
+  previewGuildName, previewGuildAvatarUrl, onChange, onMessageEditorActiveChange, onBack,
 }: SectionEditorProps) {
   const Icon = module?.icon ?? Settings;
   const groups = useMemo(() => section.groups?.length ? section.groups : null, [section.groups]);
@@ -188,7 +192,8 @@ export function SectionEditor({
   }, [restorePagePosition]);
 
   const openMessageEditor = useCallback((editor: DashboardMessageEditorDefinition, fallbackVariables?: DashboardTemplateVariables) => {
-    const editorFields = editor.fieldIds
+    const requestedFieldIds = [...editor.fieldIds, ...(editor.senderFieldIds ?? [])];
+    const editorFields = requestedFieldIds
       .map((id) => section.fields.find((field) => field.id === id))
       .filter((field): field is DashboardFieldDefinition => Boolean(field));
     const colorPanelMatch = section.id === "color_roles" ? editor.id.match(/^color-panel-([1-3])$/) : null;
@@ -203,6 +208,8 @@ export function SectionEditor({
       label: editor.label,
       description: editor.description,
       fields: editorFields,
+      senderFieldIds: editor.senderFieldIds,
+      presentation: editor.presentation,
       variables: editor.variables ?? fallbackVariables,
       baseline: Object.fromEntries(editorFields.map((field) => [field.id, draft[field.id]])),
     });
@@ -304,6 +311,10 @@ export function SectionEditor({
     guildOptions={guildOptions}
     botName={previewBotName}
     botAvatarUrl={previewBotAvatarUrl}
+    guildName={previewGuildName}
+    guildAvatarUrl={previewGuildAvatarUrl}
+    senderFieldIds={activeEditor.senderFieldIds}
+    presentation={activeEditor.presentation}
     variables={activeEditor.variables}
     onChange={onChange}
     onApply={finishEditor}
@@ -333,7 +344,7 @@ function MessageGroupPanel({
       return !match || Number(match[1]) <= panelCount;
     });
   }
-  const editorFieldIds = new Set(editors.flatMap((editor) => editor.fieldIds));
+  const editorFieldIds = new Set(editors.flatMap((editor) => [...editor.fieldIds, ...(editor.senderFieldIds ?? [])]));
   const settingsIds = new Set(metadata.settingsFieldIds ?? fields.filter((field) => !editorFieldIds.has(field.id)).map((field) => field.id));
   const settingsFields = fields.filter((field) => settingsIds.has(field.id));
   const enabled = editorEnabled(sectionId, group, draft);
@@ -347,7 +358,7 @@ function MessageGroupPanel({
     {!enabled && <div className="osk-inline-note">Ative esta opção para usar as mensagens abaixo. O conteúdo atual continuará preservado.</div>}
     <div className="osk-message-launcher-list">
       {editors.map((editor) => {
-        const editorFields = editor.fieldIds.map((id) => fields.find((field) => field.id === id)).filter((field): field is DashboardFieldDefinition => Boolean(field));
+        const editorFields = [...editor.fieldIds, ...(editor.senderFieldIds ?? [])].map((id) => fields.find((field) => field.id === id)).filter((field): field is DashboardFieldDefinition => Boolean(field));
         const changed = editorFields.some((field) => !valuesEqual(values[field.id], draft[field.id]));
         const summaryFields = editorFields.filter((field) => ["text", "textarea", "select"].includes(field.type)).slice(0, 2);
         const summary = summaryFields.map((field) => `${field.label}: ${displayDashboardValue(field, draft[field.id], guildOptions)}`).join(" · ");

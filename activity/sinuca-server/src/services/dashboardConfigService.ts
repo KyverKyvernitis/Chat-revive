@@ -20,11 +20,14 @@ export interface DashboardFieldOption { value: string; label: string }
 export type DashboardTemplateSyntax = "curly" | "dollar_curly";
 export interface DashboardTemplateVariable { key: string; label: string }
 export interface DashboardTemplateVariables { syntax: DashboardTemplateSyntax; items: DashboardTemplateVariable[] }
+export type DashboardMessageEditorPresentation = "adaptive" | "components_v2" | "generic" | "color_panel";
 export interface DashboardMessageEditorDefinition {
   id: string;
   label: string;
   description?: string;
   fieldIds: string[];
+  senderFieldIds?: string[];
+  presentation?: DashboardMessageEditorPresentation;
   variables?: DashboardTemplateVariables;
 }
 export interface DashboardGroupMetadata {
@@ -474,26 +477,32 @@ const sections: DashboardSectionDefinition[] = [
     ],
   },
   {
-    id: "welcome", label: "Boas-vindas", emoji: "👋", description: "Mensagem pública, DM, cargos automáticos e identidade do webhook.",
-    groups: ["Mensagem de entrada", "Mensagem privada", "Aparência", "Cargos", "Webhook"],
+    id: "welcome", label: "Boas-vindas", emoji: "👋", description: "Mensagem pública, DM, cargos automáticos e identidade de envio.",
+    groups: ["Mensagem de entrada", "Mensagem privada", "Aparência", "Cargos"],
     groupMetadata: {
       "Mensagem de entrada": {
         kind: "message",
         variables: WELCOME_TEMPLATE_VARIABLES,
         settingsFieldIds: [
-          "welcome.enabled", "welcome.channel_id", "welcome.render_mode", "welcome.style", "welcome.delete_on_leave_enabled",
+          "welcome.enabled", "welcome.channel_id", "welcome.render_mode", "welcome.delete_on_leave_enabled",
         ],
         editors: [{
           id: "welcome-public",
           label: "Mensagem pública",
-          description: "Conteúdo, embed, imagens, cor e prévia da mensagem enviada no servidor.",
+          description: "Edite a mensagem e a identidade usada no envio.",
+          presentation: "adaptive",
           fieldIds: [
             "welcome.public.title", "welcome.public.body", "welcome.public.footer",
+            "welcome.style", "welcome.accent_color", "welcome.accent_color_mode", "welcome.media_mode", "welcome.media_url",
             "welcome.embed.content", "welcome.embed.author_name", "welcome.embed.author_icon_mode", "welcome.embed.author_icon_url",
             "welcome.embed.author_url", "welcome.embed.title", "welcome.embed.title_url", "welcome.embed.description",
             "welcome.embed.color", "welcome.embed.color_mode", "welcome.embed.thumbnail_mode", "welcome.embed.thumbnail_url",
             "welcome.embed.image_mode", "welcome.embed.image_url", "welcome.embed.footer_text",
             "welcome.embed.footer_icon_mode", "welcome.embed.footer_icon_url",
+          ],
+          senderFieldIds: [
+            "welcome.webhook.enabled", "welcome.webhook.name_mode", "welcome.webhook.name",
+            "welcome.webhook.avatar_mode", "welcome.webhook.avatar_url",
           ],
         }],
       },
@@ -504,7 +513,8 @@ const sections: DashboardSectionDefinition[] = [
         editors: [{
           id: "welcome-dm",
           label: "Mensagem privada",
-          description: "Conteúdo e prévia da mensagem enviada diretamente ao novo membro.",
+          description: "Conteúdo enviado diretamente ao novo membro.",
+          presentation: "adaptive",
           fieldIds: ["welcome.dm.title", "welcome.dm.body", "welcome.dm.footer"],
         }],
       },
@@ -546,12 +556,11 @@ const sections: DashboardSectionDefinition[] = [
       { id: "welcome.media_mode", label: "Imagem ou banner", type: "select", scope: "welcome", path: "media_mode", options: WELCOME_MEDIA_MODE_OPTIONS, group: "Aparência" },
       { id: "welcome.media_url", label: "URL da imagem ou banner", type: "url", scope: "welcome", path: "media_url", maxLength: 1000, group: "Aparência" },
       { id: "welcome.auto_role_ids", label: "Cargos automáticos", description: "Cargos aplicados quando um membro entra.", type: "role_multi", scope: "welcome", path: "auto_role_ids", group: "Cargos" },
-      { id: "welcome.webhook.enabled", label: "Usar webhook", type: "boolean", scope: "welcome", path: "webhook.enabled", group: "Webhook" },
-      { id: "welcome.webhook.channel_id", label: "Canal do webhook", type: "channel", scope: "welcome", path: "webhook.channel_id", group: "Webhook" },
-      { id: "welcome.webhook.name_mode", label: "Nome do webhook", type: "select", scope: "welcome", path: "webhook.name_mode", options: WELCOME_WEBHOOK_NAME_OPTIONS, group: "Webhook" },
-      { id: "welcome.webhook.name", label: "Nome personalizado", type: "text", scope: "welcome", path: "webhook.name", maxLength: 80, group: "Webhook" },
-      { id: "welcome.webhook.avatar_mode", label: "Avatar do webhook", type: "select", scope: "welcome", path: "webhook.avatar_mode", options: WELCOME_WEBHOOK_AVATAR_OPTIONS, group: "Webhook" },
-      { id: "welcome.webhook.avatar_url", label: "URL do avatar", type: "url", scope: "welcome", path: "webhook.avatar_url", maxLength: 1000, group: "Webhook" },
+      { id: "welcome.webhook.enabled", label: "Enviar como webhook", description: "Use nome e avatar personalizados nesta mensagem.", type: "boolean", scope: "welcome", path: "webhook.enabled", group: "Mensagem de entrada" },
+      { id: "welcome.webhook.name_mode", label: "Nome exibido", type: "select", scope: "welcome", path: "webhook.name_mode", options: WELCOME_WEBHOOK_NAME_OPTIONS, group: "Mensagem de entrada" },
+      { id: "welcome.webhook.name", label: "Nome personalizado", type: "text", scope: "welcome", path: "webhook.name", maxLength: 80, group: "Mensagem de entrada" },
+      { id: "welcome.webhook.avatar_mode", label: "Avatar exibido", type: "select", scope: "welcome", path: "webhook.avatar_mode", options: WELCOME_WEBHOOK_AVATAR_OPTIONS, group: "Mensagem de entrada" },
+      { id: "welcome.webhook.avatar_url", label: "URL do avatar", type: "url", scope: "welcome", path: "webhook.avatar_url", maxLength: 1000, group: "Mensagem de entrada" },
     ],
   },
   {
@@ -563,6 +572,7 @@ const sections: DashboardSectionDefinition[] = [
         editors: [{
           id: "forms-panel",
           label: "Painel público",
+          presentation: "components_v2",
           description: "Título, descrição, botão, imagem, cor e prévia do painel.",
           fieldIds: [
             "forms.panel.title", "forms.panel.description", "forms.panel.button_label", "forms.panel.button_emoji",
@@ -576,6 +586,7 @@ const sections: DashboardSectionDefinition[] = [
         editors: [{
           id: "forms-response",
           label: "Resposta enviada à equipe",
+          presentation: "components_v2",
           description: "Conteúdo, imagem, cor e prévia do resumo recebido pela equipe.",
           fieldIds: [
             "forms.response.title", "forms.response.intro", "forms.response.footer",
@@ -595,12 +606,14 @@ const sections: DashboardSectionDefinition[] = [
           {
             id: "forms-approve-dm",
             label: "Mensagem ao aprovar",
+            presentation: "components_v2",
             description: "Mensagem privada enviada após a aprovação.",
             fieldIds: ["forms.approval.approve_dm"],
           },
           {
             id: "forms-reject-dm",
             label: "Mensagem ao rejeitar",
+            presentation: "components_v2",
             description: "Mensagem privada enviada após a rejeição.",
             fieldIds: ["forms.approval.reject_dm"],
           },
@@ -646,6 +659,7 @@ const sections: DashboardSectionDefinition[] = [
         editors: [{
           id: "tickets-panel",
           label: "Painel público",
+          presentation: "components_v2",
           description: "Título, descrição, seletor, imagens, cor e prévia do painel de atendimento.",
           fieldIds: [
             "tickets.panel.title", "tickets.panel.description", "tickets.panel.placeholder",
@@ -724,11 +738,11 @@ const sections: DashboardSectionDefinition[] = [
         kind: "message",
         settingsFieldIds: ["color_roles.channel_id", "color_roles.panel_count"],
         editors: [
-          { id: "color-panel-1", label: "Painel 1", description: "Título, subtítulo e rodapé do painel 1.", fieldIds: ["color_roles.messages.1.title", "color_roles.messages.1.subtitle", "color_roles.messages.1.footer"] },
-          { id: "color-panel-2", label: "Painel 2", description: "Título, subtítulo e rodapé do painel 2.", fieldIds: ["color_roles.messages.2.title", "color_roles.messages.2.subtitle", "color_roles.messages.2.footer"] },
-          { id: "color-panel-3", label: "Painel 3", description: "Título, subtítulo e rodapé do painel 3.", fieldIds: ["color_roles.messages.3.title", "color_roles.messages.3.subtitle", "color_roles.messages.3.footer"] },
-          { id: "color-panel-4", label: "Painel 4", description: "Título, subtítulo e rodapé do painel 4.", fieldIds: ["color_roles.messages.4.title", "color_roles.messages.4.subtitle", "color_roles.messages.4.footer"] },
-          { id: "color-panel-5", label: "Painel 5", description: "Título, subtítulo e rodapé do painel 5.", fieldIds: ["color_roles.messages.5.title", "color_roles.messages.5.subtitle", "color_roles.messages.5.footer"] },
+          { id: "color-panel-1", label: "Painel 1", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 1.", fieldIds: ["color_roles.messages.1.title", "color_roles.messages.1.subtitle", "color_roles.messages.1.footer"] },
+          { id: "color-panel-2", label: "Painel 2", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 2.", fieldIds: ["color_roles.messages.2.title", "color_roles.messages.2.subtitle", "color_roles.messages.2.footer"] },
+          { id: "color-panel-3", label: "Painel 3", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 3.", fieldIds: ["color_roles.messages.3.title", "color_roles.messages.3.subtitle", "color_roles.messages.3.footer"] },
+          { id: "color-panel-4", label: "Painel 4", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 4.", fieldIds: ["color_roles.messages.4.title", "color_roles.messages.4.subtitle", "color_roles.messages.4.footer"] },
+          { id: "color-panel-5", label: "Painel 5", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 5.", fieldIds: ["color_roles.messages.5.title", "color_roles.messages.5.subtitle", "color_roles.messages.5.footer"] },
         ],
       },
       Mensagens: {
@@ -1012,7 +1026,7 @@ function hasValue(values: Record<string, unknown>, fieldId: string): boolean {
 function sectionState(sectionId: string, values: Record<string, unknown>): DashboardSectionState {
   if (sectionId === "welcome") {
     const enabled = Boolean(values["welcome.enabled"]);
-    const hasChannel = hasValue(values, "welcome.channel_id") || (Boolean(values["welcome.webhook.enabled"]) && hasValue(values, "welcome.webhook.channel_id"));
+    const hasChannel = hasValue(values, "welcome.channel_id");
     if (!enabled) return { enabled: false, state: "inactive", status: "Desativada" };
     if (!hasChannel) return { enabled: true, state: "partial", status: "Requer canal" };
     return { enabled: true, state: "active", status: "Ativa" };
@@ -1151,6 +1165,17 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
         patches.set(field.scope, scopePatch);
         saved.push(field.id);
         changedSections.add(field.id.split(".")[0] || field.scope);
+      }
+      if (saved.length && changedSections.has("welcome")) {
+        const channelId = Number(getPath(docs.welcome, "channel_id") || 0);
+        const webhook = isPlainObject(getPath(docs.welcome, "webhook"))
+          ? { ...(getPath(docs.welcome, "webhook") as Record<string, unknown>) }
+          : {};
+        webhook.channel_id = Number.isFinite(channelId) && channelId > 0 ? channelId : 0;
+        setPath(docs.welcome, "webhook", webhook);
+        const welcomePatch = patches.get("welcome") ?? {};
+        dotSetForPath(welcomePatch, "webhook.channel_id", webhook.channel_id);
+        patches.set("welcome", welcomePatch);
       }
       const changedSectionsList = Array.from(changedSections);
       const revision = saved.length ? await saveDocs(guildId, patches, changedSectionsList) : undefined;

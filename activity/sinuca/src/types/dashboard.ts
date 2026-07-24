@@ -30,11 +30,15 @@ export interface DashboardTemplateVariables {
   items: DashboardTemplateVariable[];
 }
 
+export type DashboardMessageEditorPresentation = "adaptive" | "components_v2" | "generic" | "color_panel";
+
 export interface DashboardMessageEditorDefinition {
   id: string;
   label: string;
   description?: string;
   fieldIds: string[];
+  senderFieldIds?: string[];
+  presentation?: DashboardMessageEditorPresentation;
   variables?: DashboardTemplateVariables;
 }
 

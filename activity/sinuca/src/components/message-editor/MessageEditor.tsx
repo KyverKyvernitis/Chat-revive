@@ -57,8 +57,21 @@ function cloneValue<T>(value: T): T {
 }
 
 function editorVisualFieldVisible(editorId: string, fieldId: string, draft: Record<string, unknown>): boolean {
+  if (fieldId.startsWith("welcome.webhook.")) {
+    if (fieldId === "welcome.webhook.enabled") return true;
+    if (!Boolean(draft["welcome.webhook.enabled"])) return false;
+    if (fieldId === "welcome.webhook.name") return String(draft["welcome.webhook.name_mode"] || "fixed") === "fixed";
+    if (fieldId === "welcome.webhook.avatar_url") return String(draft["welcome.webhook.avatar_mode"] || "server") === "custom";
+    return true;
+  }
   if (editorId === "welcome-public") {
     const renderMode = String(draft["welcome.render_mode"] || "components_v2");
+    if (["welcome.style", "welcome.accent_color", "welcome.accent_color_mode", "welcome.media_mode", "welcome.media_url"].includes(fieldId)) {
+      if (renderMode !== "components_v2") return false;
+      if (fieldId === "welcome.accent_color") return String(draft["welcome.accent_color_mode"] || "fixed") === "fixed";
+      if (fieldId === "welcome.media_url") return String(draft["welcome.media_mode"] || "custom") === "custom";
+      return true;
+    }
     if (fieldId.includes(".embed.")) {
       if (renderMode !== "embed") return false;
       if (fieldId === "welcome.embed.color") return String(draft["welcome.embed.color_mode"] || "fixed") === "fixed";
@@ -81,6 +94,15 @@ function relatedContextFields(
 ): DashboardFieldDefinition[] {
   if (!selected) return [];
   const id = selected.id;
+  if (id.startsWith("welcome.webhook.")) {
+    return fields.filter((field) => field.id.startsWith("welcome.webhook."));
+  }
+  if (["welcome.style", "welcome.accent_color", "welcome.accent_color_mode"].includes(id)) {
+    return fields.filter((field) => ["welcome.style", "welcome.accent_color", "welcome.accent_color_mode"].includes(field.id));
+  }
+  if (["welcome.media_mode", "welcome.media_url"].includes(id)) {
+    return fields.filter((field) => ["welcome.media_mode", "welcome.media_url"].includes(field.id));
+  }
   const groups: RegExp[] = [
     /^(.*\.author_)(?:name|icon_mode|icon_url|url)$/,
     /^(.*\.footer_)(?:text|icon_mode|icon_url)$/,
@@ -115,11 +137,15 @@ export function MessageEditor(props: MessageEditorProps) {
     groupLabel,
     description,
     fields,
+    senderFieldIds = [],
+    presentation = "generic",
     baseline,
     draft,
     guildOptions,
     botName,
     botAvatarUrl,
+    guildName,
+    guildAvatarUrl,
     variables,
     onChange,
     onApply,
@@ -127,11 +153,20 @@ export function MessageEditor(props: MessageEditorProps) {
   } = props;
 
   const editorKey = `${sectionId}:${editorId}`;
+  const senderFieldIdSet = useMemo(() => new Set(senderFieldIds), [senderFieldIds]);
   const jsonFields = useMemo(() => fields.filter((field) => field.type !== "color_slots"), [fields]);
   const serializedDraft = useMemo(() => serializeMessageFields(jsonFields, draft), [draft, jsonFields]);
   const visualFields = useMemo(
     () => fields.filter((field) => editorVisualFieldVisible(editorId, field.id, draft)),
     [draft, editorId, fields],
+  );
+  const senderFields = useMemo(
+    () => visualFields.filter((field) => senderFieldIdSet.has(field.id)),
+    [senderFieldIdSet, visualFields],
+  );
+  const messageFields = useMemo(
+    () => visualFields.filter((field) => !senderFieldIdSet.has(field.id)),
+    [senderFieldIdSet, visualFields],
   );
   const [visible, setVisible] = useState(false);
   const [view, setView] = useState<MessageEditorView>("canvas");
@@ -501,8 +536,27 @@ export function MessageEditor(props: MessageEditorProps) {
   const colorPanelNumber = sectionId === "color_roles" ? Number(editorId.match(/^color-panel-([1-3])$/)?.[1] || 0) : 0;
   const colorSlotRange = colorPanelNumber ? { start: (colorPanelNumber - 1) * 10 + 1, end: colorPanelNumber * 10 } : null;
   const selectedField = fields.find((field) => field.id === selectedFieldId) ?? null;
+  const senderPrimaryField = senderFields.find((field) => field.id === "welcome.webhook.enabled") ?? senderFields[0] ?? null;
+  const senderSelected = Boolean(selectedField && senderFieldIdSet.has(selectedField.id));
+  const senderEnabled = Boolean(draft["welcome.webhook.enabled"]);
   const activeTextField = fields.find((field) => field.id === activeTextFieldId && (field.type === "text" || field.type === "textarea"))
     ?? null;
+
+  function handleSelectSender() {
+    if (!senderPrimaryField || jsonDirty || pendingJsonChanges) return;
+    setSelectedFieldId(senderPrimaryField.id);
+    setEditingFieldId(null);
+    setActiveTextFieldId(null);
+    setView("canvas");
+  }
+
+  function handleEditSender() {
+    if (!senderPrimaryField || jsonDirty || pendingJsonChanges) return;
+    setSelectedFieldId(senderPrimaryField.id);
+    setEditingFieldId(null);
+    setActiveTextFieldId(null);
+    setView("inspector");
+  }
 
   function handleSelectField(field: DashboardFieldDefinition) {
     if (jsonDirty || pendingJsonChanges) {
@@ -678,12 +732,19 @@ export function MessageEditor(props: MessageEditorProps) {
               sectionId={sectionId}
               editorId={editorId}
               groupLabel={groupLabel}
-              fields={fields}
+              presentation={presentation}
+              fields={messageFields}
+              senderFields={senderFields}
               draft={draft}
               guildOptions={guildOptions}
               botName={botName}
               botAvatarUrl={botAvatarUrl}
+              guildName={guildName}
+              guildAvatarUrl={guildAvatarUrl}
               interactive={canvasInteractive}
+              senderSelected={senderSelected}
+              onSelectSender={handleSelectSender}
+              onEditSender={handleEditSender}
               selectedFieldId={selectedFieldId}
               editingFieldId={editingFieldId}
               selectedColorSlot={selectedColorSlot}
@@ -699,13 +760,15 @@ export function MessageEditor(props: MessageEditorProps) {
             {selectedField && !activeEditingField && canvasInteractive && (
               <div className="osk-message-editor__selection-bar">
                 <div>
-                  <strong>{selectedField.label}</strong>
-                  <small>{selectedField.type === "text" || selectedField.type === "textarea" ? "Toque novamente no texto para editar." : "Abra as propriedades deste elemento."}</small>
+                  <strong>{senderSelected ? "Remetente da mensagem" : selectedField.label}</strong>
+                  <small>{senderSelected ? (senderEnabled ? "Webhook ativo. Toque novamente na Osaka para configurar." : "A mensagem será enviada pela Osaka.") : selectedField.type === "text" || selectedField.type === "textarea" ? "Toque novamente no texto para editar." : "Abra as propriedades deste elemento."}</small>
                 </div>
                 <div>
-                  {(selectedField.type === "text" || selectedField.type === "textarea") && <button type="button" onClick={() => handleEditField(selectedField)}><Pencil size={15} />Editar</button>}
-                  {inspectorFields.length > 1 && <button type="button" onClick={() => openInspector(selectedField)}><Settings2 size={15} />Opções</button>}
-                  {variables?.items.length && (selectedField.type === "text" || selectedField.type === "textarea") ? <button type="button" onClick={openVariables}><Variable size={15} />Variável</button> : null}
+                  {senderSelected ? <button type="button" onClick={handleEditSender}><Settings2 size={15} />Configurar</button> : <>
+                    {(selectedField.type === "text" || selectedField.type === "textarea") && <button type="button" onClick={() => handleEditField(selectedField)}><Pencil size={15} />Editar</button>}
+                    {inspectorFields.length > 1 && <button type="button" onClick={() => openInspector(selectedField)}><Settings2 size={15} />Opções</button>}
+                    {variables?.items.length && (selectedField.type === "text" || selectedField.type === "textarea") ? <button type="button" onClick={openVariables}><Variable size={15} />Variável</button> : null}
+                  </>}
                 </div>
               </div>
             )}
@@ -715,8 +778,8 @@ export function MessageEditor(props: MessageEditorProps) {
             <div className="osk-message-editor__view-head">
               <button type="button" onClick={leaveAuxiliaryView} disabled={Boolean(pendingJsonChanges)} aria-label="Voltar à mensagem"><ChevronLeft size={18} /></button>
               <div>
-                <strong>{view === "variables" ? "Variáveis" : view === "json" ? "JSON avançado" : selectedField?.label ?? "Propriedades"}</strong>
-                <small>{view === "variables" ? (activeTextField ? `Inserir em ${activeTextField.label}` : "Toque em uma variável para copiar") : view === "json" ? "Edição técnica da mensagem" : "Configurações do elemento selecionado"}</small>
+                <strong>{view === "variables" ? "Variáveis" : view === "json" ? "JSON avançado" : senderSelected ? "Remetente da mensagem" : selectedField?.label ?? "Propriedades"}</strong>
+                <small>{view === "variables" ? (activeTextField ? `Inserir em ${activeTextField.label}` : "Toque em uma variável para copiar") : view === "json" ? "Edição técnica da mensagem" : senderSelected ? "Nome e avatar usados no envio" : "Configurações do elemento selecionado"}</small>
               </div>
             </div>
             <div className="osk-message-editor__view-body">
@@ -733,7 +796,12 @@ export function MessageEditor(props: MessageEditorProps) {
                   onDiscard={() => { discardJson(); setView("canvas"); }}
                 />
               ) : selectedField ? (
-                <MessageVisualEditor
+                <>
+                  {senderSelected && <div className="osk-message-sender-note" data-enabled={senderEnabled || undefined}>
+                    <strong>{senderEnabled ? "Webhook ativado" : "Enviado pela Osaka"}</strong>
+                    <span>{senderEnabled ? "A identidade abaixo será usada apenas nesta mensagem." : "Ative o webhook para escolher outro nome e avatar."}</span>
+                  </div>}
+                  <MessageVisualEditor
                   fields={inspectorFields}
                   baseline={baseline}
                   draft={draft}
@@ -751,6 +819,7 @@ export function MessageEditor(props: MessageEditorProps) {
                   }}
                   onTextSelection={handleTextSelection}
                 />
+                </>
               ) : (
                 <div className="osk-message-empty">Selecione um elemento da mensagem para abrir suas propriedades.</div>
               )}

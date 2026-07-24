@@ -522,6 +522,8 @@ function DashboardShell({
               guildOptions={guildOptions}
               previewBotName={botName}
               previewBotAvatarUrl={botIdentity?.avatarUrl}
+              previewGuildName={guildName}
+              previewGuildAvatarUrl={guildIcon}
               onChange={onFieldChange}
               onMessageEditorActiveChange={onMessageEditorActiveChange}
               onBack={onHome}

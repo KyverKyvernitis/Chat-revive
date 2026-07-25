@@ -284,16 +284,9 @@ def _is_default_black_slot(slot_number: int, slot: dict[str, Any]) -> bool:
 
 
 def _cleared_slot_payload(slot_number: int) -> dict[str, Any]:
-    name = f"Cor {slot_number}"
-    return {
-        "number": int(slot_number),
-        "name": name,
-        "text_hex": "#ffffff",
-        "role_hex": "#ffffff",
-        "role_id": 0,
-        "role_name": name,
-        "managed": False,
-    }
+    # Ao reutilizar uma posição removida, volte ao preset correspondente.
+    # O branco genérico era apenas placeholder e deixava a imagem inteira sem cor.
+    return _default_slot_payload(slot_number)
 
 
 def _slot_payload_signature(slot: dict[str, Any], *, fallback_slot_number: int) -> dict[str, Any]:
@@ -1181,6 +1174,14 @@ class ColorRolesCog(commands.Cog):
             merged["role_name"] = str(merged.get("role_name") or merged["name"])
             merged["text_hex"] = _clean_hex(str(merged.get("text_hex") or ""), default_slot["text_hex"])
             merged["role_hex"] = _clean_hex(str(merged.get("role_hex") or ""), default_slot["role_hex"])
+            if (
+                slot_number != 30
+                and int(merged.get("role_id") or 0) == 0
+                and merged["text_hex"] == "#ffffff"
+                and merged["role_hex"] == "#ffffff"
+            ):
+                merged["text_hex"] = default_slot["text_hex"]
+                merged["role_hex"] = default_slot["role_hex"]
             comparable_current = {
                 "name": str(merged.get("name") or ""),
                 "text_hex": merged["text_hex"],
@@ -1721,7 +1722,13 @@ class ColorRolesCog(commands.Cog):
             if value > 0:
                 return f"#{value:06x}"
             return "#99aab5"
-        return _clean_hex(str(slot.get("role_hex") or slot.get("text_hex") or ""), "#ffffff")
+        role_hex = _clean_hex(str(slot.get("role_hex") or ""), "")
+        text_hex = _clean_hex(str(slot.get("text_hex") or ""), "")
+        slot_number = int(slot.get("number") or 0)
+        preset_hex = str(_default_slot_payload(slot_number or 1).get("role_hex") or "#5865f2")
+        if slot_number != 30 and role_id == 0 and role_hex == "#ffffff" and text_hex == "#ffffff":
+            return preset_hex
+        return role_hex or text_hex or preset_hex
 
     def _make_block_image(self, guild_id: int, block_index: int, *, filename: str | None = None) -> discord.File:
         if Image is None or ImageDraw is None:

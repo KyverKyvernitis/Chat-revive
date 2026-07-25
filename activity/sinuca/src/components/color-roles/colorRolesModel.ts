@@ -8,6 +8,26 @@ export const COLOR_PANEL_MAX = 3;
 export const COLOR_PANEL_OPTION_MAX = 10;
 export const COLOR_SLOT_MAX = 30;
 
+const COLOR_PRESET_ROLE_HEX: Record<number, string> = {
+  1: "#8B0000", 2: "#B8860B", 3: "#006400", 4: "#00008B", 5: "#C71585",
+  6: "#800080", 7: "#FF8C00", 8: "#A0522D", 9: "#008B8B", 10: "#1F1F1F",
+  11: "#FF0000", 12: "#FFD700", 13: "#00FF00", 14: "#1E90FF", 15: "#FF69B4",
+  16: "#9370DB", 17: "#FFA500", 18: "#F5DEB3", 19: "#00FFFF", 20: "#808080",
+  21: "#FF7F7F", 22: "#FFF68F", 23: "#90EE90", 24: "#87CEFA", 25: "#FFB6C1",
+  26: "#D8BFD8", 27: "#FFCC99", 28: "#F5F5DC", 29: "#E0FFFF", 30: "#FFFFFF",
+};
+
+function normalizedHex(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const normalized = raw.startsWith("#") ? raw : `#${raw}`;
+  return /^#[0-9a-f]{6}$/i.test(normalized) ? normalized.toUpperCase() : null;
+}
+
+export function presetColorRoleHex(slotNumber: number): string {
+  return COLOR_PRESET_ROLE_HEX[Math.max(1, Math.min(COLOR_SLOT_MAX, Math.trunc(slotNumber || 1)))] ?? "#5865F2";
+}
+
 function uniqueId(prefix: string): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return `${prefix}-${crypto.randomUUID()}`;
@@ -92,16 +112,29 @@ export function colorRoleHex(
   slot: DashboardColorSlot | undefined,
   guildOptions?: DashboardOptionsPayload | null,
 ): string {
-  const roleId = String(slot?.role_id || "");
-  const role = roleId ? guildOptions?.roles.find((item) => item.id === roleId) : undefined;
+  const roleId = String(slot?.role_id || "").trim();
+  const hasRoleId = Boolean(roleId && roleId !== "0");
+  const role = hasRoleId ? guildOptions?.roles.find((item) => item.id === roleId) : undefined;
   const liveColor = Number(role?.color || 0);
   if (role && Number.isFinite(liveColor)) {
     if (liveColor > 0) return `#${liveColor.toString(16).padStart(6, "0").slice(-6)}`.toUpperCase();
     return "#99AAB5";
   }
-  const fallback = String(slot?.role_hex || slot?.text_hex || "#5865F2").trim();
-  const normalized = fallback.startsWith("#") ? fallback : `#${fallback}`;
-  return /^#[0-9a-f]{6}$/i.test(normalized) ? normalized.toUpperCase() : "#5865F2";
+
+  const slotNumber = Math.max(1, Math.min(COLOR_SLOT_MAX, Math.trunc(Number(slot?.number || 1))));
+  const preset = presetColorRoleHex(slotNumber);
+  const roleHex = normalizedHex(slot?.role_hex);
+  const textHex = normalizedHex(slot?.text_hex);
+
+  // Versões antigas do editor criavam novas opções com ambos os campos em branco.
+  // Sem um cargo real, esse branco era apenas placeholder e deve voltar ao preset.
+  const placeholderWhite = !hasRoleId
+    && slotNumber !== 30
+    && roleHex === "#FFFFFF"
+    && textHex === "#FFFFFF";
+  if (placeholderWhite) return preset;
+
+  return roleHex ?? textHex ?? preset;
 }
 
 export function colorRoleLabel(slot: DashboardColorSlot | undefined, guildOptions?: DashboardOptionsPayload | null): string {

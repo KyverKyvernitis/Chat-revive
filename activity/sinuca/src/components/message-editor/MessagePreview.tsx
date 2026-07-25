@@ -18,7 +18,7 @@ import {
 } from "../color-roles/colorRolesModel";
 import { DiscordRichText } from "./DiscordRichText";
 import { MessageInlineTextEditor } from "./MessageInlineTextEditor";
-import { isValidPreviewUrl, normalizePreviewUrl, readableFieldLabel } from "./messageEditorUtils";
+import { isValidPreviewUrl, normalizePreviewUrl, previewImageCandidates, readableFieldLabel } from "./messageEditorUtils";
 
 interface MessagePreviewProps {
   sectionId?: string;
@@ -92,6 +92,16 @@ function normalizedColor(value: unknown): string | null {
 function previewColor(fields: DashboardFieldDefinition[], draft: Record<string, unknown>): string | null {
   const colorField = fields.find((field) => field.type === "color");
   return normalizedColor(colorField ? draft[colorField.id] : null);
+}
+
+function needsLightOutline(hex: string): boolean {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!match) return false;
+  const value = Number.parseInt(match[1], 16);
+  const red = (value >> 16) & 0xff;
+  const green = (value >> 8) & 0xff;
+  const blue = value & 0xff;
+  return (red * 0.299 + green * 0.587 + blue * 0.114) < 58;
 }
 
 function optionLabel(field: DashboardFieldDefinition | undefined, draft: Record<string, unknown>): string | null {
@@ -263,15 +273,44 @@ function FieldText({
 
 function MessageImage({ src, alt, className, placeholder }: { src: string; alt: string; className: string; placeholder: string }) {
   const normalizedSrc = normalizePreviewUrl(src);
+  const candidates = useMemo(() => previewImageCandidates(normalizedSrc), [normalizedSrc]);
+  const [candidateIndex, setCandidateIndex] = useState(0);
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  useEffect(() => { setFailed(false); setLoaded(false); }, [normalizedSrc]);
-  if (failed || !isValidPreviewUrl(normalizedSrc)) {
+
+  useEffect(() => {
+    setCandidateIndex(0);
+    setFailed(false);
+    setLoaded(false);
+  }, [normalizedSrc]);
+
+  const currentSrc = candidates[candidateIndex] || "";
+  if (failed || !currentSrc) {
     return <div className={`${className} osk-message-preview__image-placeholder`} data-error={failed || undefined}>{failed ? "Imagem indisponível" : placeholder}</div>;
   }
+
+  const handleError = () => {
+    if (candidateIndex + 1 < candidates.length) {
+      setCandidateIndex((current) => current + 1);
+      setLoaded(false);
+      return;
+    }
+    setFailed(true);
+  };
+
   return <span className={`osk-message-image-loader ${className}-loader`} data-loaded={loaded || undefined}>
     {!loaded && <span className={`${className} osk-message-preview__image-placeholder`}>Carregando imagem…</span>}
-    <img key={normalizedSrc} className={className} src={normalizedSrc} alt={alt} loading="eager" decoding="async" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} />
+    <img
+      key={currentSrc}
+      className={className}
+      src={currentSrc}
+      alt={alt}
+      loading="eager"
+      decoding="async"
+      referrerPolicy="no-referrer"
+      onLoad={() => setLoaded(true)}
+      onError={handleError}
+    />
   </span>;
 }
 
@@ -631,7 +670,7 @@ function ColorRolesPanelPreview(props: PreviewCoreProps) {
   const rawSlots = draft["color_roles.slots"];
   const slots = rawSlots && typeof rawSlots === "object" ? rawSlots as Record<string, DashboardColorSlot> : {};
   const panelSlots = (panel?.slots ?? []).map((number) => ({
-    ...(slots[String(number)] || ({ number, name: `Cor ${number}`, text_hex: "#ffffff", role_hex: "#ffffff", role_id: 0, role_name: `Cor ${number}`, managed: false } as DashboardColorSlot)),
+    ...(slots[String(number)] || ({ number, name: `Cor ${number}`, text_hex: "", role_hex: "", role_id: 0, role_name: `Cor ${number}`, managed: false } as DashboardColorSlot)),
     number,
   }));
 
@@ -661,30 +700,67 @@ function ColorRolesPanelPreview(props: PreviewCoreProps) {
     onSelectColorSlot?.(number, true);
   };
 
+  const selectedIndex = selectedColorSlot == null
+    ? -1
+    : panelSlots.findIndex((slot) => slot.number === selectedColorSlot);
+  const selectedSlot = selectedIndex >= 0 ? panelSlots[selectedIndex] : null;
+  const selectSlot = (slotNumber: number, openInspector = false) => {
+    if (!interactive || !slotsField) return;
+    onSelectField?.(slotsField);
+    onSelectColorSlot?.(slotNumber, openInspector);
+  };
+
   return (
     <div className="osk-color-panel-canvas" data-panel={panelIndex + 1}>
-      <div className="osk-color-panel-canvas__image" aria-label={`Opções do Painel ${panelIndex + 1}`}>
+      <div className="osk-color-panel-canvas__image" aria-label={`Imagem de opções do Painel ${panelIndex + 1}`}>
         {panelSlots.map((slot, index) => {
           const color = colorRoleHex(slot, guildOptions);
           const selected = selectedColorSlot === slot.number;
           return (
-            <div key={slot.number} className="osk-color-panel-canvas__option" data-selected={selected || undefined} style={{ "--osk-slot-color": color } as CSSProperties}>
-              <button type="button" className="osk-color-panel-canvas__slot" disabled={!interactive || !slotsField} onClick={(event) => { event.stopPropagation(); if (!slotsField) return; onSelectField?.(slotsField); onSelectColorSlot?.(slot.number); }}>
-                <b>{index + 1}.</b><span>{String(slot.name || `Cor ${slot.number}`)}</span>
-              </button>
-              {interactive && <span className="osk-color-panel-canvas__option-actions">
-                <button type="button" disabled={index === 0} onClick={(event) => { event.stopPropagation(); moveOption(index, -1); }} aria-label="Mover opção para cima"><ArrowUp size={12} /></button>
-                <button type="button" disabled={index === panelSlots.length - 1} onClick={(event) => { event.stopPropagation(); moveOption(index, 1); }} aria-label="Mover opção para baixo"><ArrowDown size={12} /></button>
-                <button type="button" disabled={panelSlots.length <= 1} onClick={(event) => { event.stopPropagation(); removeOption(slot.number); }} aria-label="Remover opção"><Minus size={13} /></button>
-              </span>}
-            </div>
+            <button
+              type="button"
+              key={slot.number}
+              className="osk-color-panel-canvas__slot"
+              data-selected={selected || undefined}
+              data-dark-color={needsLightOutline(color) || undefined}
+              style={{ "--osk-slot-color": color } as CSSProperties}
+              disabled={!interactive || !slotsField}
+              onClick={(event) => { event.stopPropagation(); selectSlot(slot.number); }}
+              onDoubleClick={(event) => { event.stopPropagation(); selectSlot(slot.number, true); }}
+            >
+              <b>{index + 1}.</b><span>{String(slot.name || `Cor ${slot.number}`)}</span>
+            </button>
           );
         })}
-        {interactive && slotsField && panel && panel.slots.length < COLOR_PANEL_OPTION_MAX && nextUnusedColorSlot(layout) !== null && (
-          <button type="button" className="osk-color-panel-canvas__add" onClick={(event) => { event.stopPropagation(); addOption(); }}><Plus size={15} />Adicionar opção</button>
-        )}
       </div>
-      <div className="osk-message-preview__select-sim osk-color-panel-canvas__select"><span>Selecione uma cor</span><span>⌄</span></div>
+
+      <div className="osk-color-panel-canvas__buttons" aria-label="Botões do painel de cores">
+        {panelSlots.map((slot, index) => (
+          <button
+            type="button"
+            key={`button-${slot.number}`}
+            disabled
+            aria-label={`Botão ${index + 1}: ${String(slot.name || `Cor ${slot.number}`)}`}
+          >
+            {index + 1}
+          </button>
+        ))}
+      </div>
+
+      {interactive && selectedSlot && (
+        <div className="osk-color-panel-canvas__selection-tools">
+          <span><strong>Opção {selectedIndex + 1}</strong><small>{String(selectedSlot.name || `Cor ${selectedSlot.number}`)}</small></span>
+          <span>
+            <button type="button" disabled={selectedIndex <= 0} onClick={() => moveOption(selectedIndex, -1)} aria-label="Mover opção para cima"><ArrowUp size={14} /></button>
+            <button type="button" disabled={selectedIndex < 0 || selectedIndex >= panelSlots.length - 1} onClick={() => moveOption(selectedIndex, 1)} aria-label="Mover opção para baixo"><ArrowDown size={14} /></button>
+            <button type="button" disabled={panelSlots.length <= 1} onClick={() => removeOption(selectedSlot.number)} aria-label="Remover opção"><Minus size={15} /></button>
+          </span>
+        </div>
+      )}
+
+      {interactive && slotsField && panel && panel.slots.length < COLOR_PANEL_OPTION_MAX && nextUnusedColorSlot(layout) !== null && (
+        <button type="button" className="osk-color-panel-canvas__add" onClick={(event) => { event.stopPropagation(); addOption(); }}><Plus size={15} />Adicionar opção</button>
+      )}
     </div>
   );
 }

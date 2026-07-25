@@ -204,3 +204,26 @@ export function isValidPreviewUrl(value: unknown): value is string {
     return false;
   }
 }
+
+export function previewImageCandidates(value: unknown): string[] {
+  const normalized = normalizePreviewUrl(value);
+  if (!isValidPreviewUrl(normalized)) return [];
+
+  const candidates = [normalized];
+  try {
+    const parsed = new URL(normalized);
+    const host = parsed.hostname.toLowerCase();
+    if (host === "cdn.discordapp.com") {
+      parsed.hostname = "media.discordapp.net";
+      candidates.push(parsed.toString());
+    } else if (host === "media.discordapp.net") {
+      parsed.hostname = "cdn.discordapp.com";
+      candidates.push(parsed.toString());
+    }
+  } catch {
+    // A validação acima já elimina URLs inválidas; mantenha apenas a original.
+  }
+
+  return Array.from(new Set(candidates));
+}
+

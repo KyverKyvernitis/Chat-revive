@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { guildInitials } from "../moduleCatalog";
+import { previewImageCandidates } from "./message-editor/messageEditorUtils";
 
 interface SmartAvatarProps {
   src?: string | null;
@@ -17,20 +18,17 @@ interface SmartAvatarProps {
  * imagem válida, preservando o fundo roxo/azul como fallback.
  */
 export function SmartAvatar({ src, name, type, size, alt, className }: SmartAvatarProps) {
+  const candidates = useMemo(() => previewImageCandidates(src), [src]);
+  const [candidateIndex, setCandidateIndex] = useState(0);
   const [broken, setBroken] = useState(false);
-  let normalizedSrc = String(src || "").trim();
-  if ((normalizedSrc.startsWith("<") && normalizedSrc.endsWith(">"))
-    || (normalizedSrc.startsWith('"') && normalizedSrc.endsWith('"'))
-    || (normalizedSrc.startsWith("'") && normalizedSrc.endsWith("'"))) {
-    normalizedSrc = normalizedSrc.slice(1, -1).trim();
-  }
-  normalizedSrc = normalizedSrc.replace(/&amp;/gi, "&");
 
   useEffect(() => {
+    setCandidateIndex(0);
     setBroken(false);
-  }, [normalizedSrc]);
+  }, [src]);
 
-  const showImage = Boolean(normalizedSrc) && !broken;
+  const currentSrc = candidates[candidateIndex] || "";
+  const showImage = Boolean(currentSrc) && !broken;
   const fallbackName = name && name.trim() ? name : type === "user" ? "Você" : "Servidor";
   const style = size ? { width: size, height: size } : undefined;
 
@@ -39,11 +37,19 @@ export function SmartAvatar({ src, name, type, size, alt, className }: SmartAvat
       {showImage ? (
         <img
           className="osk-avatar-img"
-          src={normalizedSrc}
+          key={currentSrc}
+          src={currentSrc}
           alt={alt ?? fallbackName}
           loading="eager"
           decoding="async"
-          onError={() => setBroken(true)}
+          referrerPolicy="no-referrer"
+          onError={() => {
+            if (candidateIndex + 1 < candidates.length) {
+              setCandidateIndex((current) => current + 1);
+              return;
+            }
+            setBroken(true);
+          }}
         />
       ) : (
         <span aria-hidden="true">{guildInitials(fallbackName)}</span>

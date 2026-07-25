@@ -969,12 +969,24 @@ function normalizeColorSlots(raw: unknown): Record<string, unknown> {
     const base = defaultRaw as Record<string, unknown>;
     const item = isPlainObject(source[number]) ? source[number] as Record<string, unknown> : {};
     const name = String(item.name || base.name).trim().slice(0, 80) || String(base.name);
+    const roleId = snowflakeFromRaw(item.role_id);
+    const hasRoleId = roleId.toString() !== "0";
+    let textHex = cleanColor(item.text_hex, String(base.text_hex)).toLowerCase();
+    let roleHex = cleanColor(item.role_hex, String(base.role_hex)).toLowerCase();
+    const placeholderWhite = !hasRoleId
+      && Number(number) !== 30
+      && textHex === "#ffffff"
+      && roleHex === "#ffffff";
+    if (placeholderWhite) {
+      textHex = String(base.text_hex).toLowerCase();
+      roleHex = String(base.role_hex).toLowerCase();
+    }
     result[number] = {
       number: Number(number),
       name,
-      text_hex: cleanColor(item.text_hex, String(base.text_hex)).toLowerCase(),
-      role_hex: cleanColor(item.role_hex, String(base.role_hex)).toLowerCase(),
-      role_id: snowflakeFromRaw(item.role_id),
+      text_hex: textHex,
+      role_hex: roleHex,
+      role_id: roleId,
       role_name: String(item.role_name || name).trim().slice(0, 100) || name,
       managed: Boolean(item.managed),
     };

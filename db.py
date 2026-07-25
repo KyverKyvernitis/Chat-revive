@@ -2290,6 +2290,14 @@ def _settingsdb_get_color_roles_config(self, guild_id: int) -> Dict[str, Any]:
         merged["role_name"] = str(merged.get("role_name") or merged["name"])
         merged["text_hex"] = str(merged.get("text_hex") or base["slots"][key]["text_hex"])
         merged["role_hex"] = str(merged.get("role_hex") or base["slots"][key]["role_hex"])
+        if (
+            int(key) != 30
+            and int(merged.get("role_id") or 0) == 0
+            and str(merged.get("text_hex") or "").lower() == "#ffffff"
+            and str(merged.get("role_hex") or "").lower() == "#ffffff"
+        ):
+            merged["text_hex"] = str(base["slots"][key]["text_hex"])
+            merged["role_hex"] = str(base["slots"][key]["role_hex"])
         legacy = _settingsdb_color_roles_legacy_slot_payload(int(key))
         comparable_current = {
             "name": str(merged.get("name") or ""),

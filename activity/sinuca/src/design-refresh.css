@@ -3748,47 +3748,6 @@
 /* O editor do painel altera somente a imagem/lista de opções. */
 .osk-color-panel-canvas__copy { display: none !important; }
 .osk-color-panel-canvas__image { gap: 7px 13px; }
-.osk-color-panel-canvas__option {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0,1fr) auto;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  transition: border-color .15s ease, background .15s ease;
-}
-.osk-color-panel-canvas__option[data-selected] {
-  border-color: rgba(132,105,255,.52);
-  background: rgba(111,82,246,.1);
-  box-shadow: 0 0 0 3px rgba(111,82,246,.055);
-}
-.osk-color-panel-canvas__option .osk-color-panel-canvas__slot {
-  width: 100%;
-  border: 0;
-  box-shadow: none;
-}
-.osk-color-panel-canvas__option-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  padding-right: 3px;
-  opacity: .38;
-  transition: opacity .15s ease;
-}
-.osk-color-panel-canvas__option:hover .osk-color-panel-canvas__option-actions,
-.osk-color-panel-canvas__option[data-selected] .osk-color-panel-canvas__option-actions { opacity: 1; }
-.osk-color-panel-canvas__option-actions button {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  border-radius: 7px;
-  color: #8993a5;
-  background: rgba(255,255,255,.025);
-}
-.osk-color-panel-canvas__option-actions button:last-child { color: #d98596; }
-.osk-color-panel-canvas__option-actions button:disabled { opacity: .22; }
 .osk-color-panel-canvas__add {
   min-height: 32px;
   display: flex;
@@ -3851,18 +3810,135 @@
   .osk-color-panel-manager__edit { grid-column: 2; justify-self: start; min-height: 32px; padding-inline: 10px; }
   .osk-color-panel-manager__remove { grid-column: 3; grid-row: 1 / span 2; }
   .osk-color-panel-manager__order { grid-row: 1 / span 2; }
-  .osk-color-panel-canvas__image { grid-template-columns: 1fr; }
-  .osk-color-panel-canvas__option-actions { opacity: 1; }
 }
 
-/* No celular, as ações da opção aparecem só depois da seleção para preservar a leitura da imagem. */
+
+/* Prévia fiel ao painel publicado no Discord: imagem em duas colunas e botões numerados. */
+.osk-color-panel-canvas__image {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: clamp(14px, 4vw, 34px);
+  row-gap: clamp(8px, 2.2vw, 16px);
+  padding: clamp(14px, 3.8vw, 24px);
+  border: 0;
+  border-radius: 10px;
+  background: #090c12;
+}
+.osk-color-panel-canvas__slot {
+  min-height: 34px;
+  gap: 7px;
+  padding: 3px 4px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--osk-slot-color, #99aab5);
+  background: transparent;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: clamp(.68rem, 2.95vw, .86rem);
+  font-weight: 760;
+  letter-spacing: -.025em;
+  line-height: 1.15;
+  text-shadow:
+    0 1px 0 rgba(0,0,0,.96),
+    1px 0 0 rgba(0,0,0,.8),
+    -1px 0 0 rgba(0,0,0,.8),
+    0 -1px 0 rgba(0,0,0,.68),
+    0 2px 4px rgba(0,0,0,.95);
+}
+.osk-color-panel-canvas__slot b {
+  flex: 0 0 auto;
+  font: inherit;
+}
+.osk-color-panel-canvas__slot span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.osk-color-panel-canvas__slot[data-selected] {
+  border-color: rgba(133,106,255,.68);
+  background: rgba(111,82,246,.11);
+  box-shadow: 0 0 0 3px rgba(111,82,246,.06);
+}
+.osk-color-panel-canvas__buttons {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 7px;
+}
+.osk-color-panel-canvas__buttons button {
+  min-width: 0;
+  min-height: 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 8px;
+  color: #e8e9ec;
+  background: #1a1d22;
+  font-size: .72rem;
+  font-weight: 760;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+}
+.osk-color-panel-canvas__buttons button[data-selected] {
+  border-color: rgba(132,105,255,.6);
+  background: rgba(111,82,246,.18);
+  color: #f0edff;
+}
+.osk-color-panel-canvas__buttons button:disabled { opacity: 1; }
+.osk-color-panel-canvas__selection-tools {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(125,98,255,.25);
+  border-radius: 10px;
+  background: rgba(111,82,246,.055);
+}
+.osk-color-panel-canvas__selection-tools > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.osk-color-panel-canvas__selection-tools strong { color: #ded9ff; font-size: .63rem; }
+.osk-color-panel-canvas__selection-tools small {
+  overflow: hidden;
+  color: #858fa0;
+  font-size: .55rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.osk-color-panel-canvas__selection-tools > span:last-child { display: inline-flex; gap: 4px; }
+.osk-color-panel-canvas__selection-tools button {
+  width: 31px;
+  height: 31px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: #929caf;
+  background: rgba(255,255,255,.035);
+}
+.osk-color-panel-canvas__selection-tools button:last-child { color: #dc8799; }
+.osk-color-panel-canvas__selection-tools button:disabled { opacity: .24; }
+
 @media (max-width: 520px) {
-  .osk-color-panel-canvas__option-actions {
-    opacity: 0;
-    pointer-events: none;
+  .osk-color-panel-canvas__image {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 9px;
+    row-gap: 7px;
+    padding: 12px 10px;
   }
-  .osk-color-panel-canvas__option[data-selected] .osk-color-panel-canvas__option-actions {
-    opacity: 1;
-    pointer-events: auto;
+  .osk-color-panel-canvas__slot {
+    min-height: 31px;
+    gap: 5px;
+    padding-inline: 2px;
+    font-size: clamp(.58rem, 2.75vw, .7rem);
   }
+  .osk-color-panel-canvas__buttons { gap: 5px; }
+  .osk-color-panel-canvas__buttons button { min-height: 36px; font-size: .66rem; }
+}
+.osk-color-panel-canvas__slot[data-dark-color] {
+  -webkit-text-stroke: .25px rgba(238,240,245,.58);
+  text-shadow:
+    0 0 1px rgba(238,240,245,.72),
+    0 1px 0 rgba(0,0,0,.98),
+    0 2px 4px rgba(0,0,0,.98);
 }

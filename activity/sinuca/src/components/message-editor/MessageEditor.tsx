@@ -6,8 +6,6 @@ import {
   Code2,
   Italic,
   Link2,
-  Pencil,
-  Settings2,
   Redo2,
   Strikethrough,
   Undo2,
@@ -16,6 +14,10 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type TransitionEvent } from "react";
 import { createPortal } from "react-dom";
 import type { DashboardFieldDefinition } from "../../types/dashboard";
+import {
+  colorPanelFromEditorId,
+  normalizeColorPanelLayout,
+} from "../color-roles/colorRolesModel";
 import { MessageJsonEditor } from "./MessageJsonEditor";
 import { MessagePreview } from "./MessagePreview";
 import { MessageVariablesPanel } from "./MessageVariablesPanel";
@@ -154,7 +156,7 @@ export function MessageEditor(props: MessageEditorProps) {
 
   const editorKey = `${sectionId}:${editorId}`;
   const senderFieldIdSet = useMemo(() => new Set(senderFieldIds), [senderFieldIds]);
-  const jsonFields = useMemo(() => fields.filter((field) => field.type !== "color_slots"), [fields]);
+  const jsonFields = useMemo(() => fields.filter((field) => field.type !== "color_slots" && field.type !== "color_panel_layout"), [fields]);
   const serializedDraft = useMemo(() => serializeMessageFields(jsonFields, draft), [draft, jsonFields]);
   const visualFields = useMemo(
     () => fields.filter((field) => editorVisualFieldVisible(editorId, field.id, draft)),
@@ -533,8 +535,9 @@ export function MessageEditor(props: MessageEditorProps) {
 
   applyActionRef.current = handleApply;
 
-  const colorPanelNumber = sectionId === "color_roles" ? Number(editorId.match(/^color-panel-([1-3])$/)?.[1] || 0) : 0;
-  const colorSlotRange = colorPanelNumber ? { start: (colorPanelNumber - 1) * 10 + 1, end: colorPanelNumber * 10 } : null;
+  const colorPanelLayout = sectionId === "color_roles" ? normalizeColorPanelLayout(draft["color_roles.panel_layout"]) : [];
+  const activeColorPanel = sectionId === "color_roles" ? colorPanelFromEditorId(colorPanelLayout, editorId) : null;
+  const colorSlotIds = activeColorPanel?.slots ?? null;
   const selectedField = fields.find((field) => field.id === selectedFieldId) ?? null;
   const senderPrimaryField = senderFields.find((field) => field.id === "welcome.webhook.enabled") ?? senderFields[0] ?? null;
   const senderSelected = Boolean(selectedField && senderFieldIdSet.has(selectedField.id));
@@ -565,6 +568,11 @@ export function MessageEditor(props: MessageEditorProps) {
     }
     setSelectedFieldId(field.id);
     setEditingFieldId((current) => current === field.id ? current : null);
+    if (presentation === "color_panel" && field.id === "color_roles.slots") {
+      setActiveTextFieldId(null);
+      setView("canvas");
+      return;
+    }
     if (field.type === "text" || field.type === "textarea") {
       setActiveTextFieldId(field.id);
       setView("canvas");
@@ -720,7 +728,7 @@ export function MessageEditor(props: MessageEditorProps) {
           <button type="button" disabled={historyStatus.index <= 0 || jsonDirty || Boolean(pendingJsonChanges)} onClick={undo} aria-label="Desfazer" title="Desfazer"><Undo2 size={17} /></button>
           <button type="button" disabled={historyStatus.index >= historyStatus.length || jsonDirty || Boolean(pendingJsonChanges)} onClick={redo} aria-label="Refazer" title="Refazer"><Redo2 size={17} /></button>
           {variables?.items.length ? <button type="button" disabled={Boolean(pendingJsonChanges)} onClick={openVariables} aria-label="Abrir variáveis" title="Variáveis"><Variable size={17} /></button> : null}
-          <button type="button" disabled={Boolean(pendingJsonChanges)} onClick={openJson} aria-label="Abrir JSON avançado" title="JSON avançado"><Braces size={17} /></button>
+          {presentation !== "color_panel" && <button type="button" disabled={Boolean(pendingJsonChanges)} onClick={openJson} aria-label="Abrir JSON avançado" title="JSON avançado"><Braces size={17} /></button>}
           <span className="osk-message-editor__dirty" data-visible={localDirty || jsonDirty || undefined} aria-live="polite" aria-hidden={!(localDirty || jsonDirty)}>Alterado</span>
         </div>
       </header>
@@ -751,34 +759,28 @@ export function MessageEditor(props: MessageEditorProps) {
               textSelection={textSelectionRef.current}
               onSelectField={handleSelectField}
               onEditField={handleEditField}
+              hasFieldOptions={(field) => relatedContextFields(field, visualFields).length > 1}
+              onOpenFieldOptions={openInspector}
               onFinishEdit={() => setEditingFieldId(null)}
               onChange={handleFieldChange}
               onTextSelection={handleTextSelection}
-              onSelectColorSlot={(slotNumber) => setSelectedColorSlot(slotNumber)}
+              onSelectColorSlot={(slotNumber, openInspector = false) => {
+                const repeated = selectedColorSlot === slotNumber && selectedFieldId === "color_roles.slots";
+                setSelectedColorSlot(slotNumber);
+                setSelectedFieldId("color_roles.slots");
+                setEditingFieldId(null);
+                setActiveTextFieldId(null);
+                setView(openInspector || repeated ? "inspector" : "canvas");
+              }}
             />
             {!canvasInteractive && <div className="osk-message-editor__canvas-lock"><Braces size={17} /><span>Aplique ou descarte o JSON pendente para voltar à edição visual.</span></div>}
-            {selectedField && !activeEditingField && canvasInteractive && (
-              <div className="osk-message-editor__selection-bar">
-                <div>
-                  <strong>{senderSelected ? "Remetente da mensagem" : selectedField.label}</strong>
-                  <small>{senderSelected ? (senderEnabled ? "Webhook ativo. Toque novamente na Osaka para configurar." : "A mensagem será enviada pela Osaka.") : selectedField.type === "text" || selectedField.type === "textarea" ? "Toque novamente no texto para editar." : "Abra as propriedades deste elemento."}</small>
-                </div>
-                <div>
-                  {senderSelected ? <button type="button" onClick={handleEditSender}><Settings2 size={15} />Configurar</button> : <>
-                    {(selectedField.type === "text" || selectedField.type === "textarea") && <button type="button" onClick={() => handleEditField(selectedField)}><Pencil size={15} />Editar</button>}
-                    {inspectorFields.length > 1 && <button type="button" onClick={() => openInspector(selectedField)}><Settings2 size={15} />Opções</button>}
-                    {variables?.items.length && (selectedField.type === "text" || selectedField.type === "textarea") ? <button type="button" onClick={openVariables}><Variable size={15} />Variável</button> : null}
-                  </>}
-                </div>
-              </div>
-            )}
           </section>
         ) : (
           <section className="osk-message-editor__editor-view">
             <div className="osk-message-editor__view-head">
               <button type="button" onClick={leaveAuxiliaryView} disabled={Boolean(pendingJsonChanges)} aria-label="Voltar à mensagem"><ChevronLeft size={18} /></button>
               <div>
-                <strong>{view === "variables" ? "Variáveis" : view === "json" ? "JSON avançado" : senderSelected ? "Remetente da mensagem" : selectedField?.label ?? "Propriedades"}</strong>
+                <strong>{view === "variables" ? "Variáveis" : view === "json" ? "JSON avançado" : senderSelected ? "Remetente da mensagem" : presentation === "color_panel" && selectedColorSlot ? `Opção ${Math.max(1, (activeColorPanel?.slots.indexOf(selectedColorSlot) ?? 0) + 1)}` : selectedField?.label ?? "Propriedades"}</strong>
                 <small>{view === "variables" ? (activeTextField ? `Inserir em ${activeTextField.label}` : "Toque em uma variável para copiar") : view === "json" ? "Edição técnica da mensagem" : senderSelected ? "Nome e avatar usados no envio" : "Configurações do elemento selecionado"}</small>
               </div>
             </div>
@@ -809,7 +811,7 @@ export function MessageEditor(props: MessageEditorProps) {
                   onChange={handleFieldChange}
                   selectedFieldId={selectedFieldId}
                   selectedColorSlot={selectedColorSlot}
-                  colorSlotRange={colorSlotRange}
+                  colorSlotIds={colorSlotIds}
                   onColorSlotSelect={(slotNumber) => setSelectedColorSlot(slotNumber)}
                   onFocusField={(field) => {
                     setSelectedFieldId(field.id);

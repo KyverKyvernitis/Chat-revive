@@ -2165,6 +2165,10 @@ def _settingsdb_color_roles_defaults() -> dict[str, Any]:
         "channel_id": 0,
         "message_ids": [],
         "panel_count": 3,
+        "panel_layout": [
+            {"id": f"panel-{index}", "slots": list(range((index - 1) * 10 + 1, index * 10 + 1))}
+            for index in range(1, 4)
+        ],
         "messages": {
             "1": {"title": "", "subtitle": "", "footer": ""},
             "2": {"title": "", "subtitle": "", "footer": ""},
@@ -2184,6 +2188,44 @@ def _settingsdb_color_roles_defaults() -> dict[str, Any]:
     }
 
 
+
+
+def _settingsdb_normalize_color_panel_layout(raw: Any, *, fallback_count: int = 3) -> list[dict[str, Any]]:
+    defaults = _settingsdb_color_roles_defaults()["panel_layout"]
+    try:
+        count = max(1, min(3, int(fallback_count or 3)))
+    except Exception:
+        count = 3
+    source = raw if isinstance(raw, list) else deepcopy(defaults[:count])
+    used_slots: set[int] = set()
+    used_ids: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(source[:3], start=1):
+        panel = dict(item or {}) if isinstance(item, dict) else {}
+        slots: list[int] = []
+        for raw_slot in panel.get("slots") or []:
+            try:
+                slot_number = int(raw_slot)
+            except Exception:
+                continue
+            if not 1 <= slot_number <= 30 or slot_number in used_slots:
+                continue
+            used_slots.add(slot_number)
+            slots.append(slot_number)
+            if len(slots) >= 10:
+                break
+        if not slots:
+            continue
+        panel_id = str(panel.get("id") or f"panel-{index}").strip()[:80]
+        if not panel_id or panel_id in used_ids:
+            panel_id = f"panel-{index}"
+            suffix = 2
+            while panel_id in used_ids:
+                panel_id = f"panel-{index}-{suffix}"
+                suffix += 1
+        used_ids.add(panel_id)
+        result.append({"id": panel_id, "slots": slots})
+    return result or [{"id": "panel-1", "slots": [1]}]
 
 
 def _settingsdb_color_roles_legacy_slot_payload(slot_number: int) -> dict[str, Any]:
@@ -2213,7 +2255,12 @@ def _settingsdb_get_color_roles_config(self, guild_id: int) -> Dict[str, Any]:
     base = _settingsdb_color_roles_defaults()
     base["channel_id"] = int(raw.get("channel_id", base["channel_id"]) or 0)
     base["message_ids"] = [int(mid) for mid in (raw.get("message_ids") or []) if str(mid).isdigit()]
-    base["panel_count"] = max(3, min(5, int(raw.get("panel_count") or base.get("panel_count") or 3)))
+    try:
+        legacy_panel_count = max(1, min(3, int(raw.get("panel_count") or base.get("panel_count") or 3)))
+    except Exception:
+        legacy_panel_count = 3
+    base["panel_layout"] = _settingsdb_normalize_color_panel_layout(raw.get("panel_layout"), fallback_count=legacy_panel_count)
+    base["panel_count"] = len(base["panel_layout"])
     messages = raw.get("messages") or {}
     for key in ("1", "2", "3", "4", "5"):
         payload = messages.get(key) or {}

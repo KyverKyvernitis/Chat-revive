@@ -28,7 +28,7 @@ COLOR_COMMAND_COOLDOWN = 20.0
 COLOR_COMMAND_CLEANUP_DELAY = 6.0
 COLOR_BLOCK_SIZE = 10
 COLOR_BLOCK_COUNT = 3
-COLOR_MAX_MESSAGES = 5
+COLOR_MAX_MESSAGES = 3
 COLOR_PANEL_VARIABLES = [
     "{membro}",
     "{membro_nome}",
@@ -81,6 +81,10 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "channel_id": 0,
     "message_ids": [],
     "panel_count": 3,
+    "panel_layout": [
+        {"id": f"panel-{index}", "slots": list(range((index - 1) * COLOR_BLOCK_SIZE + 1, index * COLOR_BLOCK_SIZE + 1))}
+        for index in range(1, COLOR_BLOCK_COUNT + 1)
+    ],
     "messages": {str(index): dict(_DEFAULT_MESSAGE) for index in range(1, COLOR_MAX_MESSAGES + 1)},
     "templates": {
         "apply": "cor {cor_adicionada} aplicada.",
@@ -96,6 +100,49 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 
 def _deepcopy_default_config() -> dict[str, Any]:
     return deepcopy(_DEFAULT_CONFIG)
+
+
+def _normalize_panel_layout(raw: Any, *, fallback_count: int = COLOR_BLOCK_COUNT) -> list[dict[str, Any]]:
+    source = raw if isinstance(raw, list) else deepcopy(_DEFAULT_CONFIG["panel_layout"][: max(1, min(COLOR_MAX_MESSAGES, int(fallback_count or COLOR_BLOCK_COUNT)))])
+    used: set[int] = set()
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(source[:COLOR_MAX_MESSAGES], start=1):
+        panel = dict(item or {}) if isinstance(item, dict) else {}
+        normalized_slots: list[int] = []
+        for raw_slot in panel.get("slots") or []:
+            try:
+                slot_number = int(raw_slot)
+            except Exception:
+                continue
+            if slot_number < 1 or slot_number > 30 or slot_number in used:
+                continue
+            used.add(slot_number)
+            normalized_slots.append(slot_number)
+            if len(normalized_slots) >= COLOR_BLOCK_SIZE:
+                break
+        if not normalized_slots:
+            continue
+        panel_id = str(panel.get("id") or f"panel-{index}").strip()[:80]
+        if not panel_id or any(existing["id"] == panel_id for existing in result):
+            panel_id = f"panel-{index}"
+        suffix = 2
+        while any(existing["id"] == panel_id for existing in result):
+            panel_id = f"panel-{index}-{suffix}"
+            suffix += 1
+        result.append({"id": panel_id, "slots": normalized_slots})
+    return result or [{"id": "panel-1", "slots": [1]}]
+
+
+def _next_unused_slot(panel_layout: list[dict[str, Any]]) -> int | None:
+    used = {int(slot) for panel in panel_layout for slot in (panel.get("slots") or []) if str(slot).isdigit()}
+    return next((number for number in range(1, 31) if number not in used), None)
+
+
+def _panel_slots(config: dict[str, Any], block_index: int) -> list[int]:
+    layout = _normalize_panel_layout(config.get("panel_layout"), fallback_count=int(config.get("panel_count") or COLOR_BLOCK_COUNT))
+    if not (1 <= int(block_index) <= len(layout)):
+        return []
+    return [int(number) for number in layout[int(block_index) - 1].get("slots") or []]
 
 
 def _clean_hex(value: str | None, fallback: str) -> str:
@@ -281,9 +328,7 @@ def _message_supports_slots(message_index: int) -> bool:
 
 
 def _message_label(message_index: int) -> str:
-    if _message_supports_slots(message_index):
-        return f"Mensagem {message_index} • faixa {_block_title(message_index)}"
-    return f"Mensagem extra {message_index}"
+    return f"Painel {int(message_index)}"
 
 
 def _compose_block_text(block_cfg: dict[str, Any]) -> str | None:
@@ -372,33 +417,30 @@ class _ColorTemplatesEditModal(discord.ui.Modal):
 
 class _ColorSlotEditModal(discord.ui.Modal):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int, slot_number: int):
-        super().__init__(title=f"Editar slot {slot_number}")
+        panel_slots = view.cog._get_panel_slot_numbers(view.guild_id, block_index)
+        position = panel_slots.index(int(slot_number)) + 1 if int(slot_number) in panel_slots else 1
+        super().__init__(title=f"Editar nome • opção {position}")
         self.view_ref = view
         self.block_index = int(block_index)
         self.slot_number = int(slot_number)
         slot = self.view_ref.cog._get_slot_config(self.view_ref.guild_id, self.slot_number)
-        self.name_input = discord.ui.TextInput(label="Nome da cor", default=str(slot.get("name") or ""), max_length=80)
-        self.text_hex_input = discord.ui.TextInput(label="Hex do texto da imagem", default=str(slot.get("text_hex") or ""), max_length=7)
-        self.role_name_input = discord.ui.TextInput(label="Nome do cargo do bot", default=str(slot.get("role_name") or slot.get("name") or ""), required=False, max_length=100)
-        self.role_hex_input = discord.ui.TextInput(label="Hex do cargo", default=str(slot.get("role_hex") or slot.get("text_hex") or ""), max_length=7)
+        self.name_input = discord.ui.TextInput(
+            label="Nome exibido",
+            default=str(slot.get("name") or ""),
+            max_length=80,
+        )
         self.add_item(self.name_input)
-        self.add_item(self.text_hex_input)
-        self.add_item(self.role_name_input)
-        self.add_item(self.role_hex_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         await self.view_ref.cog._update_slot_config(
             self.view_ref.guild_id,
             self.slot_number,
             name=str(self.name_input.value or "").strip() or f"Cor {self.slot_number}",
-            text_hex=_clean_hex(str(self.text_hex_input.value or ""), "#ffffff"),
-            role_name=str(self.role_name_input.value or "").strip() or f"Cor {self.slot_number}",
-            role_hex=_clean_hex(str(self.role_hex_input.value or ""), "#ffffff"),
         )
-        guild = interaction.guild
-        if guild is not None:
-            await self.view_ref.cog._ensure_slot_role(guild, self.slot_number)
-        await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
+        await self.view_ref.cog._refresh_public_panel_messages(
+            self.view_ref.guild_id,
+            block_indices=[self.block_index],
+        )
         await self.view_ref.refresh_editor_message(interaction)
 
 
@@ -453,8 +495,8 @@ class _ColorRoleLinkModal(discord.ui.Modal):
 
 
 class _ColorPickerButton(discord.ui.Button):
-    def __init__(self, cog: "ColorRolesCog", guild_id: int, slot_number: int):
-        super().__init__(label=_math_sans_bold(str(slot_number)), style=discord.ButtonStyle.secondary, custom_id=f"color:pick:{guild_id}:{slot_number}")
+    def __init__(self, cog: "ColorRolesCog", guild_id: int, slot_number: int, position: int):
+        super().__init__(label=_math_sans_bold(str(position)), style=discord.ButtonStyle.secondary, custom_id=f"color:pick:{guild_id}:{slot_number}")
         self.cog = cog
         self.guild_id = int(guild_id)
         self.slot_number = int(slot_number)
@@ -470,9 +512,8 @@ class _ColorPublicPanelView(discord.ui.View):
         self.guild_id = int(guild_id)
         self.block_index = int(block_index)
         if _message_supports_slots(block_index):
-            start, end = _chunk_block(block_index)
-            for slot_number in range(start, end + 1):
-                self.add_item(_ColorPickerButton(self.cog, self.guild_id, slot_number))
+            for position, slot_number in enumerate(self.cog._get_panel_slot_numbers(self.guild_id, block_index), start=1):
+                self.add_item(_ColorPickerButton(self.cog, self.guild_id, slot_number, position))
 
 
 class _ConfirmActionView(discord.ui.View):
@@ -525,14 +566,14 @@ class _EditTemplatesButton(discord.ui.Button):
 
 class _AddMessageButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView"):
-        super().__init__(label="Adicionar mensagem", style=discord.ButtonStyle.success)
+        super().__init__(label="Adicionar painel", style=discord.ButtonStyle.success)
         self.view_ref = view
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
         if self.view_ref.cog._get_panel_count(self.view_ref.guild_id) >= COLOR_MAX_MESSAGES:
-            await interaction.response.send_message("O painel já está no máximo de 5 mensagens.", ephemeral=True)
+            await interaction.response.send_message("O painel já está no máximo de 3 painéis.", ephemeral=True)
             return
         new_count = await self.view_ref.cog._add_extra_message_live(self.view_ref.guild_id)
         self.view_ref.active_block = int(new_count)
@@ -541,11 +582,11 @@ class _AddMessageButton(discord.ui.Button):
 
 class _RemoveMessageModal(discord.ui.Modal):
     def __init__(self, view: "_ColorUnifiedEditView"):
-        super().__init__(title="Remover mensagem")
+        super().__init__(title="Remover painel")
         self.view_ref = view
         self.number_input = discord.ui.TextInput(
-            label="Número da mensagem",
-            placeholder="Ex.: 4",
+            label="Número do painel",
+            placeholder="Ex.: 2",
             required=True,
             max_length=2,
         )
@@ -554,12 +595,12 @@ class _RemoveMessageModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         raw = str(self.number_input.value or "").strip()
         if not raw.isdigit():
-            await interaction.response.send_message("Informe um número válido de mensagem.", ephemeral=True)
+            await interaction.response.send_message("Informe um número válido de painel.", ephemeral=True)
             return
         message_index = int(raw)
         panel_count = self.view_ref.cog._get_panel_count(self.view_ref.guild_id)
-        if not (COLOR_BLOCK_COUNT + 1 <= message_index <= panel_count):
-            await interaction.response.send_message("Você só pode remover mensagens extras existentes.", ephemeral=True)
+        if panel_count <= 1 or not (1 <= message_index <= panel_count):
+            await interaction.response.send_message("Informe um painel existente. O primeiro e único painel não pode ser removido.", ephemeral=True)
             return
         await self.view_ref.cog._remove_extra_message_live(self.view_ref.guild_id, message_index)
         self.view_ref.active_block = min(self.view_ref.active_block, self.view_ref.cog._get_panel_count(self.view_ref.guild_id))
@@ -568,14 +609,14 @@ class _RemoveMessageModal(discord.ui.Modal):
 
 class _RemoveMessageButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView"):
-        super().__init__(label="Remover mensagem", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Remover painel", style=discord.ButtonStyle.secondary)
         self.view_ref = view
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
-        if self.view_ref.cog._get_panel_count(self.view_ref.guild_id) <= COLOR_BLOCK_COUNT:
-            await interaction.response.send_message("Não há mensagem extra para remover.", ephemeral=True)
+        if self.view_ref.cog._get_panel_count(self.view_ref.guild_id) <= 1:
+            await interaction.response.send_message("O único painel não pode ser removido.", ephemeral=True)
             return
         await interaction.response.send_modal(_RemoveMessageModal(self.view_ref))
 
@@ -586,16 +627,16 @@ class _MessageSelect(discord.ui.Select):
         options: list[discord.SelectOption] = []
         panel_count = view.cog._get_panel_count(view.guild_id)
         for message_index in range(1, panel_count + 1):
-            description = f"Faixa {_block_title(message_index)}" if _message_supports_slots(message_index) else "Mensagem extra"
+            option_count = len(view.cog._get_panel_slot_numbers(view.guild_id, message_index))
             options.append(
                 discord.SelectOption(
                     label=_message_label(message_index)[:100],
                     value=str(message_index),
-                    description=description[:100],
+                    description=f"{option_count} de 10 opções",
                     default=view.active_block == message_index,
                 )
             )
-        super().__init__(placeholder="Escolha a mensagem para editar", options=options, min_values=1, max_values=1)
+        super().__init__(placeholder="Escolha o painel para editar", options=options, min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
@@ -617,7 +658,7 @@ class _MoveMessageButton(discord.ui.Button):
         if not await self.view_ref.ensure_owner(interaction):
             return
         if not self.view_ref.cog._can_move_message(self.view_ref.guild_id, self.message_index, self.direction):
-            await interaction.response.send_message("Essa mensagem não pode ser movida nessa direção.", ephemeral=True)
+            await interaction.response.send_message("Esse painel não pode ser movido nessa direção.", ephemeral=True)
             return
         await self.view_ref.cog._swap_messages(self.view_ref.guild_id, self.message_index, self.message_index + self.direction)
         self.view_ref.active_block = self.message_index + self.direction
@@ -651,12 +692,13 @@ class _BlockSlotSelect(discord.ui.Select):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
         self.view_ref = view
         self.block_index = int(block_index)
-        start, end = _chunk_block(block_index)
+        slot_numbers = view.cog._get_panel_slot_numbers(view.guild_id, block_index)
+        current = view.selected_slots.get(block_index, slot_numbers[0] if slot_numbers else 1)
         options = []
-        for slot_number in range(start, end + 1):
+        for position, slot_number in enumerate(slot_numbers, start=1):
             slot = view.cog._get_slot_config(view.guild_id, slot_number)
-            options.append(discord.SelectOption(label=f"{slot_number}. {slot.get('name')}", value=str(slot_number), default=view.selected_slots.get(block_index, start) == slot_number))
-        super().__init__(placeholder="Escolha o slot desta faixa", options=options, min_values=1, max_values=1)
+            options.append(discord.SelectOption(label=f"{position}. {slot.get('name')}", value=str(slot_number), default=current == slot_number))
+        super().__init__(placeholder="Escolha a opção deste painel", options=options or [discord.SelectOption(label="Sem opções", value="0")], min_values=1, max_values=1, disabled=not bool(options))
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
@@ -674,7 +716,8 @@ class _BlockRoleSelect(discord.ui.RoleSelect):
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
-        selected_slot = self.view_ref.selected_slots.get(self.block_index, _chunk_block(self.block_index)[0])
+        panel_slots = self.view_ref.cog._get_panel_slot_numbers(self.view_ref.guild_id, self.block_index)
+        selected_slot = self.view_ref.selected_slots.get(self.block_index, panel_slots[0] if panel_slots else 1)
         if not self.values:
             await interaction.response.send_message("Escolha um cargo para vincular ao slot.", ephemeral=True)
             return
@@ -707,7 +750,8 @@ class _AutoRoleButton(discord.ui.Button):
         if guild is None:
             await interaction.response.send_message("Isso só funciona dentro de um servidor.", ephemeral=True)
             return
-        selected_slot = self.view_ref.selected_slots.get(self.block_index, _chunk_block(self.block_index)[0])
+        panel_slots = self.view_ref.cog._get_panel_slot_numbers(self.view_ref.guild_id, self.block_index)
+        selected_slot = self.view_ref.selected_slots.get(self.block_index, panel_slots[0] if panel_slots else 1)
         await self.view_ref.cog._update_slot_config(self.view_ref.guild_id, selected_slot, role_id=0, managed=True)
         await self.view_ref.cog._ensure_slot_role(guild, selected_slot)
         await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
@@ -737,14 +781,18 @@ class _ChangeActiveMessageButton(discord.ui.Button):
 
 class _ChangeActiveSlotButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int, direction: int):
-        start, end = _chunk_block(block_index)
-        current = int(view.selected_slots.get(block_index, start))
-        target = current - 1 if direction < 0 else current + 1
-        super().__init__(label="Slot anterior" if direction < 0 else "Próximo slot", style=discord.ButtonStyle.secondary)
+        slot_numbers = view.cog._get_panel_slot_numbers(view.guild_id, block_index)
+        current = int(view.selected_slots.get(block_index, slot_numbers[0] if slot_numbers else 1))
+        try:
+            current_index = slot_numbers.index(current)
+        except ValueError:
+            current_index = 0
+        target_index = current_index + (-1 if direction < 0 else 1)
+        super().__init__(label="Opção anterior" if direction < 0 else "Próxima opção", style=discord.ButtonStyle.secondary)
         self.view_ref = view
         self.block_index = int(block_index)
-        self.target = target
-        self.disabled = not (start <= target <= end)
+        self.target = slot_numbers[target_index] if 0 <= target_index < len(slot_numbers) else current
+        self.disabled = not (0 <= target_index < len(slot_numbers))
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
@@ -756,6 +804,107 @@ class _ChangeActiveSlotButton(discord.ui.Button):
         await self.view_ref.refresh_editor_message(interaction)
 
 
+class _MoveOptionButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", block_index: int, direction: int):
+        slot_numbers = view.cog._get_panel_slot_numbers(view.guild_id, block_index)
+        selected_slot = view.selected_slot_for(block_index)
+        try:
+            current_index = slot_numbers.index(selected_slot)
+        except ValueError:
+            current_index = 0
+        target = current_index + (-1 if direction < 0 else 1)
+        super().__init__(
+            label="Mover antes" if direction < 0 else "Mover depois",
+            style=discord.ButtonStyle.secondary,
+            disabled=not (0 <= target < len(slot_numbers)),
+        )
+        self.view_ref = view
+        self.block_index = int(block_index)
+        self.direction = -1 if direction < 0 else 1
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        selected_slot = self.view_ref.selected_slot_for(self.block_index)
+        moved = await self.view_ref.cog._move_panel_option(
+            self.view_ref.guild_id,
+            self.block_index,
+            selected_slot,
+            self.direction,
+        )
+        if not moved:
+            await interaction.response.send_message("Essa opção não pode ser movida nessa direção.", ephemeral=True)
+            return
+        await self.view_ref.cog._refresh_public_panel_messages(
+            self.view_ref.guild_id,
+            block_indices=[self.block_index],
+        )
+        await self.view_ref.refresh_editor_message(interaction)
+
+
+class _AddOptionButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
+        slot_numbers = view.cog._get_panel_slot_numbers(view.guild_id, block_index)
+        super().__init__(
+            label="Adicionar opção",
+            style=discord.ButtonStyle.success,
+            disabled=len(slot_numbers) >= COLOR_BLOCK_SIZE,
+        )
+        self.view_ref = view
+        self.block_index = int(block_index)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        slot_number = await self.view_ref.cog._add_panel_option(self.view_ref.guild_id, self.block_index)
+        if slot_number is None:
+            await interaction.response.send_message("Esse painel já tem 10 opções ou não há outro slot disponível.", ephemeral=True)
+            return
+        self.view_ref.selected_slots[self.block_index] = int(slot_number)
+        await self.view_ref.cog._refresh_public_panel_messages(
+            self.view_ref.guild_id,
+            block_indices=[self.block_index],
+        )
+        await self.view_ref.refresh_editor_message(interaction)
+
+
+class _RemoveOptionButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
+        slot_numbers = view.cog._get_panel_slot_numbers(view.guild_id, block_index)
+        super().__init__(
+            label="Remover opção",
+            style=discord.ButtonStyle.danger,
+            disabled=len(slot_numbers) <= 1,
+        )
+        self.view_ref = view
+        self.block_index = int(block_index)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        selected_slot = self.view_ref.selected_slot_for(self.block_index)
+
+        async def action():
+            next_slot = await self.view_ref.cog._remove_panel_option(
+                self.view_ref.guild_id,
+                self.block_index,
+                selected_slot,
+            )
+            if next_slot is not None:
+                self.view_ref.selected_slots[self.block_index] = int(next_slot)
+            await self.view_ref.cog._refresh_public_panel_messages(
+                self.view_ref.guild_id,
+                block_indices=[self.block_index],
+            )
+            await self.view_ref.force_refresh_from_background()
+
+        await interaction.response.send_message(
+            "Remover esta opção do painel? O cargo não será excluído do servidor.",
+            ephemeral=True,
+            view=_ConfirmActionView(self.view_ref.owner_id, action, "Opção removida do painel."),
+        )
+
+
 class _LinkExistingRoleButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
         super().__init__(label="Vincular cargo", style=discord.ButtonStyle.secondary)
@@ -765,20 +914,22 @@ class _LinkExistingRoleButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
-        selected_slot = self.view_ref.selected_slots.get(self.block_index, _chunk_block(self.block_index)[0])
+        panel_slots = self.view_ref.cog._get_panel_slot_numbers(self.view_ref.guild_id, self.block_index)
+        selected_slot = self.view_ref.selected_slots.get(self.block_index, panel_slots[0] if panel_slots else 1)
         await interaction.response.send_modal(_ColorRoleLinkModal(self.view_ref, self.block_index, selected_slot))
 
 
 class _EditSlotButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
-        super().__init__(label="Editar slot atual", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Editar nome", style=discord.ButtonStyle.secondary)
         self.view_ref = view
         self.block_index = int(block_index)
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
-        selected_slot = self.view_ref.selected_slots.get(self.block_index, _chunk_block(self.block_index)[0])
+        panel_slots = self.view_ref.cog._get_panel_slot_numbers(self.view_ref.guild_id, self.block_index)
+        selected_slot = self.view_ref.selected_slots.get(self.block_index, panel_slots[0] if panel_slots else 1)
         await interaction.response.send_modal(_ColorSlotEditModal(self.view_ref, self.block_index, selected_slot))
 
 
@@ -821,6 +972,16 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             return False
         return True
 
+    def selected_slot_for(self, block_index: int) -> int:
+        slot_numbers = self.cog._get_panel_slot_numbers(self.guild_id, block_index)
+        if not slot_numbers:
+            return 1
+        current = int(self.selected_slots.get(block_index, slot_numbers[0]))
+        if current not in slot_numbers:
+            current = slot_numbers[0]
+            self.selected_slots[block_index] = current
+        return current
+
     def _editor_preview_files(self) -> list[discord.File]:
         active = self.active_block
         if not _message_supports_slots(active):
@@ -851,39 +1012,32 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
     def _header_lines(self) -> list[str]:
         return [
             "# 🎨 Editor do painel de cores",
-            f"Mensagem ativa: {_message_label(self.active_block)}",
+            f"Painel ativo: {_message_label(self.active_block)}",
         ]
 
     def _block_lines(self, message_index: int) -> list[str]:
-        cfg = self.cog._get_message_block_config(self.guild_id, message_index)
-        title = str(cfg.get("title") or "").strip() or "(vazio)"
-        subtitle = str(cfg.get("subtitle") or "").strip() or "(vazio)"
-        footer = str(cfg.get("footer") or "").strip() or "(vazio)"
-        lines = [
-            f"**Título:** {title}",
-            f"**Descrição:** {subtitle}",
-            f"**Footer:** {footer}",
+        option_count = len(self.cog._get_panel_slot_numbers(self.guild_id, message_index))
+        return [
+            f"## Painel {message_index}",
+            f"**Opções:** {option_count} de 10",
+            "A imagem e o seletor são gerados automaticamente a partir das opções abaixo.",
         ]
-        if _message_supports_slots(message_index):
-            lines.append(f"**Faixa:** {_block_title(message_index)}")
-        else:
-            lines.append("**Tipo:** mensagem extra")
-        return lines
 
     def _slot_editor_lines(self, block_index: int) -> list[str]:
-        selected_slot = self.selected_slots.get(block_index, _chunk_block(block_index)[0])
+        panel_slots = self.cog._get_panel_slot_numbers(self.guild_id, block_index)
+        selected_slot = self.selected_slot_for(block_index)
         slot = self.cog._get_slot_config(self.guild_id, selected_slot)
         role_id = int(slot.get("role_id") or 0)
-        role_repr = f"<@&{role_id}>" if role_id else "Automático"
-        managed_text = "sim" if bool(slot.get("managed", False) or role_id <= 0) else "não"
+        managed = bool(slot.get("managed", False))
+        role_repr = f"<@&{role_id}>" if role_id else ("Preset automático" if managed else "Não vinculado")
+        managed_text = "sim" if managed else "não"
         return [
-            f"## Faixa {_block_title(block_index)}",
-            f"**Slot:** {selected_slot}",
+            f"## Painel {block_index}",
+            f"**Opção:** {(panel_slots.index(selected_slot) + 1) if selected_slot in panel_slots else 1}",
             f"**Nome:** {slot.get('name')}",
-            f"**Texto:** {slot.get('text_hex')}",
             f"**Cargo:** {role_repr}",
-            f"**Cor do cargo:** {slot.get('role_hex')}",
-            f"**Automático:** {managed_text}",
+            f"**Cor:** {self.cog._slot_effective_hex(self.guild_id, slot)}",
+            f"**Cargo automático:** {managed_text}",
         ]
 
     def _build_layout(self):
@@ -893,7 +1047,7 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             _EditTemplatesButton(self),
             _AddMessageButton(self),
         ]
-        if panel_count > COLOR_BLOCK_COUNT:
+        if panel_count > 1:
             top_controls.append(_RemoveMessageButton(self))
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(self._header_lines())),
@@ -903,23 +1057,16 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         ))
 
         active = self.active_block
-        row_one = [_EditContentButton(self, active)]
-        row_two: list[discord.ui.Item[Any]] = []
-        if self.cog._message_text_changed_from_preset(self.guild_id, active):
-            row_two.append(_ClearMessageButton(self, active))
         block_children: list[discord.ui.Item[Any]] = [discord.ui.TextDisplay("\n".join(self._block_lines(active)))]
         if _message_supports_slots(active):
             block_children.append(
                 discord.ui.MediaGallery(
                     discord.MediaGalleryItem(
                         f"attachment://colors-editor-{active}.png",
-                        description=f"Preview da faixa {_block_title(active)}",
+                        description=f"Prévia do Painel {active}",
                     )
                 )
             )
-        block_children.append(discord.ui.ActionRow(*row_one))
-        if row_two:
-            block_children.append(discord.ui.ActionRow(*row_two))
         self.add_item(discord.ui.Container(
             *block_children,
             accent_color=discord.Colour.green(),
@@ -928,12 +1075,17 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         if _message_supports_slots(active):
             slot_rows: list[discord.ui.Item[Any]] = [
                 discord.ui.TextDisplay("\n".join(self._slot_editor_lines(active))),
+                discord.ui.ActionRow(_BlockSlotSelect(self, active)),
                 discord.ui.ActionRow(
-                    _ChangeActiveSlotButton(self, active, -1),
-                    _ChangeActiveSlotButton(self, active, 1),
+                    _EditSlotButton(self, active),
                     _LinkExistingRoleButton(self, active),
                     _AutoRoleButton(self, active),
-                    _EditSlotButton(self, active),
+                ),
+                discord.ui.ActionRow(
+                    _MoveOptionButton(self, active, -1),
+                    _MoveOptionButton(self, active, 1),
+                    _AddOptionButton(self, active),
+                    _RemoveOptionButton(self, active),
                 ),
             ]
             if self.cog._slot_block_changed_from_preset(self.guild_id, active):
@@ -996,7 +1148,8 @@ class ColorRolesCog(commands.Cog):
         base["channel_id"] = int(payload.get("channel_id") or 0)
         base["message_ids"] = [int(mid) for mid in (payload.get("message_ids") or []) if str(mid).isdigit()]
         raw_count = int(payload.get("panel_count") or COLOR_BLOCK_COUNT)
-        base["panel_count"] = max(COLOR_BLOCK_COUNT, min(COLOR_MAX_MESSAGES, raw_count))
+        base["panel_layout"] = _normalize_panel_layout(payload.get("panel_layout"), fallback_count=raw_count)
+        base["panel_count"] = len(base["panel_layout"])
         raw_messages = payload.get("messages") or {}
         for key in [str(idx) for idx in range(1, COLOR_MAX_MESSAGES + 1)]:
             block = raw_messages.get(key) or {}
@@ -1088,11 +1241,79 @@ class ColorRolesCog(commands.Cog):
         return bool(int(cfg.get("channel_id") or 0) and list(cfg.get("message_ids") or []))
 
     def _get_panel_count(self, guild_id: int) -> int:
-        return int(self._get_config(guild_id).get("panel_count") or COLOR_BLOCK_COUNT)
+        cfg = self._get_config(guild_id)
+        return len(_normalize_panel_layout(cfg.get("panel_layout"), fallback_count=int(cfg.get("panel_count") or COLOR_BLOCK_COUNT)))
+
+    def _get_panel_slot_numbers(self, guild_id: int, block_index: int) -> list[int]:
+        return _panel_slots(self._get_config(guild_id), block_index)
+
+    async def _add_panel_option(self, guild_id: int, block_index: int) -> int | None:
+        cfg = self._get_config(guild_id)
+        layout = _normalize_panel_layout(cfg.get("panel_layout"), fallback_count=int(cfg.get("panel_count") or COLOR_BLOCK_COUNT))
+        if not (1 <= int(block_index) <= len(layout)):
+            return None
+        panel = layout[int(block_index) - 1]
+        current = [int(number) for number in panel.get("slots") or []]
+        if len(current) >= COLOR_BLOCK_SIZE:
+            return None
+        slot_number = _next_unused_slot(layout)
+        if slot_number is None:
+            return None
+        panel["slots"] = [*current, slot_number]
+        cfg["panel_layout"] = layout
+        cfg["panel_count"] = len(layout)
+        await self._save_config(guild_id, cfg)
+        return slot_number
+
+    async def _remove_panel_option(self, guild_id: int, block_index: int, slot_number: int) -> int | None:
+        cfg = self._get_config(guild_id)
+        layout = _normalize_panel_layout(cfg.get("panel_layout"), fallback_count=int(cfg.get("panel_count") or COLOR_BLOCK_COUNT))
+        if not (1 <= int(block_index) <= len(layout)):
+            return None
+        panel = layout[int(block_index) - 1]
+        current = [int(number) for number in panel.get("slots") or []]
+        if len(current) <= 1 or int(slot_number) not in current:
+            return None
+        removed_index = current.index(int(slot_number))
+        current.remove(int(slot_number))
+        panel["slots"] = current
+        cfg["panel_layout"] = layout
+        cfg["panel_count"] = len(layout)
+        await self._save_config(guild_id, cfg)
+        return current[min(removed_index, len(current) - 1)]
+
+    async def _move_panel_option(self, guild_id: int, block_index: int, slot_number: int, direction: int) -> bool:
+        cfg = self._get_config(guild_id)
+        layout = _normalize_panel_layout(cfg.get("panel_layout"), fallback_count=int(cfg.get("panel_count") or COLOR_BLOCK_COUNT))
+        if not (1 <= int(block_index) <= len(layout)):
+            return False
+        panel = layout[int(block_index) - 1]
+        current = [int(number) for number in panel.get("slots") or []]
+        if int(slot_number) not in current:
+            return False
+        index = current.index(int(slot_number))
+        target = index + (-1 if int(direction) < 0 else 1)
+        if not (0 <= target < len(current)):
+            return False
+        current[index], current[target] = current[target], current[index]
+        panel["slots"] = current
+        cfg["panel_layout"] = layout
+        cfg["panel_count"] = len(layout)
+        await self._save_config(guild_id, cfg)
+        return True
 
     async def _set_panel_count(self, guild_id: int, count: int):
         cfg = self._get_config(guild_id)
-        cfg["panel_count"] = max(COLOR_BLOCK_COUNT, min(COLOR_MAX_MESSAGES, int(count)))
+        layout = _normalize_panel_layout(cfg.get("panel_layout"), fallback_count=int(cfg.get("panel_count") or COLOR_BLOCK_COUNT))
+        target = max(1, min(COLOR_MAX_MESSAGES, int(count)))
+        while len(layout) < target:
+            slot_number = _next_unused_slot(layout)
+            if slot_number is None:
+                break
+            layout.append({"id": f"panel-{time.time_ns()}", "slots": [slot_number]})
+        layout = layout[:target]
+        cfg["panel_layout"] = layout
+        cfg["panel_count"] = len(layout)
         await self._save_config(guild_id, cfg)
 
     def _get_templates(self, guild_id: int) -> dict[str, str]:
@@ -1149,8 +1370,7 @@ class ColorRolesCog(commands.Cog):
     def _slot_block_changed_from_preset(self, guild_id: int, block_index: int) -> bool:
         if not _message_supports_slots(block_index):
             return False
-        start, end = _chunk_block(block_index)
-        for slot_number in range(start, end + 1):
+        for slot_number in self._get_panel_slot_numbers(guild_id, block_index):
             current = self._get_slot_config(guild_id, slot_number)
             default = _default_slot_payload(slot_number)
             comparable_current = {
@@ -1178,8 +1398,7 @@ class ColorRolesCog(commands.Cog):
             return
         cfg = self._get_config(guild_id)
         slots = dict(cfg.get("slots") or {})
-        start, end = _chunk_block(block_index)
-        for slot_number in range(start, end + 1):
+        for slot_number in self._get_panel_slot_numbers(guild_id, block_index):
             slots[str(slot_number)] = dict(_default_slot_payload(slot_number))
         cfg["slots"] = slots
         await self._save_config(guild_id, cfg)
@@ -1189,8 +1408,7 @@ class ColorRolesCog(commands.Cog):
             return
         cfg = self._get_config(guild_id)
         slots = dict(cfg.get("slots") or {})
-        start, end = _chunk_block(block_index)
-        for slot_number in range(start, end + 1):
+        for slot_number in self._get_panel_slot_numbers(guild_id, block_index):
             slots[str(slot_number)] = dict(_cleared_slot_payload(slot_number))
         cfg["slots"] = slots
         await self._save_config(guild_id, cfg)
@@ -1227,21 +1445,19 @@ class ColorRolesCog(commands.Cog):
 
     async def _remove_extra_message(self, guild_id: int, message_index: int):
         count = self._get_panel_count(guild_id)
-        if count <= COLOR_BLOCK_COUNT or not (COLOR_BLOCK_COUNT + 1 <= int(message_index) <= count):
+        if count <= 1 or not (1 <= int(message_index) <= count):
             return False
         cfg = self._get_config(guild_id)
-        messages = dict(cfg.get("messages") or {})
-        for idx in range(int(message_index), count):
-            messages[str(idx)] = dict(messages.get(str(idx + 1), _DEFAULT_MESSAGE))
-        messages[str(count)] = dict(_DEFAULT_MESSAGE)
-        cfg["messages"] = messages
-        cfg["panel_count"] = count - 1
+        layout = _normalize_panel_layout(cfg.get("panel_layout"), fallback_count=count)
+        del layout[int(message_index) - 1]
+        cfg["panel_layout"] = layout
+        cfg["panel_count"] = len(layout)
         await self._save_config(guild_id, cfg)
         return True
 
     async def _remove_extra_message_live(self, guild_id: int, message_index: int) -> bool:
         count = self._get_panel_count(guild_id)
-        if count <= COLOR_BLOCK_COUNT or not (COLOR_BLOCK_COUNT + 1 <= int(message_index) <= count):
+        if count <= 1 or not (1 <= int(message_index) <= count):
             return False
         cfg_before = self._get_config(guild_id)
         channel_id = int(cfg_before.get("channel_id") or 0)
@@ -1269,32 +1485,16 @@ class ColorRolesCog(commands.Cog):
     def _can_move_message(self, guild_id: int, block_index: int, direction: int) -> bool:
         count = self._get_panel_count(guild_id)
         target = int(block_index) + int(direction)
-        if _message_supports_slots(block_index):
-            return 1 <= target <= min(COLOR_BLOCK_COUNT, count)
-        if block_index > COLOR_BLOCK_COUNT:
-            return COLOR_BLOCK_COUNT + 1 <= target <= count
-        return False
+        return 1 <= int(block_index) <= count and 1 <= target <= count
 
     async def _swap_messages(self, guild_id: int, left: int, right: int):
         cfg = self._get_config(guild_id)
-        messages = dict(cfg.get("messages") or {})
-        messages[str(left)], messages[str(right)] = dict(messages.get(str(right), _DEFAULT_MESSAGE)), dict(messages.get(str(left), _DEFAULT_MESSAGE))
-        cfg["messages"] = messages
-        if _message_supports_slots(left) and _message_supports_slots(right):
-            slots = dict(cfg.get("slots") or {})
-            left_start, left_end = _chunk_block(left)
-            right_start, right_end = _chunk_block(right)
-            left_payloads = [dict(slots.get(str(number), _default_slot_payload(number))) for number in range(left_start, left_end + 1)]
-            right_payloads = [dict(slots.get(str(number), _default_slot_payload(number))) for number in range(right_start, right_end + 1)]
-            for offset, slot_number in enumerate(range(left_start, left_end + 1)):
-                payload = dict(right_payloads[offset])
-                payload["number"] = slot_number
-                slots[str(slot_number)] = payload
-            for offset, slot_number in enumerate(range(right_start, right_end + 1)):
-                payload = dict(left_payloads[offset])
-                payload["number"] = slot_number
-                slots[str(slot_number)] = payload
-            cfg["slots"] = slots
+        layout = _normalize_panel_layout(cfg.get("panel_layout"), fallback_count=int(cfg.get("panel_count") or COLOR_BLOCK_COUNT))
+        if not (1 <= int(left) <= len(layout) and 1 <= int(right) <= len(layout)):
+            return
+        layout[int(left) - 1], layout[int(right) - 1] = layout[int(right) - 1], layout[int(left) - 1]
+        cfg["panel_layout"] = layout
+        cfg["panel_count"] = len(layout)
         await self._save_config(guild_id, cfg)
 
     async def _ensure_slot_role(self, guild: discord.Guild, slot_number: int) -> discord.Role | None:
@@ -1437,8 +1637,13 @@ class ColorRolesCog(commands.Cog):
             return
         cfg = self._get_config(guild.id)
         message_ids = [int(mid) for mid in (cfg.get("message_ids") or []) if mid]
-        if int(getattr(interaction.message, "id", 0) or 0) not in message_ids:
+        interaction_message_id = int(getattr(interaction.message, "id", 0) or 0)
+        if interaction_message_id not in message_ids:
             await reply(str((cfg.get("templates") or {}).get("missing_panel") or "Esse painel não é mais o oficial."))
+            return
+        panel_index = message_ids.index(interaction_message_id) + 1
+        if int(slot_number) not in self._get_panel_slot_numbers(guild.id, panel_index):
+            await reply(str((cfg.get("templates") or {}).get("missing_panel") or "Essa opção não faz mais parte deste painel."))
             return
         slot = self._get_slot_config(guild.id, slot_number)
         role_id = int(slot.get("role_id") or 0)
@@ -1491,7 +1696,7 @@ class ColorRolesCog(commands.Cog):
             text = self._render_template(template, member=member, slot=slot, added_name=str(slot.get("name") or ""))
         applied_name = _normalize_color_name(str(slot.get("name") or ""))
         await reply(text or f"cor {applied_name} aplicada.")
-        self._dispatch_member_color_changed(member, _clean_hex(str(slot.get("role_hex") or slot.get("text_hex") or ""), "#ffffff"))
+        self._dispatch_member_color_changed(member, self._slot_effective_hex(guild.id, slot))
 
     async def _delete_existing_panel_messages(self, guild_id: int):
         cfg = self._get_config(guild_id)
@@ -1507,31 +1712,43 @@ class ColorRolesCog(commands.Cog):
             except Exception:
                 pass
 
+    def _slot_effective_hex(self, guild_id: int, slot: dict[str, Any]) -> str:
+        guild = self.bot.get_guild(int(guild_id))
+        role_id = int(slot.get("role_id") or 0)
+        role = guild.get_role(role_id) if guild is not None and role_id else None
+        if role is not None:
+            value = int(getattr(getattr(role, "colour", None), "value", 0) or 0)
+            if value > 0:
+                return f"#{value:06x}"
+            return "#99aab5"
+        return _clean_hex(str(slot.get("role_hex") or slot.get("text_hex") or ""), "#ffffff")
+
     def _make_block_image(self, guild_id: int, block_index: int, *, filename: str | None = None) -> discord.File:
         if Image is None or ImageDraw is None:
             raise RuntimeError("Pillow não está disponível para gerar as imagens do painel de cores.")
-        if not _message_supports_slots(block_index):
-            raise ValueError("Somente as três primeiras mensagens possuem imagem de faixa.")
-        start, end = _chunk_block(block_index)
+        slot_numbers = self._get_panel_slot_numbers(guild_id, block_index)
+        if not slot_numbers:
+            raise ValueError("O painel precisa ter pelo menos uma opção.")
         cfg = self._get_config(guild_id)
         slots = cfg.get("slots") or {}
-        width, height = 900, 330
+        rows = max(1, (len(slot_numbers) + 1) // 2)
+        width, height = 900, max(92, rows * 65 + 18)
         image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         number_font = _font(34, bold=True, kind="math")
         name_font = _font(34, bold=True, kind="mono")
-        y_positions = [20, 85, 150, 215, 280]
         x_left, x_right = 18, 465
-        shadow = (0, 0, 0, 180)
-        for idx, slot_number in enumerate(range(start, end + 1)):
-            slot = dict(slots.get(str(slot_number), {}) or {})
-            name = str(slot.get("name") or f"Cor {slot_number}").strip()
-            number_label = _math_sans_bold(str(slot_number))
+        shadow = (0, 0, 0, 190)
+
+        for position, slot_number in enumerate(slot_numbers, start=1):
+            slot = dict(slots.get(str(slot_number), {}) or _default_slot_payload(slot_number))
+            name = str(slot.get("name") or f"Cor {position}").strip()
+            number_label = _math_sans_bold(str(position))
             prefix_label = f"{number_label}."
-            name_label = name
-            hex_color = _clean_hex(str(slot.get("text_hex") or "#ffffff"), "#ffffff")
-            x = x_left if idx % 2 == 0 else x_right
-            y = y_positions[idx // 2]
+            hex_color = self._slot_effective_hex(guild_id, slot)
+            item_index = position - 1
+            x = x_left if item_index % 2 == 0 else x_right
+            y = 10 + (item_index // 2) * 65
 
             def _measure_width(label_text: str, font_obj) -> int:
                 try:
@@ -1540,43 +1757,24 @@ class ColorRolesCog(commands.Cog):
                 except Exception:
                     return int(draw.textlength(label_text, font=font_obj))
 
-            gap = 12
-            prefix_width = _measure_width(prefix_label, number_font)
-            name_x = x + prefix_width + gap
-
-            if _is_default_black_slot(slot_number, slot):
-                try:
-                    draw.text((x, y), prefix_label, font=number_font, fill=hex_color, stroke_width=3, stroke_fill="#8f8f8f")
-                    if name_label:
-                        draw.text((name_x, y), name_label, font=name_font, fill=hex_color, stroke_width=3, stroke_fill="#8f8f8f")
-                except TypeError:
-                    draw.text((x + 2, y + 2), prefix_label, font=number_font, fill="#8f8f8f")
-                    draw.text((x, y), prefix_label, font=number_font, fill=hex_color)
-                    if name_label:
-                        draw.text((name_x + 2, y + 2), name_label, font=name_font, fill="#8f8f8f")
-                        draw.text((name_x, y), name_label, font=name_font, fill=hex_color)
-                continue
+            name_x = x + _measure_width(prefix_label, number_font) + 12
             draw.text((x + 2, y + 2), prefix_label, font=number_font, fill=shadow)
             draw.text((x, y), prefix_label, font=number_font, fill=hex_color)
-            if name_label:
-                draw.text((name_x + 2, y + 2), name_label, font=name_font, fill=shadow)
-                draw.text((name_x, y), name_label, font=name_font, fill=hex_color)
+            if name:
+                draw.text((name_x + 2, y + 2), name, font=name_font, fill=shadow)
+                draw.text((name_x, y), name, font=name_font, fill=hex_color)
+
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         buffer.seek(0)
         return discord.File(buffer, filename=filename or f"colors-{block_index}.png")
 
     def _public_message_kwargs(self, guild_id: int, block_index: int) -> dict[str, Any]:
-        block_cfg = self._get_message_block_config(guild_id, block_index)
-        content = _compose_block_text(block_cfg)
-        payload: dict[str, Any] = {"content": content or ("\u200b" if not _message_supports_slots(block_index) else None)}
-        if _message_supports_slots(block_index):
-            filename = f"colors-{block_index}.png"
-            payload["file"] = self._make_block_image(guild_id, block_index, filename=filename)
-            payload["view"] = _ColorPublicPanelView(self, guild_id, block_index)
-        else:
-            payload["view"] = None
-        return payload
+        filename = f"colors-{block_index}.png"
+        return {
+            "file": self._make_block_image(guild_id, block_index, filename=filename),
+            "view": _ColorPublicPanelView(self, guild_id, block_index),
+        }
 
     async def _post_public_panel(self, channel: discord.abc.Messageable, guild: discord.Guild) -> list[int]:
         message_ids: list[int] = []
@@ -1631,19 +1829,16 @@ class ColorRolesCog(commands.Cog):
             except Exception:
                 continue
             try:
-                if _message_supports_slots(block_index):
-                    filename = f"colors-{block_index}.png"
-                    file = self._make_block_image(guild_id, block_index, filename=filename)
-                    view = _ColorPublicPanelView(self, guild_id, block_index)
-                    await message.edit(content=_compose_block_text(self._get_message_block_config(guild_id, block_index)), embed=None, embeds=[], attachments=[file], view=view)
-                    key = (guild_id, block_index, message_id)
-                    try:
-                        self.bot.add_view(view, message_id=message_id)
-                    except Exception:
-                        pass
-                    self._public_views_registered.add(key)
-                else:
-                    await message.edit(content=_compose_block_text(self._get_message_block_config(guild_id, block_index)) or "\u200b", attachments=[], view=None)
+                filename = f"colors-{block_index}.png"
+                file = self._make_block_image(guild_id, block_index, filename=filename)
+                view = _ColorPublicPanelView(self, guild_id, block_index)
+                await message.edit(content=None, embed=None, embeds=[], attachments=[file], view=view)
+                key = (guild_id, block_index, message_id)
+                try:
+                    self.bot.add_view(view, message_id=message_id)
+                except Exception:
+                    pass
+                self._public_views_registered.add(key)
             except Exception:
                 pass
 

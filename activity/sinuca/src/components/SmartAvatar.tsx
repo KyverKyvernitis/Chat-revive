@@ -18,12 +18,19 @@ interface SmartAvatarProps {
  */
 export function SmartAvatar({ src, name, type, size, alt, className }: SmartAvatarProps) {
   const [broken, setBroken] = useState(false);
+  let normalizedSrc = String(src || "").trim();
+  if ((normalizedSrc.startsWith("<") && normalizedSrc.endsWith(">"))
+    || (normalizedSrc.startsWith('"') && normalizedSrc.endsWith('"'))
+    || (normalizedSrc.startsWith("'") && normalizedSrc.endsWith("'"))) {
+    normalizedSrc = normalizedSrc.slice(1, -1).trim();
+  }
+  normalizedSrc = normalizedSrc.replace(/&amp;/gi, "&");
 
   useEffect(() => {
     setBroken(false);
-  }, [src]);
+  }, [normalizedSrc]);
 
-  const showImage = Boolean(src && src.trim()) && !broken;
+  const showImage = Boolean(normalizedSrc) && !broken;
   const fallbackName = name && name.trim() ? name : type === "user" ? "Você" : "Servidor";
   const style = size ? { width: size, height: size } : undefined;
 
@@ -32,10 +39,10 @@ export function SmartAvatar({ src, name, type, size, alt, className }: SmartAvat
       {showImage ? (
         <img
           className="osk-avatar-img"
-          src={src as string}
+          src={normalizedSrc}
           alt={alt ?? fallbackName}
-          loading="lazy"
-          referrerPolicy="no-referrer"
+          loading="eager"
+          decoding="async"
           onError={() => setBroken(true)}
         />
       ) : (

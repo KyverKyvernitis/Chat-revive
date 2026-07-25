@@ -13,7 +13,8 @@ export type DashboardFieldType =
   | "url"
   | "string_list"
   | "form_fields"
-  | "color_slots";
+  | "color_slots"
+  | "color_panel_layout";
 export type DashboardFieldScope = "guild" | "welcome" | "birthday";
 
 export interface DashboardFieldOption { value: string; label: string }
@@ -279,6 +280,13 @@ function defaultColorSlots(): Record<string, unknown> {
   }]));
 }
 
+function defaultColorPanelLayout(): Array<{ id: string; slots: number[] }> {
+  return [0, 1, 2].map((index) => ({
+    id: `panel-${index + 1}`,
+    slots: Array.from({ length: 10 }, (_, offset) => index * 10 + offset + 1),
+  }));
+}
+
 function defaultTicketOption(id: string, label: string, emoji: string, description: string, flow: string, openingText: string) {
   return {
     id, builtin: true, enabled: true, label, emoji, description, flow,
@@ -384,6 +392,7 @@ function defaultGuildDoc(guildId: string): Record<string, unknown> {
       channel_id: 0,
       message_ids: [],
       panel_count: 3,
+      panel_layout: defaultColorPanelLayout(),
       messages: Object.fromEntries([1, 2, 3, 4, 5].map((number) => [String(number), { title: "", subtitle: "", footer: "" }])),
       templates: {
         apply: "cor {cor_adicionada} aplicada.", remove: "cor {cor_removida} removida.", switch: "cor alterada: {cor_removida} → {cor_adicionada}.",
@@ -731,19 +740,13 @@ const sections: DashboardSectionDefinition[] = [
     ],
   },
   {
-    id: "color_roles", label: "Cargos de cor", emoji: "🎨", description: "Painéis, textos e trinta cores vinculadas aos cargos do servidor.",
-    groups: ["Painel", "Mensagens", "Cores"],
+    id: "color_roles", label: "Cargos de cor", emoji: "🎨", description: "Até três painéis com opções vinculadas aos cargos do servidor.",
+    groups: ["Painel", "Mensagens"],
     groupMetadata: {
       Painel: {
         kind: "message",
-        settingsFieldIds: ["color_roles.channel_id", "color_roles.panel_count"],
-        editors: [
-          { id: "color-panel-1", label: "Painel 1", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 1.", fieldIds: ["color_roles.messages.1.title", "color_roles.messages.1.subtitle", "color_roles.messages.1.footer"] },
-          { id: "color-panel-2", label: "Painel 2", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 2.", fieldIds: ["color_roles.messages.2.title", "color_roles.messages.2.subtitle", "color_roles.messages.2.footer"] },
-          { id: "color-panel-3", label: "Painel 3", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 3.", fieldIds: ["color_roles.messages.3.title", "color_roles.messages.3.subtitle", "color_roles.messages.3.footer"] },
-          { id: "color-panel-4", label: "Painel 4", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 4.", fieldIds: ["color_roles.messages.4.title", "color_roles.messages.4.subtitle", "color_roles.messages.4.footer"] },
-          { id: "color-panel-5", label: "Painel 5", presentation: "color_panel", description: "Título, subtítulo e rodapé do painel 5.", fieldIds: ["color_roles.messages.5.title", "color_roles.messages.5.subtitle", "color_roles.messages.5.footer"] },
-        ],
+        settingsFieldIds: ["color_roles.channel_id"],
+        editors: [],
       },
       Mensagens: {
         kind: "message",
@@ -760,16 +763,11 @@ const sections: DashboardSectionDefinition[] = [
     },
     fields: [
       { id: "color_roles.channel_id", label: "Canal do painel", type: "channel", scope: "guild", path: "color_roles.channel_id", group: "Painel" },
-      { id: "color_roles.panel_count", label: "Quantidade de painéis", type: "number", scope: "guild", path: "color_roles.panel_count", min: 3, max: 5, group: "Painel" },
-      ...[1, 2, 3, 4, 5].flatMap((number) => [
-        { id: `color_roles.messages.${number}.title`, label: `Painel ${number}: título`, type: "text" as const, scope: "guild" as const, path: `color_roles.messages.${number}.title`, maxLength: 250, group: "Painel" },
-        { id: `color_roles.messages.${number}.subtitle`, label: `Painel ${number}: subtítulo`, type: "textarea" as const, scope: "guild" as const, path: `color_roles.messages.${number}.subtitle`, maxLength: 1000, group: "Painel" },
-        { id: `color_roles.messages.${number}.footer`, label: `Painel ${number}: rodapé`, type: "text" as const, scope: "guild" as const, path: `color_roles.messages.${number}.footer`, maxLength: 300, group: "Painel" },
-      ]),
+      { id: "color_roles.panel_layout", label: "Painéis", description: "Adicione, remova e reorganize até três painéis.", type: "color_panel_layout", scope: "guild", path: "color_roles.panel_layout", group: "Painel" },
+      { id: "color_roles.slots", label: "Opções dos painéis", description: "Nome e cargo vinculado de cada opção.", type: "color_slots", scope: "guild", path: "color_roles.slots", group: "Painel" },
       ...Object.entries({
         apply: "Cor aplicada", remove: "Cor removida", switch: "Cor trocada", no_role: "Cor sem cargo", hierarchy: "Erro de hierarquia", missing_panel: "Painel antigo",
       }).map(([key, label]) => ({ id: `color_roles.templates.${key}`, label, type: "textarea" as const, scope: "guild" as const, path: `color_roles.templates.${key}`, maxLength: 1000, group: "Mensagens" })),
-      { id: "color_roles.slots", label: "Cores e cargos", description: "Edite nome, cor visual e cargo de cada opção.", type: "color_slots", scope: "guild", path: "color_roles.slots", group: "Cores" },
     ],
   },
   {
@@ -936,6 +934,33 @@ function normalizeFormFields(raw: unknown): Array<Record<string, unknown>> {
     };
   });
 }
+function normalizeColorPanelLayout(raw: unknown): Array<{ id: string; slots: number[] }> {
+  const source = Array.isArray(raw) ? raw : defaultColorPanelLayout();
+  const used = new Set<number>();
+  const panels: Array<{ id: string; slots: number[] }> = [];
+  for (const [index, rawPanel] of source.slice(0, 3).entries()) {
+    const panel = isPlainObject(rawPanel) ? rawPanel : {};
+    const slots: number[] = [];
+    for (const rawSlot of Array.isArray(panel.slots) ? panel.slots : []) {
+      const number = Math.trunc(Number(rawSlot));
+      if (number < 1 || number > 30 || used.has(number)) continue;
+      used.add(number);
+      slots.push(number);
+      if (slots.length >= 10) break;
+    }
+    if (!slots.length) continue;
+    const requestedId = String(panel.id || "").trim().slice(0, 80);
+    let id = requestedId && !panels.some((item) => item.id === requestedId) ? requestedId : `panel-${index + 1}`;
+    let suffix = 2;
+    while (panels.some((item) => item.id === id)) {
+      id = `panel-${index + 1}-${suffix}`;
+      suffix += 1;
+    }
+    panels.push({ id, slots });
+  }
+  return panels.length ? panels : [{ id: "panel-1", slots: [1] }];
+}
+
 function normalizeColorSlots(raw: unknown): Record<string, unknown> {
   const defaults = defaultColorSlots();
   const source = isPlainObject(raw) ? raw : {};
@@ -968,6 +993,7 @@ function serializeFieldValue(field: DashboardFieldDefinition, value: unknown): u
   if (field.type === "channel" || field.type === "role") return serializeSnowflake(value);
   if (field.type === "role_multi") return Array.isArray(value) ? value.map(serializeSnowflake).filter(Boolean) : [];
   if (field.type === "color_slots") return serializeColorSlots(value);
+  if (field.type === "color_panel_layout") return normalizeColorPanelLayout(value);
   return value;
 }
 function normalizeFieldValue(field: DashboardFieldDefinition, raw: unknown): unknown {
@@ -990,9 +1016,19 @@ function normalizeFieldValue(field: DashboardFieldDefinition, raw: unknown): unk
   }
   if (field.type === "color") return cleanColor(raw);
   if (field.type === "url") {
-    const value = String(raw ?? "").trim();
+    let value = String(raw ?? "").trim();
+    if ((value.startsWith("<") && value.endsWith(">"))
+      || (value.startsWith('"') && value.endsWith('"'))
+      || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1).trim();
+    value = value.replace(/&amp;/gi, "&");
     if (!value) return "";
-    return /^https?:\/\/\S+$/i.test(value) ? value.slice(0, field.maxLength ?? 1000) : "";
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+      return value.slice(0, field.maxLength ?? 1000);
+    } catch {
+      return "";
+    }
   }
   if (field.type === "string_list") {
     const list = Array.isArray(raw) ? raw : String(raw ?? "").split(/\r?\n/);
@@ -1000,6 +1036,7 @@ function normalizeFieldValue(field: DashboardFieldDefinition, raw: unknown): unk
   }
   if (field.type === "form_fields") return normalizeFormFields(raw);
   if (field.type === "color_slots") return normalizeColorSlots(raw);
+  if (field.type === "color_panel_layout") return normalizeColorPanelLayout(raw);
   return String(raw ?? "").slice(0, field.maxLength ?? (field.type === "textarea" ? 1800 : 300));
 }
 function allFields() { return sections.flatMap((section) => section.fields); }
@@ -1166,6 +1203,17 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
         saved.push(field.id);
         changedSections.add(field.id.split(".")[0] || field.scope);
       }
+      if (saved.includes("color_roles.panel_layout")) {
+        const layout = normalizeColorPanelLayout(getPath(docs.guild, "color_roles.panel_layout"));
+        const panelCount = layout.length;
+        setPath(docs.guild, "color_roles.panel_layout", layout);
+        setPath(docs.guild, "color_roles.panel_count", panelCount);
+        const guildPatch = patches.get("guild") ?? {};
+        dotSetForPath(guildPatch, "color_roles.panel_layout", layout);
+        dotSetForPath(guildPatch, "color_roles.panel_count", panelCount);
+        patches.set("guild", guildPatch);
+      }
+
       if (saved.length && changedSections.has("welcome")) {
         const channelId = Number(getPath(docs.welcome, "channel_id") || 0);
         const webhook = isPlainObject(getPath(docs.welcome, "webhook"))

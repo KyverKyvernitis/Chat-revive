@@ -14,7 +14,7 @@ interface MessageVisualEditorProps {
   onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
   selectedFieldId?: string | null;
   selectedColorSlot?: number | null;
-  colorSlotRange?: { start: number; end: number } | null;
+  colorSlotIds?: number[] | null;
   onColorSlotSelect?(slotNumber: number): void;
 }
 
@@ -33,7 +33,7 @@ export function MessageVisualEditor({
   onTextSelection,
   selectedFieldId,
   selectedColorSlot,
-  colorSlotRange,
+  colorSlotIds,
   onColorSlotSelect,
 }: MessageVisualEditorProps) {
   if (!fields.length) {
@@ -49,7 +49,7 @@ export function MessageVisualEditor({
           <div><strong>{field.label}</strong>{field.description && <small>{field.description}</small>}</div>
           {field.maxLength && ["text", "textarea", "url"].includes(field.type) && <span>{currentText.length}/{field.maxLength}</span>}
         </header>
-        <DashboardFieldControl field={field} value={draft[field.id]} guildOptions={guildOptions} onChange={onChange} onTextSelection={onTextSelection} selectedColorSlot={selectedColorSlot} colorSlotRange={colorSlotRange} onColorSlotSelect={onColorSlotSelect} />
+        <DashboardFieldControl field={field} value={draft[field.id]} guildOptions={guildOptions} onChange={onChange} onTextSelection={onTextSelection} selectedColorSlot={selectedColorSlot} colorSlotIds={colorSlotIds} onColorSlotSelect={onColorSlotSelect} />
       </section>;
     })}
   </div>;

@@ -38,6 +38,7 @@ import { DashboardFieldControl, displayDashboardValue } from "./DashboardFieldCo
 import { MessageEditor } from "./message-editor";
 import { TicketFlowEditor } from "./TicketFlowEditor";
 import { TicketPermissionsEditor } from "./TicketPermissionsEditor";
+import { ColorRolesPanelManager } from "./color-roles/ColorRolesPanelManager";
 
 interface SectionEditorProps {
   section: DashboardSectionDefinition;
@@ -269,7 +270,16 @@ export function SectionEditor({
             </button>
             <div className="osk-accordion-panel" aria-hidden={!open}>
               <div className="osk-accordion-panel-inner">
-                {section.id === "tickets" && group === "Atendimento" ? (
+                {section.id === "color_roles" && group === "Painel" ? (
+                  <ColorRolesPanelManager
+                    fields={groupFields}
+                    values={values}
+                    draft={draft}
+                    guildOptions={guildOptions}
+                    onChange={onChange}
+                    onOpenEditor={(editor) => openMessageEditor(editor)}
+                  />
+                ) : section.id === "tickets" && group === "Atendimento" ? (
                   <TicketAttendancePanel fields={groupFields} renderFields={renderFields} />
                 ) : section.id === "tickets" && group === "Fluxos" ? (
                   <TicketFlowEditor fields={groupFields} draft={draft} renderFields={renderFields} onChange={onChange} />
@@ -336,14 +346,7 @@ function MessageGroupPanel({
   renderFields(fields: DashboardFieldDefinition[]): ReactNode;
   onOpenEditor(editor: DashboardMessageEditorDefinition, fallbackVariables?: DashboardTemplateVariables): void;
 }) {
-  let editors = metadata.editors?.length ? metadata.editors : [createLegacyEditor(group, fields)];
-  if (sectionId === "color_roles" && group === "Painel") {
-    const panelCount = Math.max(1, Math.min(5, Number(draft["color_roles.panel_count"] || 3)));
-    editors = editors.filter((editor) => {
-      const match = editor.id.match(/color-panel-(\d+)/);
-      return !match || Number(match[1]) <= panelCount;
-    });
-  }
+  const editors = metadata.editors?.length ? metadata.editors : [createLegacyEditor(group, fields)];
   const editorFieldIds = new Set(editors.flatMap((editor) => [...editor.fieldIds, ...(editor.senderFieldIds ?? [])]));
   const settingsIds = new Set(metadata.settingsFieldIds ?? fields.filter((field) => !editorFieldIds.has(field.id)).map((field) => field.id));
   const settingsFields = fields.filter((field) => settingsIds.has(field.id));

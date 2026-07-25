@@ -11,7 +11,8 @@ export type DashboardFieldType =
   | "url"
   | "string_list"
   | "form_fields"
-  | "color_slots";
+  | "color_slots"
+  | "color_panel_layout";
 
 export interface DashboardFieldOption {
   value: string;
@@ -213,4 +214,9 @@ export interface DashboardColorSlot {
   role_id: string | number;
   role_name: string;
   managed: boolean;
+}
+
+export interface DashboardColorPanel {
+  id: string;
+  slots: number[];
 }

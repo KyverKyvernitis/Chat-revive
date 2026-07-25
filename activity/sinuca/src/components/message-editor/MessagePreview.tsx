@@ -1,4 +1,4 @@
-import { Boxes, Pencil } from "lucide-react";
+import { ArrowDown, ArrowUp, Boxes, Minus, Pencil, Plus, Settings2 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import type {
@@ -8,9 +8,17 @@ import type {
   DashboardOptionsPayload,
 } from "../../types/dashboard";
 import { SmartAvatar } from "../SmartAvatar";
+import {
+  COLOR_PANEL_OPTION_MAX,
+  colorPanelFromEditorId,
+  colorRoleHex,
+  nextUnusedColorSlot,
+  normalizeColorPanelLayout,
+  updatePanelSlots,
+} from "../color-roles/colorRolesModel";
 import { DiscordRichText } from "./DiscordRichText";
 import { MessageInlineTextEditor } from "./MessageInlineTextEditor";
-import { isValidPreviewUrl, readableFieldLabel } from "./messageEditorUtils";
+import { isValidPreviewUrl, normalizePreviewUrl, readableFieldLabel } from "./messageEditorUtils";
 
 interface MessagePreviewProps {
   sectionId?: string;
@@ -35,10 +43,12 @@ interface MessagePreviewProps {
   onEditSender?(): void;
   onSelectField?(field: DashboardFieldDefinition): void;
   onEditField?(field: DashboardFieldDefinition): void;
+  hasFieldOptions?(field: DashboardFieldDefinition): boolean;
+  onOpenFieldOptions?(field: DashboardFieldDefinition): void;
   onFinishEdit?(): void;
   onChange?(field: DashboardFieldDefinition, raw: unknown): void;
   onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
-  onSelectColorSlot?(slotNumber: number): void;
+  onSelectColorSlot?(slotNumber: number, openInspector?: boolean): void;
 }
 
 type PreviewCoreProps = Omit<
@@ -97,6 +107,8 @@ function EditableRegion({
   selectedFieldId,
   onSelectField,
   onEditField,
+  hasOptions = false,
+  onOpenOptions,
   className,
   children,
   placeholder,
@@ -107,6 +119,8 @@ function EditableRegion({
   selectedFieldId?: string | null;
   onSelectField?(field: DashboardFieldDefinition): void;
   onEditField?(field: DashboardFieldDefinition): void;
+  hasOptions?: boolean;
+  onOpenOptions?(field: DashboardFieldDefinition): void;
   className?: string;
   children?: ReactNode;
   placeholder?: string;
@@ -149,6 +163,29 @@ function EditableRegion({
     >
       {children ?? <span className="osk-message-preview__ghost">+ {placeholder ?? readableFieldLabel(field)}</span>}
       {selected && textEditable && <span className="osk-message-editable__pencil" aria-hidden="true"><Pencil size={11} /></span>}
+      {selected && hasOptions && onOpenOptions && (
+        <span
+          role="button"
+          tabIndex={0}
+          className="osk-message-editable__options"
+          data-with-pencil={textEditable || undefined}
+          aria-label={`Abrir opções de ${field.label}`}
+          title={`Opções de ${field.label}`}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onOpenOptions(field);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            event.stopPropagation();
+            onOpenOptions(field);
+          }}
+        >
+          <Settings2 size={11} />
+        </span>
+      )}
     </div>
   );
 }
@@ -163,6 +200,8 @@ function FieldText({
   textSelection,
   onSelectField,
   onEditField,
+  hasFieldOptions,
+  onOpenFieldOptions,
   onFinishEdit,
   onChange,
   onTextSelection,
@@ -178,6 +217,8 @@ function FieldText({
   textSelection?: { fieldId: string; start: number; end: number } | null;
   onSelectField?(field: DashboardFieldDefinition): void;
   onEditField?(field: DashboardFieldDefinition): void;
+  hasFieldOptions?(field: DashboardFieldDefinition): boolean;
+  onOpenFieldOptions?(field: DashboardFieldDefinition): void;
   onFinishEdit?(): void;
   onChange?(field: DashboardFieldDefinition, raw: unknown): void;
   onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
@@ -209,6 +250,8 @@ function FieldText({
       selectedFieldId={selectedFieldId}
       onSelectField={onSelectField}
       onEditField={onEditField}
+      hasOptions={Boolean(field && hasFieldOptions?.(field))}
+      onOpenOptions={onOpenFieldOptions}
       className={className}
       placeholder={placeholder}
       textEditable={Boolean(field && (field.type === "text" || field.type === "textarea"))}
@@ -219,10 +262,17 @@ function FieldText({
 }
 
 function MessageImage({ src, alt, className, placeholder }: { src: string; alt: string; className: string; placeholder: string }) {
+  const normalizedSrc = normalizePreviewUrl(src);
   const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [src]);
-  if (failed || !isValidPreviewUrl(src)) return <div className={`${className} osk-message-preview__image-placeholder`}>{placeholder}</div>;
-  return <img className={className} src={src} alt={alt} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => { setFailed(false); setLoaded(false); }, [normalizedSrc]);
+  if (failed || !isValidPreviewUrl(normalizedSrc)) {
+    return <div className={`${className} osk-message-preview__image-placeholder`} data-error={failed || undefined}>{failed ? "Imagem indisponível" : placeholder}</div>;
+  }
+  return <span className={`osk-message-image-loader ${className}-loader`} data-loaded={loaded || undefined}>
+    {!loaded && <span className={`${className} osk-message-preview__image-placeholder`}>Carregando imagem…</span>}
+    <img key={normalizedSrc} className={className} src={normalizedSrc} alt={alt} loading="eager" decoding="async" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} />
+  </span>;
 }
 
 function ImageSlot({
@@ -314,7 +364,7 @@ function AccentControl({ field, selectedFieldId, onSelectField, label = "Editar 
 }
 
 function EmbedPreview(props: PreviewCoreProps) {
-  const { fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection } = props;
+  const { fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection } = props;
   const contentField = findField(fields, [".embed.content"]);
   const authorField = findField(fields, [".embed.author_name"]);
   const authorIconUrlField = findField(fields, [".embed.author_icon_url"]);
@@ -333,7 +383,7 @@ function EmbedPreview(props: PreviewCoreProps) {
   const accent = previewColor(fields, draft);
   const style = accent ? ({ "--osk-message-accent": accent } as CSSProperties) : undefined;
   const colorTarget = fieldString(colorModeField, draft) === "fixed" && colorField ? colorField : colorModeField ?? colorField;
-  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection };
+  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection };
 
   return (
     <div className="osk-message-preview__message">
@@ -361,12 +411,12 @@ function EmbedPreview(props: PreviewCoreProps) {
 
 
 function WelcomeDmEmbedPreview(props: PreviewCoreProps) {
-  const { fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection } = props;
+  const { fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection } = props;
   const titleField = findExact(fields, "welcome.dm.title");
   const bodyField = findExact(fields, "welcome.dm.body");
   const footerField = findExact(fields, "welcome.dm.footer");
   const accent = normalizedColor(draft["welcome.accent_color"]) ?? "#5865F2";
-  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection };
+  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection };
   return (
     <div className="osk-message-preview__message">
       <div className="osk-message-preview__embed" style={{ "--osk-message-accent": accent } as CSSProperties}>
@@ -387,7 +437,7 @@ function V2BlockLabel({ children }: { children: ReactNode }) {
 }
 
 function WelcomeComponentsV2Preview(props: PreviewCoreProps & { dm?: boolean }) {
-  const { fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection, dm } = props;
+  const { fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection, dm } = props;
   const titleField = dm ? findExact(fields, "welcome.dm.title") : findExact(fields, "welcome.public.title");
   const bodyField = dm ? findExact(fields, "welcome.dm.body") : findExact(fields, "welcome.public.body");
   const footerField = dm ? findExact(fields, "welcome.dm.footer") : findExact(fields, "welcome.public.footer");
@@ -401,7 +451,7 @@ function WelcomeComponentsV2Preview(props: PreviewCoreProps & { dm?: boolean }) 
   const accentTarget = String(draft["welcome.accent_color_mode"] || fieldString(accentModeField, draft) || "fixed") === "fixed" && accentField ? accentField : accentModeField ?? accentField;
   const showMedia = !dm && styleValue === "complete";
   const showFooter = styleValue !== "compact";
-  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection };
+  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection };
 
   return (
     <div className="osk-v2-message">
@@ -444,7 +494,7 @@ function WelcomeComponentsV2Preview(props: PreviewCoreProps & { dm?: boolean }) 
 }
 
 function ComponentsV2Preview(props: PreviewCoreProps) {
-  const { editorId, fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection } = props;
+  const { editorId, fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection } = props;
   const titleField = fields.find((field) => /(?:^|\.)(title)$/.test(field.id));
   const footerField = fields.find((field) => /(?:^|\.)(footer|footer_text)$/.test(field.id));
   const bodyFields = fields.filter((field) => (field.type === "text" || field.type === "textarea") && field !== titleField && field !== footerField && !/(button|emoji|placeholder)/i.test(`${field.id} ${field.label}`));
@@ -458,7 +508,7 @@ function ComponentsV2Preview(props: PreviewCoreProps) {
   const isApproveDm = editorId === "forms-approve-dm";
   const isRejectDm = editorId === "forms-reject-dm";
   const accent = normalizedColor(fieldValue(colorField, draft)) ?? (isApproveDm ? "#248046" : isRejectDm ? "#DA373C" : "#5865F2");
-  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection };
+  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection };
   const isTicketPanel = editorId === "tickets-panel";
   const isFormsResponse = editorId === "forms-response";
   const hasAction = Boolean(buttonLabelField || placeholderField);
@@ -548,7 +598,7 @@ function ComponentsV2Preview(props: PreviewCoreProps) {
 }
 
 function GenericMessagePreview(props: PreviewCoreProps) {
-  const { fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection } = props;
+  const { fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection } = props;
   const textFields = fields.filter((field) => field.type === "text" || field.type === "textarea");
   const imageFields = fields.filter((field) => field.type === "url" && /(image|media|banner|avatar)/i.test(`${field.id} ${field.label}`));
   const colorField = fields.find((field) => field.type === "color");
@@ -557,7 +607,7 @@ function GenericMessagePreview(props: PreviewCoreProps) {
   const bodyFields = textFields.filter((field) => field !== titleField && field !== footerField && !/(emoji|button|placeholder)/i.test(`${field.id} ${field.label}`));
   const accent = previewColor(fields, draft);
   const style = accent ? ({ "--osk-message-accent": accent } as CSSProperties) : undefined;
-  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection };
+  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, hasFieldOptions, onOpenFieldOptions, onFinishEdit, onChange, onTextSelection };
 
   if (!textFields.length && !imageFields.length && !interactive) return <div className="osk-message-preview__placeholder">Adicione conteúdo para começar.</div>;
   return (
@@ -572,44 +622,69 @@ function GenericMessagePreview(props: PreviewCoreProps) {
 }
 
 function ColorRolesPanelPreview(props: PreviewCoreProps) {
-  const { editorId, fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, selectedColorSlot, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection, onSelectColorSlot } = props;
-  const panelNumber = Math.max(1, Math.min(5, Number(editorId?.match(/color-panel-(\d+)/)?.[1] || 1)));
-  const titleField = fields.find((field) => field.id === `color_roles.messages.${panelNumber}.title`);
-  const subtitleField = fields.find((field) => field.id === `color_roles.messages.${panelNumber}.subtitle`);
-  const footerField = fields.find((field) => field.id === `color_roles.messages.${panelNumber}.footer`);
+  const { editorId = "", fields, draft, guildOptions, interactive, selectedFieldId, selectedColorSlot, onSelectField, onChange, onSelectColorSlot } = props;
+  const layoutField = fields.find((field) => field.id === "color_roles.panel_layout");
   const slotsField = fields.find((field) => field.id === "color_roles.slots");
+  const layout = normalizeColorPanelLayout(draft["color_roles.panel_layout"]);
+  const panel = colorPanelFromEditorId(layout, editorId) ?? layout[0];
+  const panelIndex = Math.max(0, layout.findIndex((item) => item.id === panel?.id));
   const rawSlots = draft["color_roles.slots"];
   const slots = rawSlots && typeof rawSlots === "object" ? rawSlots as Record<string, DashboardColorSlot> : {};
-  const start = (panelNumber - 1) * 10 + 1;
-  const panelSlots = Array.from({ length: 10 }, (_, index) => {
-    const number = start + index;
-    const value = slots[String(number)] || ({ number, name: `Cor ${number}`, text_hex: "#ffffff", role_hex: "#ffffff" } as DashboardColorSlot);
-    return { ...value, number };
-  });
-  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection };
+  const panelSlots = (panel?.slots ?? []).map((number) => ({
+    ...(slots[String(number)] || ({ number, name: `Cor ${number}`, text_hex: "#ffffff", role_hex: "#ffffff", role_id: 0, role_name: `Cor ${number}`, managed: false } as DashboardColorSlot)),
+    number,
+  }));
+
+  const commitLayout = (next: typeof layout) => {
+    if (layoutField && onChange) onChange(layoutField, next);
+  };
+  const moveOption = (index: number, direction: -1 | 1) => {
+    if (!panel) return;
+    const target = index + direction;
+    if (target < 0 || target >= panel.slots.length) return;
+    commitLayout(updatePanelSlots(layout, panel.id, (current) => {
+      [current[index], current[target]] = [current[target], current[index]];
+      return current;
+    }));
+  };
+  const removeOption = (slotNumber: number) => {
+    if (!panel || panel.slots.length <= 1) return;
+    commitLayout(updatePanelSlots(layout, panel.id, (current) => current.filter((number) => number !== slotNumber)));
+    if (selectedColorSlot === slotNumber) onSelectColorSlot?.(panel.slots.find((number) => number !== slotNumber) ?? panel.slots[0]);
+  };
+  const addOption = () => {
+    if (!panel || panel.slots.length >= COLOR_PANEL_OPTION_MAX) return;
+    const number = nextUnusedColorSlot(layout);
+    if (number === null) return;
+    commitLayout(updatePanelSlots(layout, panel.id, (current) => [...current, number]));
+    if (slotsField) onSelectField?.(slotsField);
+    onSelectColorSlot?.(number, true);
+  };
 
   return (
-    <div className="osk-color-panel-canvas" data-panel={panelNumber}>
-      <div className="osk-color-panel-canvas__copy">
-        <FieldText {...textProps} field={titleField} className="osk-color-panel-canvas__title" placeholder="Título do painel" />
-        <FieldText {...textProps} field={subtitleField} className="osk-color-panel-canvas__subtitle" placeholder="Subtítulo" />
-        <FieldText {...textProps} field={footerField} className="osk-color-panel-canvas__footer" placeholder="Adicionar rodapé" />
+    <div className="osk-color-panel-canvas" data-panel={panelIndex + 1}>
+      <div className="osk-color-panel-canvas__image" aria-label={`Opções do Painel ${panelIndex + 1}`}>
+        {panelSlots.map((slot, index) => {
+          const color = colorRoleHex(slot, guildOptions);
+          const selected = selectedColorSlot === slot.number;
+          return (
+            <div key={slot.number} className="osk-color-panel-canvas__option" data-selected={selected || undefined} style={{ "--osk-slot-color": color } as CSSProperties}>
+              <button type="button" className="osk-color-panel-canvas__slot" disabled={!interactive || !slotsField} onClick={(event) => { event.stopPropagation(); if (!slotsField) return; onSelectField?.(slotsField); onSelectColorSlot?.(slot.number); }}>
+                <b>{index + 1}.</b><span>{String(slot.name || `Cor ${slot.number}`)}</span>
+              </button>
+              {interactive && <span className="osk-color-panel-canvas__option-actions">
+                <button type="button" disabled={index === 0} onClick={(event) => { event.stopPropagation(); moveOption(index, -1); }} aria-label="Mover opção para cima"><ArrowUp size={12} /></button>
+                <button type="button" disabled={index === panelSlots.length - 1} onClick={(event) => { event.stopPropagation(); moveOption(index, 1); }} aria-label="Mover opção para baixo"><ArrowDown size={12} /></button>
+                <button type="button" disabled={panelSlots.length <= 1} onClick={(event) => { event.stopPropagation(); removeOption(slot.number); }} aria-label="Remover opção"><Minus size={13} /></button>
+              </span>}
+            </div>
+          );
+        })}
+        {interactive && slotsField && panel && panel.slots.length < COLOR_PANEL_OPTION_MAX && nextUnusedColorSlot(layout) !== null && (
+          <button type="button" className="osk-color-panel-canvas__add" onClick={(event) => { event.stopPropagation(); addOption(); }}><Plus size={15} />Adicionar opção</button>
+        )}
       </div>
-      {panelNumber <= 3 && (
-        <>
-          <div className="osk-color-panel-canvas__image" aria-label={`Cores ${start} a ${start + 9}`}>
-            {panelSlots.map((slot) => {
-              const color = /^#[0-9a-f]{6}$/i.test(String(slot.text_hex || "")) ? String(slot.text_hex) : "#ffffff";
-              return (
-                <button type="button" key={slot.number} className="osk-color-panel-canvas__slot" data-selected={selectedColorSlot === slot.number || undefined} style={{ "--osk-slot-color": color } as CSSProperties} disabled={!interactive || !slotsField} onClick={(event) => { event.stopPropagation(); if (!slotsField) return; onSelectField?.(slotsField); onSelectColorSlot?.(slot.number); }}>
-                  <b>{slot.number}.</b><span>{String(slot.name || `Cor ${slot.number}`)}</span>
-                </button>
-              );
-            })}
-          </div>
-          <div className="osk-message-preview__select-sim osk-color-panel-canvas__select"><span>Selecione uma cor</span><span>⌄</span></div>
-        </>
-      )}
+      <div className="osk-message-preview__select-sim osk-color-panel-canvas__select"><span>Selecione uma cor</span><span>⌄</span></div>
     </div>
   );
 }

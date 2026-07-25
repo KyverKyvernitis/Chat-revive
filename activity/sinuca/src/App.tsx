@@ -73,7 +73,7 @@ function valuesEqual(a: unknown, b: unknown) {
 }
 
 function normalizeInputValue(field: DashboardFieldDefinition, raw: unknown): unknown {
-  if (["role_multi", "string_list", "form_fields", "color_slots"].includes(field.type)) return raw;
+  if (["role_multi", "string_list", "form_fields", "color_slots", "color_panel_layout"].includes(field.type)) return raw;
   if (field.type === "boolean") return Boolean(raw);
   if (field.type === "number") {
     if (raw === "" || raw === null || raw === undefined) return 0;

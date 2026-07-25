@@ -181,10 +181,24 @@ export function readableFieldLabel(field: DashboardFieldDefinition): string {
     .trim();
 }
 
+export function normalizePreviewUrl(value: unknown): string {
+  if (typeof value !== "string") return "";
+  let normalized = value.trim();
+  if (!normalized) return "";
+  if ((normalized.startsWith("<") && normalized.endsWith(">"))
+    || (normalized.startsWith('"') && normalized.endsWith('"'))
+    || (normalized.startsWith("'") && normalized.endsWith("'"))) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  normalized = normalized.replace(/&amp;/gi, "&");
+  return normalized;
+}
+
 export function isValidPreviewUrl(value: unknown): value is string {
-  if (typeof value !== "string" || !value.trim()) return false;
+  const normalized = normalizePreviewUrl(value);
+  if (!normalized) return false;
   try {
-    const parsed = new URL(value.trim());
+    const parsed = new URL(normalized);
     return parsed.protocol === "http:" || parsed.protocol === "https:";
   } catch {
     return false;

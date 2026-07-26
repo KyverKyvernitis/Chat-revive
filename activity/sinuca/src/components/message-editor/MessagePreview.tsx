@@ -723,7 +723,11 @@ function ColorRolesPanelPreview(props: PreviewCoreProps) {
               className="osk-color-panel-canvas__slot"
               data-selected={selected || undefined}
               data-dark-color={needsLightOutline(color) || undefined}
-              style={{ "--osk-slot-color": color } as CSSProperties}
+              style={{
+                "--osk-slot-color": color,
+                color,
+                WebkitTextFillColor: color,
+              } as CSSProperties}
               disabled={!interactive || !slotsField}
               onClick={(event) => { event.stopPropagation(); selectSlot(slot.number); }}
               onDoubleClick={(event) => { event.stopPropagation(); selectSlot(slot.number, true); }}
@@ -732,19 +736,6 @@ function ColorRolesPanelPreview(props: PreviewCoreProps) {
             </button>
           );
         })}
-      </div>
-
-      <div className="osk-color-panel-canvas__buttons" aria-label="Botões do painel de cores">
-        {panelSlots.map((slot, index) => (
-          <button
-            type="button"
-            key={`button-${slot.number}`}
-            disabled
-            aria-label={`Botão ${index + 1}: ${String(slot.name || `Cor ${slot.number}`)}`}
-          >
-            {index + 1}
-          </button>
-        ))}
       </div>
 
       {interactive && selectedSlot && (

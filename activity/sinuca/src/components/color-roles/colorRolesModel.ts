@@ -126,15 +126,19 @@ export function colorRoleHex(
   const roleHex = normalizedHex(slot?.role_hex);
   const textHex = normalizedHex(slot?.text_hex);
 
-  // Versões antigas do editor criavam novas opções com ambos os campos em branco.
-  // Sem um cargo real, esse branco era apenas placeholder e deve voltar ao preset.
-  const placeholderWhite = !hasRoleId
-    && slotNumber !== 30
+  // Versões antigas do editor podiam salvar as duas cores como branco, inclusive
+  // mantendo um cargo antigo que já não aparece nas opções carregadas. Nesse caso,
+  // o branco é apenas um placeholder e a prévia deve recuperar a cor do preset.
+  const placeholderWhite = slotNumber !== 30
     && roleHex === "#FFFFFF"
     && textHex === "#FFFFFF";
   if (placeholderWhite) return preset;
 
-  return roleHex ?? textHex ?? preset;
+  // A cor do cargo é a fonte principal. O texto legado continua como fallback
+  // para configurações antigas nas quais apenas ele foi persistido corretamente.
+  if (roleHex && roleHex !== "#FFFFFF") return roleHex;
+  if (textHex) return textHex;
+  return roleHex ?? preset;
 }
 
 export function colorRoleLabel(slot: DashboardColorSlot | undefined, guildOptions?: DashboardOptionsPayload | null): string {

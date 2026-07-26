@@ -3813,7 +3813,7 @@
 }
 
 
-/* Prévia fiel ao painel publicado no Discord: imagem em duas colunas e botões numerados. */
+/* Editor do painel: imagem em duas colunas; componentes publicados ficam fora da prévia. */
 .osk-color-panel-canvas__image {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: clamp(14px, 4vw, 34px);
@@ -3858,30 +3858,6 @@
   background: rgba(111,82,246,.11);
   box-shadow: 0 0 0 3px rgba(111,82,246,.06);
 }
-.osk-color-panel-canvas__buttons {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 7px;
-}
-.osk-color-panel-canvas__buttons button {
-  min-width: 0;
-  min-height: 40px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 8px;
-  color: #e8e9ec;
-  background: #1a1d22;
-  font-size: .72rem;
-  font-weight: 760;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
-}
-.osk-color-panel-canvas__buttons button[data-selected] {
-  border-color: rgba(132,105,255,.6);
-  background: rgba(111,82,246,.18);
-  color: #f0edff;
-}
-.osk-color-panel-canvas__buttons button:disabled { opacity: 1; }
 .osk-color-panel-canvas__selection-tools {
   min-height: 48px;
   display: flex;
@@ -3932,8 +3908,6 @@
     padding-inline: 2px;
     font-size: clamp(.58rem, 2.75vw, .7rem);
   }
-  .osk-color-panel-canvas__buttons { gap: 5px; }
-  .osk-color-panel-canvas__buttons button { min-height: 36px; font-size: .66rem; }
 }
 .osk-color-panel-canvas__slot[data-dark-color] {
   -webkit-text-stroke: .25px rgba(238,240,245,.58);

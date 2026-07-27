@@ -1307,6 +1307,11 @@ class GincanaBase:
         }
         if effect in overrides:
             return overrides[effect]
+        for race_effect in self._get_race_effects(race_key):
+            if race_effect.get("key") == effect:
+                effect_emoji = str(race_effect.get("emoji") or "").strip()
+                if effect_emoji:
+                    return effect_emoji
         info = self._get_race_info_by_key(race_key) or {}
         return str(info.get("emoji") or self._EFFECT_EMOJI).strip() or self._EFFECT_EMOJI
 
@@ -1324,10 +1329,10 @@ class GincanaBase:
         if not title:
             return ""
         detail_map = {
-            "labia": "você usou o segundo pedido de esmola do período.",
+            "labia": "2º pedido de esmola do período.",
             "bencao": "uma carga pagou esta jogada.",
-            "mao_negra": "você usou o segundo roubo do período.",
-            "mao_grande": "o roubo passou do limite comum.",
+            "mao_negra": "2º roubo do período.",
+            "mao_grande": "roubo acima do limite comum.",
             "sangue_frio": "a perda do roubo ficou em 5 fichas.",
             "trapaceiro": "você escapou da penalidade do roubo.",
             "jackpot": f"você acertou **999** e recebeu **100** {self._CHIP_GAIN_EMOJI}.",

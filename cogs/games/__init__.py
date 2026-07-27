@@ -284,9 +284,14 @@ class _RacePanelView(discord.ui.LayoutView):
         race_name = str(info.get("name") or "Sem raça")
         active = self.cog._is_user_race_active(self.guild_id, self.user_id)
         state_text = "Ativa" if active else "Desativada"
-        lines = [f"# {emoji} {race_name}", f"**Estado:** {state_text}", "", "## Benefícios"]
+        lines = [f"# {emoji} {race_name}", f"**Estado:** {state_text}", "", "## Habilidades"]
         for effect in self.cog._get_race_effects(race_key):
-            lines.append(f"• **{effect.get('title')}**: {effect.get('desc')}")
+            effect_emoji = str(effect.get("emoji") or emoji).strip()
+            lines.extend([
+                "",
+                f"{effect_emoji} **{effect.get('title')}**",
+                str(effect.get("desc") or ""),
+            ])
         lines.extend(["", f"**Trocar raça:** {RACE_REROLL_COST} {self.cog._CHIP_EMOJI}"])
         return lines
 
@@ -393,9 +398,14 @@ class GamesCog(dcommands.Cog, GamesCore):
         info = self._get_race_info_by_key(race_key) or {}
         emoji = str(info.get("emoji") or "🍀")
         race_name = str(info.get("name") or "Sem raça")
-        lines = [f"# {emoji} Nova raça: {race_name}", "Sua raça foi definida.", "", "## Benefícios"]
+        lines = [f"# {emoji} Nova raça: {race_name}", "Sua raça foi definida.", "", "## Habilidades"]
         for effect in self._get_race_effects(race_key):
-            lines.append(f"• **{effect.get('title')}**: {effect.get('desc')}")
+            effect_emoji = str(effect.get("emoji") or emoji).strip()
+            lines.extend([
+                "",
+                f"{effect_emoji} **{effect.get('title')}**",
+                str(effect.get("desc") or ""),
+            ])
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.green()))
         return view
@@ -907,9 +917,6 @@ class GamesCog(dcommands.Cog, GamesCore):
         ]
         marker = self._race_effect_message(guild.id, author.id, "mao_negra")
         if self._race_is(guild.id, author.id, "preto") and robbery_used_count > 1 and marker:
-            lines.append(marker)
-        marker = self._race_effect_message(guild.id, author.id, "sangue_frio")
-        if penalty == 5 and marker:
             lines.append(marker)
         marker = self._race_effect_message(guild.id, author.id, "trapaceiro")
         if penalty == 0 and marker:

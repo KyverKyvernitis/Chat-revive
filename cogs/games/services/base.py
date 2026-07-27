@@ -30,6 +30,8 @@ from .session_registry import GameSessionRegistry, MAX_ACTIVE_GAME_USERS_PER_GUI
 
 
 SORTUDO_BLESSING_INTERVAL_SECONDS = 7 * 60 * 60
+SORTUDO_DAILY_EXTRA_BONUS = 5
+SORTUDO_STREAK_EXTRA_BONUS = 5
 
 
 class _NegativeDebtConfirmView(discord.ui.View):
@@ -529,15 +531,32 @@ class GincanaBase:
 
     async def _claim_daily_bonus_with_activity(self, guild_id: int, user_id: int, *, base_amount: int = 10) -> tuple[bool, int, int, int, int]:
         claimed, new_balance, bonus, streak = await self.db.claim_daily_bonus(guild_id, user_id, base_amount=base_amount)
+        bonus_bonus = 10
+        sortudo_extra = 0
+        if claimed and self._race_is(guild_id, user_id, "sortudo"):
+            sortudo_extra += SORTUDO_DAILY_EXTRA_BONUS
+            if int(bonus) > int(base_amount):
+                sortudo_extra += SORTUDO_STREAK_EXTRA_BONUS
+            if sortudo_extra > 0:
+                await self.db.add_user_bonus_chips(guild_id, user_id, sortudo_extra)
+                bonus_bonus += sortudo_extra
         if claimed:
             await self._mark_chip_activity(guild_id, user_id)
             try:
                 if int(bonus) > 0:
                     await self.db.append_chip_history(guild_id, user_id, delta=int(bonus), kind="chips", reason="Bônus diário")
                 await self.db.append_chip_history(guild_id, user_id, delta=10, kind="bonus", reason="Bônus diário")
+                if sortudo_extra > 0:
+                    await self.db.append_chip_history(
+                        guild_id,
+                        user_id,
+                        delta=sortudo_extra,
+                        kind="bonus",
+                        reason="Prêmio Extra do Sortudo",
+                    )
             except Exception:
                 pass
-        return claimed, new_balance, bonus, 10, streak
+        return claimed, new_balance, bonus, bonus_bonus, streak
 
     def _daily_streak_label(self, streak: int) -> str:
         value = max(0, int(streak or 0))
@@ -591,6 +610,7 @@ class GincanaBase:
         spin_granted: bool = False,
         carta_spin_granted: bool = False,
         streak_transition: str = "continued",
+        race_note: str = "",
     ) -> discord.ui.LayoutView:
         view = discord.ui.LayoutView(timeout=None)
         streak_value = max(0, int(streak or 0))
@@ -642,6 +662,8 @@ class GincanaBase:
             reward_lines.append(
                 f"-# A recompensa inclui +{extra_streak_bonus} {self._CHIP_EMOJI} pela ofensiva."
             )
+        if race_note:
+            reward_lines.extend(["", str(race_note).strip()])
         streak_lines = [
             "## 🔥 Ofensiva diária",
             f"**{streak_label}**",
@@ -677,6 +699,15 @@ class GincanaBase:
         await self._grant_weekly_points(guild_id, user_id, max(3, bonus // 2))
         spin_granted, _spin_state = await self._grant_daily_roleta_spin(guild_id, user_id)
         carta_spin_granted, _carta_spin_state = await self._grant_daily_carta_spin(guild_id, user_id)
+        race_note = ""
+        if self._race_is(guild_id, user_id, "sortudo") and int(bonus_bonus) > 10:
+            extra = int(bonus_bonus) - 10
+            detail = (
+                f"+{extra} {self._CHIP_BONUS_EMOJI}: +5 no Daily e +5 pela ofensiva."
+                if extra >= 10
+                else f"+{extra} {self._CHIP_BONUS_EMOJI} no Daily."
+            )
+            race_note = self._race_effect_message(guild_id, user_id, "premio_extra", detail)
         return self._make_daily_view(
             guild_id,
             user_id,
@@ -687,6 +718,7 @@ class GincanaBase:
             spin_granted=spin_granted,
             carta_spin_granted=carta_spin_granted,
             streak_transition=streak_transition,
+            race_note=race_note,
         )
 
     async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
@@ -1164,65 +1196,66 @@ class GincanaBase:
                 "name": "Preto",
                 "emoji": "🥷🏿",
                 "effects": [
-                    {"key": "mao_negra", "title": "Mão Negra", "desc": "Permite realizar **2 roubos** a cada **4h**."},
-                    {"key": "labia", "title": "Lábia", "desc": "Permite pedir esmola **2 vezes** a cada **3h**."},
-                    {"key": "sangue_frio", "title": "Sangue Frio", "desc": f"Ao falhar em um roubo, a perda é reduzida para **5** {self._CHIP_LOSS_EMOJI}."},
-                    {"key": "mao_grande", "title": "Mão Grande", "desc": f"Aumenta o valor máximo de cada roubo para **40** {self._CHIP_EMOJI}."},
+                    {"key": "mao_negra", "emoji": "🖐🏿", "title": "Mão Negra", "desc": "Você pode roubar **2 vezes** a cada **4h**."},
+                    {"key": "labia", "emoji": "🗣️", "title": "Lábia", "desc": "Você pode pedir esmola **2 vezes** a cada **3h**."},
+                    {"key": "sangue_frio", "emoji": "🧊", "title": "Sangue Frio", "desc": f"Quando um roubo dá errado, você perde apenas **5** {self._CHIP_LOSS_EMOJI}."},
+                    {"key": "mao_grande", "emoji": "💰", "title": "Cariocagem", "desc": f"Quando o roubo dá certo, você pode levar até **40** {self._CHIP_EMOJI}."},
                 ],
             },
             "apostador": {
                 "name": "Apostador",
                 "emoji": "🎰",
                 "effects": [
-                    {"key": "jackpot", "title": "Jackpot 999", "desc": f"Tem **{self._format_percent_text(0.15)} de chance** de obter **999** e receber **100** {self._CHIP_GAIN_EMOJI}."},
-                    {"key": "all_in", "title": "All-in 777", "desc": f"Tem **{self._format_percent_text(0.05)} de chance** de obter **777** e receber **200** {self._CHIP_GAIN_EMOJI}."},
-                    {"key": "666", "title": "Marca da Besta", "desc": f"Quando não sair jackpot, há **{self._format_percent_text(0.25)} de chance** de obter **666** e recuperar o custo do giro."},
-                    {"key": "mesa_alta", "title": "Mesa Alta", "desc": f"Aumenta o custo de cada giro da Roleta para **25** {self._CHIP_LOSS_EMOJI}."},
+                    {"key": "jackpot", "emoji": "🎰", "title": "Jackpot 999", "desc": f"Na Roleta, você tem **{self._format_percent_text(0.15)} de chance** de acertar **999** e ganhar **100** {self._CHIP_GAIN_EMOJI}."},
+                    {"key": "all_in", "emoji": "🎲", "title": "All-in 777", "desc": f"Há **{self._format_percent_text(0.05)} de chance** de acertar **777** e ganhar **200** {self._CHIP_GAIN_EMOJI}."},
+                    {"key": "666", "emoji": "😈", "title": "Marca da Besta", "desc": f"Quando o jackpot não vem, há **{self._format_percent_text(0.25)} de chance** de cair **666** e devolver o custo do giro."},
+                    {"key": "mesa_alta", "emoji": "💸", "title": "Mesa Alta", "desc": f"Você joga mais alto: cada giro da Roleta custa **25** {self._CHIP_LOSS_EMOJI}."},
                 ],
             },
             "sortudo": {
                 "name": "Sortudo",
                 "emoji": "🍀",
                 "effects": [
-                    {"key": "midas", "title": "Midas", "desc": f"Buckshot e Truco têm **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} de chance** de iniciar na versão dourada."},
-                    {"key": "premio_extra", "title": "Prêmio Extra", "desc": f"No Truco dourado, cada vencedor recebe **+20** {self._CHIP_BONUS_EMOJI} adicionais."},
-                    {"key": "bencao", "title": "Bênção", "desc": "Recebe **1 carga gratuita a cada 7h** e pode guardar até **2 cargas**. Cada carga paga **1 giro da Roleta** ou **1 mão de Cartas**."},
+                    {"key": "midas", "emoji": "✨", "title": "Midas", "desc": f"Ao abrir um Buckshot ou Truco, a partida tem **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} de chance** de começar dourada."},
+                    {"key": "premio_extra", "emoji": "🎁", "title": "Prêmio Extra", "desc": f"Seu Daily rende **+5** {self._CHIP_BONUS_EMOJI}. Quando a ofensiva aumenta o prêmio, você recebe **mais 5** {self._CHIP_BONUS_EMOJI}."},
+                    {"key": "bencao", "emoji": "🙏", "title": "Bênção", "desc": "A cada **7h**, você recebe uma jogada grátis. Pode guardar até **2** e usar na Roleta ou em Cartas."},
+                    {"key": "wind_boost", "emoji": "🍃", "title": "Wind Boost", "desc": "Na Corrida, boas sequências têm **20% a mais de chance** de gerar um impulso."},
                 ],
             },
             "coringa": {
                 "name": "Coringa",
                 "emoji": "🃏",
                 "effects": [
-                    {"key": "as", "title": "Ás", "desc": f"Em jogos com lobby, há **{self._format_percent_text(0.35)} de chance** de recuperar **50% da entrada** após uma derrota."},
-                    {"key": "trapaceiro", "title": "Trapaceiro", "desc": f"Ao falhar em um roubo, há **{self._format_percent_text(0.25)} de chance** de não perder fichas."},
-                    {"key": "redencao", "title": "Redenção", "desc": f"Ao perder na Roleta ou em Cartas, há **{self._format_percent_text(0.5)} de chance** de recuperar **50% do custo**."},
+                    {"key": "as", "emoji": "🂡", "title": "Ás", "desc": f"Ao perder um jogo com lobby, você tem **{self._format_percent_text(0.35)} de chance** de recuperar metade da entrada."},
+                    {"key": "trapaceiro", "emoji": "🎭", "title": "Trapaceiro", "desc": f"Quando um roubo dá errado, há **{self._format_percent_text(0.25)} de chance** de você não perder nenhuma ficha."},
+                    {"key": "redencao", "emoji": "🃏", "title": "Redenção", "desc": f"Ao perder na Roleta ou em Cartas, você tem **{self._format_percent_text(0.5)} de chance** de recuperar metade do custo."},
                 ],
             },
             "vampiro": {
                 "name": "Vampiro",
                 "emoji": "🧛",
                 "effects": [
-                    {"key": "hunt", "title": "Hunt", "desc": "Das **18h às 6h**, a primeira vitória válida concede **2 Sangues**; as seguintes, **1**. Máximo de **3**. O mesmo rival entra em espera por **4h**."},
-                    {"key": "harvest", "title": "Harvest", "desc": f"Com **3 Sangues**, consome as cargas e recebe **35** {self._CHIP_BONUS_EMOJI}. Pode ativar **2 vezes por noite**."},
+                    {"key": "hunt", "emoji": "🩸", "title": "Hunt", "desc": "Durante a noite, suas vitórias contra outros jogadores rendem Sangue. A primeira vale **2 cargas**; as próximas valem **1**. Você pode guardar até **3**."},
+                    {"key": "harvest", "emoji": "🍷", "title": "Harvest", "desc": f"Junte **3 cargas de Sangue** para receber **35** {self._CHIP_BONUS_EMOJI}. Pode acontecer até **2 vezes por noite**."},
                 ],
             },
             "fenix": {
                 "name": "Fênix",
                 "emoji": "🐦‍🔥",
                 "effects": [
-                    {"key": "sunrise", "title": "Sunrise", "desc": "Das **6h às 18h**, as duas primeiras derrotas pagas guardam **1 Brasa** cada."},
-                    {"key": "rebirth", "title": "Rebirth", "desc": f"A próxima vitória paga consome as Brasas: **1** concede **30** {self._CHIP_BONUS_EMOJI}; **2** concedem **40** {self._CHIP_BONUS_EMOJI}."},
-                    {"key": "second_dawn", "title": "Second Dawn", "desc": f"Uma vez por dia, uma derrota que deixe o saldo total abaixo de **30** concede **30** {self._CHIP_BONUS_EMOJI}."},
+                    {"key": "sunrise", "emoji": "🔥", "title": "Sunrise", "desc": "Durante o dia, suas duas primeiras derrotas pagas geram Brasas. Você pode guardar até **2**."},
+                    {"key": "rebirth", "emoji": "❤️‍🔥", "title": "Rebirth", "desc": f"Vença com Brasas guardadas para receber fichas bônus: **1 Brasa** rende **30** {self._CHIP_BONUS_EMOJI}; **2 Brasas** rendem **40** {self._CHIP_BONUS_EMOJI}."},
+                    {"key": "second_dawn", "emoji": "🐦‍🔥", "title": "Second Dawn", "desc": f"Uma vez por dia, se uma derrota deixar seu saldo abaixo de **30**, você recebe **30** {self._CHIP_BONUS_EMOJI}."},
                 ],
             },
             "glitch": {
                 "name": "Glitch",
                 "emoji": "👁️⃤",
                 "effects": [
-                    {"key": "desync", "title": "Desync", "desc": "Cada partida paga válida adiciona **1 fragmento**. O terceiro resultado entra em **ERROR**."},
-                    {"key": "overflow", "title": "Overflow", "desc": f"Uma vitória em **ERROR** concede de **30 a 45** {self._CHIP_BONUS_EMOJI}, conforme o lucro líquido."},
-                    {"key": "rollback", "title": "Rollback", "desc": "Uma derrota em **ERROR** devolve **75% da entrada**, limitado a **20**, na mesma composição."},
-                    {"key": "memory_leak", "title": "Memory Leak", "desc": "Após resolver o ERROR, há **25% de chance** de preservar **1 fragmento**."},
+                    {"key": "desync", "emoji": "<a:eyeglitch:1531116300645175436>", "title": "Desync", "desc": "A cada partida paga, o sistema fica mais instável. Na terceira, o estado **ERROR** é ativado."},
+                    {"key": "overflow", "emoji": "💠", "title": "Overflow", "desc": f"Vença durante o **ERROR** para receber entre **30 e 45** {self._CHIP_BONUS_EMOJI}."},
+                    {"key": "rollback", "emoji": "👁️⃤", "title": "Rollback", "desc": "Perca durante o **ERROR** para recuperar **75% da entrada**, com limite de **20 fichas**."},
+                    {"key": "memory_leak", "emoji": "🔧", "title": "Memory Leak", "desc": "Às vezes, o próximo ciclo começa com **1 fragmento** preservado."},
                 ],
             },
         }
@@ -1233,10 +1266,11 @@ class GincanaBase:
         for effect in list(info.get("effects") or []):
             if isinstance(effect, dict):
                 key = str(effect.get("key") or "").strip().lower()
+                emoji = str(effect.get("emoji") or "").strip()
                 title = str(effect.get("title") or "").strip()
                 desc = str(effect.get("desc") or "").strip()
                 if key and title and desc:
-                    effects.append({"key": key, "title": title, "desc": desc})
+                    effects.append({"key": key, "emoji": emoji, "title": title, "desc": desc})
         return effects
 
     def _get_race_effect_title(self, race_key: str, effect_key: str) -> str:
@@ -1246,65 +1280,85 @@ class GincanaBase:
                 return str(effect.get("title") or "")
         return ""
 
-    def _race_effect_message(self, guild_id: int, user_id: int, effect_key: str, detail: str | None = None) -> str:
+    def _race_effect_emoji(
+        self,
+        guild_id: int,
+        user_id: int,
+        effect_key: str,
+        *,
+        emoji_count: int | None = None,
+    ) -> str:
+        race_key = self._get_user_race_key(guild_id, user_id)
+        effect = str(effect_key or "").strip().lower()
+        if effect == "hunt":
+            count = min(3, max(1, int(emoji_count or 1)))
+            return "🩸" * count
+        if effect == "sunrise":
+            count = min(2, max(1, int(emoji_count or 1)))
+            return "🔥" * count
+        overrides = {
+            "harvest": "🍷",
+            "rebirth": "❤️‍🔥",
+            "second_dawn": "🐦‍🔥",
+            "desync": "<a:eyeglitch:1531116300645175436>",
+            "overflow": "💠",
+            "memory_leak": "🔧",
+            "rollback": "👁️⃤",
+        }
+        if effect in overrides:
+            return overrides[effect]
+        info = self._get_race_info_by_key(race_key) or {}
+        return str(info.get("emoji") or self._EFFECT_EMOJI).strip() or self._EFFECT_EMOJI
+
+    def _race_effect_message(
+        self,
+        guild_id: int,
+        user_id: int,
+        effect_key: str,
+        detail: str | None = None,
+        *,
+        emoji_count: int | None = None,
+    ) -> str:
+        effect_key = str(effect_key or "").strip().lower()
         title = self._get_race_effect_title(self._get_user_race_key(guild_id, user_id), effect_key)
         if not title:
             return ""
         detail_map = {
-            "labia": "o uso extra de pedir esmola foi liberado.",
+            "labia": "você usou o segundo pedido de esmola do período.",
             "bencao": "uma carga pagou esta jogada.",
-            "mao_negra": "o segundo roubo do período foi utilizado.",
-            "mao_grande": "o limite máximo do roubo foi ampliado.",
-            "sangue_frio": "a penalidade do roubo foi reduzida.",
+            "mao_negra": "você usou o segundo roubo do período.",
+            "mao_grande": "o roubo passou do limite comum.",
+            "sangue_frio": "a perda do roubo ficou em 5 fichas.",
             "trapaceiro": "você escapou da penalidade do roubo.",
-            "jackpot": f"você acertou o **999** e recebeu **100** {self._CHIP_GAIN_EMOJI}.",
-            "all_in": f"você acertou o **777** e recebeu **200** {self._CHIP_GAIN_EMOJI}.",
+            "jackpot": f"você acertou **999** e recebeu **100** {self._CHIP_GAIN_EMOJI}.",
+            "all_in": f"você acertou **777** e recebeu **200** {self._CHIP_GAIN_EMOJI}.",
             "666": "o custo do giro foi devolvido.",
             "midas": "a versão dourada foi ativada.",
-            "premio_extra": f"cada vencedor recebeu **+20** {self._CHIP_BONUS_EMOJI} adicionais.",
-            "as": "você recuperou **50% da entrada**.",
-            "redencao": "você recuperou **50% do custo**.",
+            "premio_extra": f"seu Daily rendeu fichas bônus extras.",
+            "as": "você recuperou metade da entrada.",
+            "redencao": "você recuperou metade do custo.",
             "hunt": "Sangue acumulado.",
             "harvest": f"você recebeu **35** {self._CHIP_BONUS_EMOJI}.",
             "sunrise": "Brasa armazenada.",
-            "rebirth": "as Brasas foram consumidas.",
+            "rebirth": "as Brasas viraram fichas bônus.",
             "second_dawn": f"você recebeu **30** {self._CHIP_BONUS_EMOJI}.",
             "desync": "fragmento registrado.",
             "overflow": "o ERROR premiou a vitória.",
             "rollback": "parte da entrada foi restaurada.",
             "memory_leak": "1 fragmento foi preservado.",
         }
-        effect_key = str(effect_key or "").strip().lower()
-        activation_labels = {
-            "labia": "Lábia ativada",
-            "bencao": "Bênção consumida",
-            "mao_negra": "Mão Negra ativada",
-            "mao_grande": "Mão Grande ativada",
-            "sangue_frio": "Sangue Frio ativado",
-            "trapaceiro": "Trapaceiro ativado",
-            "jackpot": "Jackpot 999 ativado",
-            "all_in": "All-in 777 ativado",
-            "666": "Marca da Besta ativada",
-            "midas": "Midas ativado",
-            "premio_extra": "Prêmio Extra ativado",
-            "as": "Ás ativado",
-            "redencao": "Redenção ativada",
-            "hunt": "Hunt",
-            "harvest": "Harvest",
-            "sunrise": "Sunrise",
-            "rebirth": "Rebirth",
-            "second_dawn": "Second Dawn",
-            "desync": "Desync",
-            "overflow": "Overflow",
-            "rollback": "Rollback",
-            "memory_leak": "Memory Leak",
-        }
         suffix = str(detail or detail_map.get(effect_key, "")).strip()
-        label = activation_labels.get(effect_key, f"{title} ativado")
-        return f"{self._EFFECT_EMOJI} **{label}:** {suffix}" if suffix else f"{self._EFFECT_EMOJI} **{label}.**"
+        emoji = self._race_effect_emoji(
+            guild_id,
+            user_id,
+            effect_key,
+            emoji_count=emoji_count,
+        )
+        return f"{emoji} **{title}:** {suffix}" if suffix else f"{emoji} **{title}.**"
 
     def _race_effect_marker(self, guild_id: int, user_id: int, effect_key: str) -> str:
         return self._race_effect_message(guild_id, user_id, effect_key)
+
 
     def _format_race_identity(self, guild_id: int, user_id: int) -> str:
         info = self._get_user_race_info(guild_id, user_id) or {}
@@ -1489,14 +1543,14 @@ class GincanaBase:
         period, period_key = self._race_period_info()
         if race_key == "vampiro":
             if period != "night":
-                return "🧛 **Hunt:** indisponível durante o dia."
+                return "🩸 **Hunt:** indisponível durante o dia."
             if str(state.get("night_key") or "") != period_key:
                 blood = 0
                 harvests = 0
             else:
                 blood = min(3, max(0, int(state.get("blood", 0) or 0)))
                 harvests = min(2, max(0, int(state.get("harvests", 0) or 0)))
-            return f"🧛 **Hunt:** {blood}/3 Sangues • Harvest {harvests}/2."
+            return f"🩸 **Hunt:** {blood}/3 Sangues • Harvest {harvests}/2."
         if race_key == "fenix":
             if period != "day":
                 return "🐦‍🔥 **Habilidades:** indisponíveis durante a noite."
@@ -1507,11 +1561,11 @@ class GincanaBase:
                 embers = min(2, max(0, int(state.get("embers", 0) or 0)))
                 dawn_used = bool(state.get("second_dawn_used", False))
             dawn_status = "usado" if dawn_used else "disponível"
-            return f"🐦‍🔥 **Sunrise:** {embers}/2 Brasas • Second Dawn {dawn_status}."
+            return f"🔥 **Sunrise:** {embers}/2 Brasas • Second Dawn {dawn_status}."
         fragments = min(2, max(0, int(state.get("fragments", 0) or 0)))
         if fragments >= 2:
-            return "👁️⃤ **Desync:** 2/3 fragmentos • ERROR no próximo resultado decisivo."
-        return f"👁️⃤ **Desync:** {fragments}/3 fragmentos."
+            return "<a:eyeglitch:1531116300645175436> **Desync:** 2/3 fragmentos • ERROR no próximo resultado decisivo."
+        return f"<a:eyeglitch:1531116300645175436> **Desync:** {fragments}/3 fragmentos."
 
     async def _send_race_lobby_feedback(
         self,
@@ -1719,14 +1773,21 @@ class GincanaBase:
                     gain = 2 if wins == 0 else 1
                     blood = min(3, max(0, int(state.get("blood", 0) or 0)) + gain)
                     state.update({"night_key": period_key, "blood": blood, "wins": wins + 1, "opponents": opponent_log})
+                    notes.append(
+                        self._race_effect_message(
+                            guild_id,
+                            user_id,
+                            "hunt",
+                            f"+{gain} Sangue{'s' if gain != 1 else ''} ({blood}/3).",
+                            emoji_count=blood,
+                        )
+                    )
                     if blood >= 3:
                         state["blood"] = 0
                         state["harvests"] = harvests + 1
                         bonus_delta = 35
                         bonus_reason = "Harvest do Vampiro"
                         notes.append(self._race_effect_message(guild_id, user_id, "harvest", f"+35 {self._CHIP_BONUS_EMOJI} ({state['harvests']}/2 nesta noite)."))
-                    else:
-                        notes.append(self._race_effect_message(guild_id, user_id, "hunt", f"+{gain} Sangues ({blood}/3)."))
 
                 elif race_key == "fenix":
                     if period != "day" or entry_total <= 0 or won is None:
@@ -1746,7 +1807,7 @@ class GincanaBase:
                         if embers < 2:
                             embers += 1
                             state["embers"] = embers
-                            notes.append(self._race_effect_message(guild_id, user_id, "sunrise", f"1 Brasa armazenada ({embers}/2)."))
+                            notes.append(self._race_effect_message(guild_id, user_id, "sunrise", f"1 Brasa armazenada ({embers}/2).", emoji_count=embers))
                         if not bool(state.get("second_dawn_used", False)):
                             chips_now = int(doc.get("chips", CHIPS_INITIAL) or 0)
                             bonus_now = max(0, int(doc.get("bonus_chips", 0) or 0))
@@ -1775,6 +1836,7 @@ class GincanaBase:
                             state["fragments"] = fragments
                             notes.append(self._race_effect_message(guild_id, user_id, "desync", f"{fragments}/3 fragmentos."))
                         else:
+                            notes.append(self._race_effect_message(guild_id, user_id, "desync", "3/3 fragmentos • ERROR."))
                             if won:
                                 net_profit = max(0, int(payout or 0) - entry_total)
                                 reward = min(45, max(30, 20 + int(net_profit * 0.5)))

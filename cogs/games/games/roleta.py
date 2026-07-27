@@ -18,6 +18,7 @@ from ..constants import (
     _ROLE_TOGGLE_WORD_RE,
     ALVO_STAKE,
     BUCKSHOT_STAKE,
+    CHIPS_INITIAL,
     ROLETA_APOSTADOR_COST,
     ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS,
     ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS,
@@ -230,13 +231,19 @@ class GincanaRoletaMixin:
             return self._chip_text(int(paid_entry), kind="loss")
 
 
-        def _format_game_net_value(self, gross_payout: int, paid_entry: int) -> str:
-            net = int(gross_payout) - int(paid_entry)
-            if net > 0:
-                return f"**+{net} {self._CHIP_GAIN_EMOJI}**"
-            if net < 0:
-                return f"**{net} {self._CHIP_LOSS_EMOJI}**"
+        def _format_game_result_value(self, result_delta: int) -> str:
+            result = int(result_delta)
+            if result > 0:
+                return f"**+{result} {self._CHIP_GAIN_EMOJI}**"
+            if result < 0:
+                return f"**{result} {self._CHIP_LOSS_EMOJI}**"
             return f"**0 {self._CHIP_EMOJI}**"
+
+
+        def _current_game_chip_total(self, guild_id: int, user_id: int) -> int:
+            normal = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
+            bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
+            return normal + bonus
 
 
         def _pick_game_loss_title(self, kind: str) -> str:
@@ -390,13 +397,15 @@ class GincanaRoletaMixin:
             paid_entry: int = ROLETA_COST,
             gross_payout: int = 0,
             current_jackpot: int = ROLETA_JACKPOT_CHIPS,
+            result_delta: int | None = None,
         ) -> discord.ui.LayoutView:
-            details = [f"**Entrada:** {self._format_game_entry_value(paid_entry)}"]
+            details: list[str] = []
             if int(gross_payout) > 0:
                 details.append(f"**Prêmio recebido:** {self._chip_text(gross_payout, kind='gain')}")
+            effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
             details.extend([
-                f"**Resultado líquido:** {self._format_game_net_value(gross_payout, paid_entry)}",
-                f"**Jackpot atual:** {self._chip_text(current_jackpot, kind='gain')}",
+                f"**Resultado:** {self._format_game_result_value(effective_result)}",
+                f"**Jackpot:** {self._chip_text(current_jackpot, kind='gain')}",
                 f"**Saldo atual:** {balance_text}",
             ])
             color = discord.Color.green() if success else (discord.Color.gold() if near else discord.Color(OFF_COLOR))
@@ -498,7 +507,8 @@ class GincanaRoletaMixin:
             if available <= 0 and is_staff:
                 return "Seus giros acabaram, mas como você é staff você ainda pode girar."
             giro_text = "giro" if available == 1 else "giros"
-            return f"Resta {available} {giro_text} • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
+            verb = "Resta" if available == 1 else "Restam"
+            return f"{verb} {available} {giro_text} • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
 
         def _roleta_spin_message_text(self, state: dict[str, float | int]) -> tuple[str, str]:
             total = max(ROLETA_SPIN_LIMIT, int(state.get("total", ROLETA_SPIN_LIMIT) or ROLETA_SPIN_LIMIT))
@@ -1070,7 +1080,8 @@ class GincanaRoletaMixin:
             if available <= 0 and is_staff:
                 return "Seus giros de cartas acabaram, mas como você é staff você ainda pode girar."
             giro_text = "giro de cartas" if available == 1 else "giros de cartas"
-            return f"Resta {available} {giro_text} • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
+            verb = "Resta" if available == 1 else "Restam"
+            return f"{verb} {available} {giro_text} • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
 
         def _carta_spin_message_text(self, state: dict[str, float | int]) -> tuple[str, str]:
             total = max(CARTA_SPIN_LIMIT, int(state.get("total", CARTA_SPIN_LIMIT) or CARTA_SPIN_LIMIT))
@@ -1226,12 +1237,14 @@ class GincanaRoletaMixin:
             footer_text: str | None = None,
             paid_entry: int = CARTA_COST,
             gross_payout: int = 0,
+            result_delta: int | None = None,
         ) -> discord.ui.LayoutView:
-            details = [f"**Entrada:** {self._format_game_entry_value(paid_entry)}"]
+            details: list[str] = []
             if int(gross_payout) > 0:
                 details.append(f"**Prêmio recebido:** {self._chip_text(gross_payout, kind='gain')}")
+            effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
             details.extend([
-                f"**Resultado líquido:** {self._format_game_net_value(gross_payout, paid_entry)}",
+                f"**Resultado:** {self._format_game_result_value(effective_result)}",
                 f"**Saldo atual:** {balance_text}",
             ])
             color = discord.Color.from_rgb(255, 201, 74) if premium else (discord.Color.green() if success else discord.Color(OFF_COLOR))
@@ -1403,6 +1416,7 @@ class GincanaRoletaMixin:
             forced_kind = str(outcome.get("forced_kind") or "")
             target_middle = list(outcome.get("target_middle") or [7, 7, 7])
             paid_entry = self._entry_paid_amount(entry_spend, entry_cost)
+            round_start_total = self._current_game_chip_total(guild.id, actor.id) + paid_entry
             is_apostador = self._race_is(guild.id, actor.id, "apostador")
 
             reserved_jackpot: int | None = None
@@ -1562,6 +1576,7 @@ class GincanaRoletaMixin:
                     paid_entry=paid_entry,
                     gross_payout=gross_payout,
                     current_jackpot=current_jackpot,
+                    result_delta=self._current_game_chip_total(guild.id, actor.id) - round_start_total,
                 )
             except Exception:
                 logging.getLogger("gincana.roleta").exception(
@@ -1582,6 +1597,7 @@ class GincanaRoletaMixin:
                     paid_entry=paid_entry,
                     gross_payout=gross_payout,
                     current_jackpot=self._current_roleta_dynamic_jackpot(guild.id),
+                    result_delta=self._current_game_chip_total(guild.id, actor.id) - round_start_total,
                 )
             await self._deliver_game_result(source_message, spin_message, view=result_view)
             return True
@@ -1601,6 +1617,7 @@ class GincanaRoletaMixin:
         ) -> bool:
             target_middle = self._roll_carta_target_middle()
             paid_entry = self._entry_paid_amount(entry_spend, entry_cost)
+            round_start_total = self._current_game_chip_total(guild.id, actor.id) + paid_entry
             spin_balance_text = self._format_compact_chip_balance(guild.id, actor.id)
             try:
                 spin_message, final_columns = await self._animate_carta_spin(
@@ -1717,6 +1734,7 @@ class GincanaRoletaMixin:
                 footer_text=carta_footer,
                 paid_entry=paid_entry,
                 gross_payout=gross_payout,
+                result_delta=self._current_game_chip_total(guild.id, actor.id) - round_start_total,
             )
             await self._deliver_game_result(source_message, spin_message, view=result_view)
             return True

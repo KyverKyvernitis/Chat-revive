@@ -46,10 +46,14 @@ ROLETA_DYNAMIC_JACKPOT_BASE = ROLETA_JACKPOT_CHIPS
 ROLETA_DYNAMIC_JACKPOT_MAX = 200
 ROLETA_DYNAMIC_JACKPOT_LOSS_INCREMENT = 1
 ROLETA_CYCLE_BONUS_CHIPS = 10
-GAME_ANIMATION_FRAME_SECONDS = 0.42
-GAME_ANIMATION_MIN_STOP_SECONDS = 2.05
-GAME_ANIMATION_MAX_SECONDS = 4.0
-GAME_ANIMATION_LAST_STOP_SECONDS = 3.80
+CARTA_ANIMATION_FRAME_SECONDS = 0.42
+CARTA_ANIMATION_MIN_STOP_SECONDS = 2.05
+CARTA_ANIMATION_MAX_SECONDS = 4.0
+CARTA_ANIMATION_LAST_STOP_SECONDS = 3.80
+ROLETA_ANIMATION_DURATION_SECONDS = 5.0
+ROLETA_ANIMATION_INTERVAL_WEIGHTS = (0.18, 0.21, 0.24, 0.28, 0.33, 0.39, 0.47, 0.58, 0.72, 0.90, 1.05)
+ROLETA_ANIMATION_MIN_STOP_SECONDS = 2.05
+ROLETA_ANIMATION_LAST_STOP_SECONDS = 4.80
 
 
 class _GameDebtConfirmView(discord.ui.LayoutView):
@@ -250,7 +254,14 @@ class GincanaRoletaMixin:
             return chosen
 
 
-        def _make_random_cell_stop_plan(self) -> list[tuple[float, int, int]]:
+        def _make_random_cell_stop_plan(
+            self,
+            *,
+            min_stop_seconds: float = CARTA_ANIMATION_MIN_STOP_SECONDS,
+            first_stop_max_seconds: float = 2.30,
+            last_stop_min_seconds: float = 3.45,
+            last_stop_max_seconds: float = CARTA_ANIMATION_LAST_STOP_SECONDS,
+        ) -> list[tuple[float, int, int]]:
             column_order = [column_index for column_index in range(3) for _ in range(3)]
             random.shuffle(column_order)
 
@@ -258,9 +269,9 @@ class GincanaRoletaMixin:
             for rows in remaining_rows.values():
                 random.shuffle(rows)
 
-            first_stop = random.uniform(GAME_ANIMATION_MIN_STOP_SECONDS, 2.30)
-            last_stop_min = max(first_stop + 1.05, 3.45)
-            last_stop = random.uniform(last_stop_min, GAME_ANIMATION_LAST_STOP_SECONDS)
+            first_stop = random.uniform(float(min_stop_seconds), float(first_stop_max_seconds))
+            last_stop_min = max(first_stop + 1.05, float(last_stop_min_seconds))
+            last_stop = random.uniform(last_stop_min, float(last_stop_max_seconds))
 
             gap_weights = [random.uniform(0.55, 1.45) for _ in range(8)]
             gap_total = sum(gap_weights) or 1.0
@@ -287,6 +298,12 @@ class GincanaRoletaMixin:
             for column_index, row_index in locked_cells:
                 frame_columns[column_index][row_index] = final_columns[column_index][row_index]
             return frame_columns
+
+
+        def _roleta_animation_intervals(self) -> list[float]:
+            total_weight = sum(ROLETA_ANIMATION_INTERVAL_WEIGHTS) or 1.0
+            scale = ROLETA_ANIMATION_DURATION_SECONDS / total_weight
+            return [float(weight) * scale for weight in ROLETA_ANIMATION_INTERVAL_WEIGHTS]
 
 
         def _current_roleta_dynamic_jackpot(self, guild_id: int) -> int:
@@ -393,13 +410,15 @@ class GincanaRoletaMixin:
             paid_entry: int = ROLETA_COST,
             jackpot: int = ROLETA_JACKPOT_CHIPS,
         ) -> discord.ui.LayoutView:
+            details = [
+                f"**Entrada:** {self._format_game_entry_value(paid_entry)}",
+            ]
+            if int(jackpot) > ROLETA_DYNAMIC_JACKPOT_BASE:
+                details.append(f"**Jackpot:** {self._chip_text(jackpot, kind='gain')}")
+            details.append(f"**Saldo atual:** {balance_text}")
             return self._make_game_layout_view(
                 "🎰 Girando...",
-                details=[
-                    f"**Entrada:** {self._format_game_entry_value(paid_entry)}",
-                    f"**Jackpot:** {self._chip_text(jackpot, kind='gain')}",
-                    f"**Saldo atual:** {balance_text}",
-                ],
+                details=details,
                 board=board,
                 footer_text=footer_text,
                 color=discord.Color.blurple(),
@@ -423,11 +442,10 @@ class GincanaRoletaMixin:
             if int(gross_payout) > 0:
                 details.append(f"**Prêmio recebido:** {self._chip_text(gross_payout, kind='gain')}")
             effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
-            details.extend([
-                f"**Resultado:** {self._format_game_result_value(effective_result)}",
-                f"**Jackpot:** {self._chip_text(current_jackpot, kind='gain')}",
-                f"**Saldo atual:** {balance_text}",
-            ])
+            details.append(f"**Resultado:** {self._format_game_result_value(effective_result)}")
+            if int(current_jackpot) > ROLETA_DYNAMIC_JACKPOT_BASE:
+                details.append(f"**Jackpot:** {self._chip_text(current_jackpot, kind='gain')}")
+            details.append(f"**Saldo atual:** {balance_text}")
             color = discord.Color.green() if success else (discord.Color.gold() if near else discord.Color(OFF_COLOR))
             return self._make_game_layout_view(
                 title,
@@ -976,35 +994,32 @@ class GincanaRoletaMixin:
             if spin_message is None:
                 return None, None
 
-            stop_plan = self._make_random_cell_stop_plan()
+            stop_plan = self._make_random_cell_stop_plan(
+                min_stop_seconds=ROLETA_ANIMATION_MIN_STOP_SECONDS,
+                first_stop_max_seconds=2.45,
+                last_stop_min_seconds=4.05,
+                last_stop_max_seconds=ROLETA_ANIMATION_LAST_STOP_SECONDS,
+            )
             stop_cursor = 0
             locked_cells: set[tuple[int, int]] = set()
             started_at = time.monotonic()
-            deadline_at = started_at + GAME_ANIMATION_MAX_SECONDS
-            next_frame_at = started_at + GAME_ANIMATION_FRAME_SECONDS
             display_columns = [list(column) for column in rolling_columns]
 
-            while True:
-                now = time.monotonic()
-                wake_at = min(next_frame_at, deadline_at)
-                if wake_at > now:
-                    await asyncio.sleep(wake_at - now)
-
+            intervals = self._roleta_animation_intervals()
+            for frame_index, delay in enumerate(intervals):
+                await asyncio.sleep(delay)
                 has_turn = False
                 try:
                     if guild_id is not None and session_id is not None:
                         has_turn = await self._wait_for_game_animation_turn(guild_id, session_id)
                         if not has_turn:
-                            if time.monotonic() >= deadline_at:
-                                break
                             continue
 
-                    now = time.monotonic()
-                    elapsed = now - started_at
+                    elapsed = time.monotonic() - started_at
                     for column in rolling_columns:
                         self._spin_roleta_column(column)
 
-                    if elapsed >= GAME_ANIMATION_MAX_SECONDS:
+                    if frame_index >= len(intervals) - 1:
                         locked_cells = {(column_index, row_index) for column_index in range(3) for row_index in range(3)}
                         stop_cursor = len(stop_plan)
                     else:
@@ -1032,11 +1047,8 @@ class GincanaRoletaMixin:
                     if has_turn and guild_id is not None and session_id is not None:
                         await self._advance_game_animation_turn(guild_id, session_id)
 
-                if len(locked_cells) >= 9 or time.monotonic() >= deadline_at:
+                if len(locked_cells) >= 9:
                     break
-                next_frame_at += GAME_ANIMATION_FRAME_SECONDS
-                if next_frame_at <= time.monotonic():
-                    next_frame_at = time.monotonic() + GAME_ANIMATION_FRAME_SECONDS
 
             return spin_message, final_columns
         def _carta_window_total(self, bonus_spins: int = 0) -> int:
@@ -1382,8 +1394,8 @@ class GincanaRoletaMixin:
             stop_cursor = 0
             locked_cells: set[tuple[int, int]] = set()
             started_at = time.monotonic()
-            deadline_at = started_at + GAME_ANIMATION_MAX_SECONDS
-            next_frame_at = started_at + GAME_ANIMATION_FRAME_SECONDS
+            deadline_at = started_at + CARTA_ANIMATION_MAX_SECONDS
+            next_frame_at = started_at + CARTA_ANIMATION_FRAME_SECONDS
             display_columns = [list(column) for column in rolling_columns]
 
             while True:
@@ -1406,7 +1418,7 @@ class GincanaRoletaMixin:
                     for column in rolling_columns:
                         self._spin_carta_column(column)
 
-                    if elapsed >= GAME_ANIMATION_MAX_SECONDS:
+                    if elapsed >= CARTA_ANIMATION_MAX_SECONDS:
                         locked_cells = {(column_index, row_index) for column_index in range(3) for row_index in range(3)}
                         stop_cursor = len(stop_plan)
                     else:
@@ -1436,9 +1448,9 @@ class GincanaRoletaMixin:
 
                 if len(locked_cells) >= 9 or time.monotonic() >= deadline_at:
                     break
-                next_frame_at += GAME_ANIMATION_FRAME_SECONDS
+                next_frame_at += CARTA_ANIMATION_FRAME_SECONDS
                 if next_frame_at <= time.monotonic():
-                    next_frame_at = time.monotonic() + GAME_ANIMATION_FRAME_SECONDS
+                    next_frame_at = time.monotonic() + CARTA_ANIMATION_FRAME_SECONDS
 
             return spin_message, final_columns
         async def _execute_roleta_round(
@@ -1600,6 +1612,7 @@ class GincanaRoletaMixin:
                     opponent_ids=(),
                     valid=True,
                     allow_hunt=False,
+                    glitch_progress=result_kind != "return",
                 )
                 if race_notes:
                     summary_lines = [*race_notes, *summary_lines]
@@ -1762,6 +1775,7 @@ class GincanaRoletaMixin:
                 opponent_ids=(),
                 valid=True,
                 allow_hunt=False,
+                glitch_progress=result_kind != "return",
             )
             if race_notes:
                 summary_lines = [*race_notes, *summary_lines]
@@ -1989,17 +2003,6 @@ class GincanaRoletaMixin:
                 return False
             key, lock = self._game_user_round_lock(guild.id, message.author.id)
             if lock.locked():
-                try:
-                    await message.channel.send(
-                        view=self._make_game_notice_view(
-                            "🎴 Partida em andamento",
-                            "Você já tem uma Roleta ou uma mão de Cartas em andamento.",
-                            ok=False,
-                        ),
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-                except Exception:
-                    pass
                 return True
             try:
                 async with lock:
@@ -2016,17 +2019,6 @@ class GincanaRoletaMixin:
                 return False
             key, lock = self._game_user_round_lock(guild.id, message.author.id)
             if lock.locked():
-                try:
-                    await message.channel.send(
-                        view=self._make_game_notice_view(
-                            "🎰 Giro em andamento",
-                            "Você já tem uma Roleta ou uma mão de Cartas em andamento.",
-                            ok=False,
-                        ),
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-                except Exception:
-                    pass
                 return True
             try:
                 async with lock:

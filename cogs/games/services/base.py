@@ -621,21 +621,17 @@ class GincanaBase:
             remaining = self._format_daily_reset_remaining(self._daily_reset_remaining_seconds())
             view.add_item(
                 discord.ui.Container(
-                    discord.ui.TextDisplay(
-                        "# ⏳ Bônus diário já resgatado\n"
-                        "Sua recompensa de hoje já está garantida."
-                    ),
+                    discord.ui.TextDisplay("# ⏳ Bônus diário já resgatado"),
                     discord.ui.Separator(),
                     discord.ui.TextDisplay(
-                        "## 🔥 Ofensiva diária\n"
+                        "## 🔥 Ofensiva\n"
                         f"**{streak_label}**\n"
-                        f"**Progresso da ofensiva:** {streak_progress}"
+                        f"**Progresso:** {streak_progress}"
                     ),
                     discord.ui.Separator(),
                     discord.ui.TextDisplay(
                         "## Próximo resgate\n"
-                        f"Disponível em **{remaining}**.\n"
-                        "-# Volte depois do reset para manter sua ofensiva."
+                        f"Disponível em **{remaining}**."
                     ),
                     accent_color=discord.Color.orange(),
                 )
@@ -665,16 +661,13 @@ class GincanaBase:
         if race_note:
             reward_lines.extend(["", str(race_note).strip()])
         streak_lines = [
-            "## 🔥 Ofensiva diária",
+            "## 🔥 Ofensiva",
             f"**{streak_label}**",
-            f"**Progresso da ofensiva:** {streak_progress}",
+            f"**Progresso:** {streak_progress}",
         ]
         view.add_item(
             discord.ui.Container(
-                discord.ui.TextDisplay(
-                    "# 🎁 Bônus diário resgatado\n"
-                    "As recompensas de hoje já foram adicionadas à sua conta."
-                ),
+                discord.ui.TextDisplay("# 🎁 Bônus diário resgatado"),
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("\n".join(reward_lines)),
                 discord.ui.Separator(),
@@ -1728,6 +1721,7 @@ class GincanaBase:
         opponent_ids=(),
         valid: bool = True,
         allow_hunt: bool = True,
+        glitch_progress: bool = True,
     ) -> list[str]:
         """Aplica progressão das raças novas sem interferir na resolução do jogo."""
         try:
@@ -1824,7 +1818,7 @@ class GincanaBase:
                                 notes.append(self._race_effect_message(guild_id, user_id, "second_dawn", f"+30 {self._CHIP_BONUS_EMOJI}."))
 
                 elif race_key == "glitch":
-                    if entry_total <= 0:
+                    if entry_total <= 0 or not glitch_progress:
                         return []
                     fragments = min(2, max(0, int(state.get("fragments", 0) or 0)))
                     if won is None:

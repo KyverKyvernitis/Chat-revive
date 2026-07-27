@@ -254,49 +254,38 @@ class GincanaRoletaMixin:
             return chosen
 
 
-        def _make_random_cell_stop_plan(
+        def _make_random_column_stop_plan(
             self,
             *,
             min_stop_seconds: float = CARTA_ANIMATION_MIN_STOP_SECONDS,
             first_stop_max_seconds: float = 2.30,
             last_stop_min_seconds: float = 3.45,
             last_stop_max_seconds: float = CARTA_ANIMATION_LAST_STOP_SECONDS,
-        ) -> list[tuple[float, int, int]]:
-            column_order = [column_index for column_index in range(3) for _ in range(3)]
+        ) -> list[tuple[float, int]]:
+            column_order = [0, 1, 2]
             random.shuffle(column_order)
 
-            remaining_rows = {column_index: [0, 1, 2] for column_index in range(3)}
-            for rows in remaining_rows.values():
-                random.shuffle(rows)
-
             first_stop = random.uniform(float(min_stop_seconds), float(first_stop_max_seconds))
-            last_stop_min = max(first_stop + 1.05, float(last_stop_min_seconds))
-            last_stop = random.uniform(last_stop_min, float(last_stop_max_seconds))
+            last_stop_floor = max(first_stop + 0.60, float(last_stop_min_seconds))
+            last_stop = random.uniform(last_stop_floor, float(last_stop_max_seconds))
+            middle_ratio = random.uniform(0.35, 0.65)
+            middle_stop = first_stop + ((last_stop - first_stop) * middle_ratio)
 
-            gap_weights = [random.uniform(0.55, 1.45) for _ in range(8)]
-            gap_total = sum(gap_weights) or 1.0
-            stop_span = last_stop - first_stop
-            cumulative = 0.0
-            stop_times = [first_stop]
-            for weight in gap_weights:
-                cumulative += weight
-                stop_times.append(first_stop + (stop_span * cumulative / gap_total))
-
-            plan: list[tuple[float, int, int]] = []
-            for stop_time, column_index in zip(stop_times, column_order):
-                row_index = remaining_rows[column_index].pop()
-                plan.append((float(stop_time), int(column_index), int(row_index)))
-            return plan
+            return [
+                (float(first_stop), int(column_order[0])),
+                (float(middle_stop), int(column_order[1])),
+                (float(last_stop), int(column_order[2])),
+            ]
 
         def _compose_game_animation_columns(
             self,
             rolling_columns: list[list[object]],
             final_columns: list[list[object]],
-            locked_cells: set[tuple[int, int]],
+            locked_columns: set[int],
         ) -> list[list[object]]:
             frame_columns = [list(column) for column in rolling_columns]
-            for column_index, row_index in locked_cells:
-                frame_columns[column_index][row_index] = final_columns[column_index][row_index]
+            for column_index in locked_columns:
+                frame_columns[column_index] = list(final_columns[column_index])
             return frame_columns
 
 
@@ -437,12 +426,14 @@ class GincanaRoletaMixin:
             gross_payout: int = 0,
             current_jackpot: int = ROLETA_JACKPOT_CHIPS,
             result_delta: int | None = None,
+            compact_recovery: bool = False,
         ) -> discord.ui.LayoutView:
             details: list[str] = []
-            if int(gross_payout) > 0:
-                details.append(f"**Prêmio recebido:** {self._chip_text(gross_payout, kind='gain')}")
-            effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
-            details.append(f"**Resultado:** {self._format_game_result_value(effective_result)}")
+            if not compact_recovery:
+                if int(gross_payout) > 0:
+                    details.append(f"**Prêmio recebido:** {self._chip_text(gross_payout, kind='gain')}")
+                effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
+                details.append(f"**Resultado:** {self._format_game_result_value(effective_result)}")
             if int(current_jackpot) > ROLETA_DYNAMIC_JACKPOT_BASE:
                 details.append(f"**Jackpot:** {self._chip_text(current_jackpot, kind='gain')}")
             details.append(f"**Saldo atual:** {balance_text}")
@@ -994,14 +985,14 @@ class GincanaRoletaMixin:
             if spin_message is None:
                 return None, None
 
-            stop_plan = self._make_random_cell_stop_plan(
+            stop_plan = self._make_random_column_stop_plan(
                 min_stop_seconds=ROLETA_ANIMATION_MIN_STOP_SECONDS,
                 first_stop_max_seconds=2.45,
                 last_stop_min_seconds=4.05,
                 last_stop_max_seconds=ROLETA_ANIMATION_LAST_STOP_SECONDS,
             )
             stop_cursor = 0
-            locked_cells: set[tuple[int, int]] = set()
+            locked_columns: set[int] = set()
             started_at = time.monotonic()
             display_columns = [list(column) for column in rolling_columns]
 
@@ -1016,22 +1007,23 @@ class GincanaRoletaMixin:
                             continue
 
                     elapsed = time.monotonic() - started_at
-                    for column in rolling_columns:
-                        self._spin_roleta_column(column)
+                    for column_index, column in enumerate(rolling_columns):
+                        if column_index not in locked_columns:
+                            self._spin_roleta_column(column)
 
                     if frame_index >= len(intervals) - 1:
-                        locked_cells = {(column_index, row_index) for column_index in range(3) for row_index in range(3)}
+                        locked_columns = {0, 1, 2}
                         stop_cursor = len(stop_plan)
                     else:
                         while stop_cursor < len(stop_plan) and stop_plan[stop_cursor][0] <= elapsed:
-                            _, column_index, row_index = stop_plan[stop_cursor]
-                            locked_cells.add((column_index, row_index))
+                            _, column_index = stop_plan[stop_cursor]
+                            locked_columns.add(column_index)
                             stop_cursor += 1
 
                     display_columns = self._compose_game_animation_columns(
                         rolling_columns,
                         final_columns,
-                        locked_cells,
+                        locked_columns,
                     )
                     frame_view = self._make_roleta_spin_view(
                         self._render_roleta_board(display_columns),
@@ -1047,7 +1039,7 @@ class GincanaRoletaMixin:
                     if has_turn and guild_id is not None and session_id is not None:
                         await self._advance_game_animation_turn(guild_id, session_id)
 
-                if len(locked_cells) >= 9:
+                if len(locked_columns) >= 3:
                     break
 
             return spin_message, final_columns
@@ -1390,9 +1382,9 @@ class GincanaRoletaMixin:
             if spin_message is None:
                 return None, None
 
-            stop_plan = self._make_random_cell_stop_plan()
+            stop_plan = self._make_random_column_stop_plan()
             stop_cursor = 0
-            locked_cells: set[tuple[int, int]] = set()
+            locked_columns: set[int] = set()
             started_at = time.monotonic()
             deadline_at = started_at + CARTA_ANIMATION_MAX_SECONDS
             next_frame_at = started_at + CARTA_ANIMATION_FRAME_SECONDS
@@ -1415,22 +1407,23 @@ class GincanaRoletaMixin:
 
                     now = time.monotonic()
                     elapsed = now - started_at
-                    for column in rolling_columns:
-                        self._spin_carta_column(column)
+                    for column_index, column in enumerate(rolling_columns):
+                        if column_index not in locked_columns:
+                            self._spin_carta_column(column)
 
                     if elapsed >= CARTA_ANIMATION_MAX_SECONDS:
-                        locked_cells = {(column_index, row_index) for column_index in range(3) for row_index in range(3)}
+                        locked_columns = {0, 1, 2}
                         stop_cursor = len(stop_plan)
                     else:
                         while stop_cursor < len(stop_plan) and stop_plan[stop_cursor][0] <= elapsed:
-                            _, column_index, row_index = stop_plan[stop_cursor]
-                            locked_cells.add((column_index, row_index))
+                            _, column_index = stop_plan[stop_cursor]
+                            locked_columns.add(column_index)
                             stop_cursor += 1
 
                     display_columns = self._compose_game_animation_columns(
                         rolling_columns,
                         final_columns,
-                        locked_cells,
+                        locked_columns,
                     )
                     frame_view = self._make_carta_spin_view(
                         self._render_carta_board(display_columns),
@@ -1446,7 +1439,7 @@ class GincanaRoletaMixin:
                     if has_turn and guild_id is not None and session_id is not None:
                         await self._advance_game_animation_turn(guild_id, session_id)
 
-                if len(locked_cells) >= 9 or time.monotonic() >= deadline_at:
+                if len(locked_columns) >= 3 or time.monotonic() >= deadline_at:
                     break
                 next_frame_at += CARTA_ANIMATION_FRAME_SECONDS
                 if next_frame_at <= time.monotonic():
@@ -1528,6 +1521,7 @@ class GincanaRoletaMixin:
             success = False
             near = False
             current_jackpot = self._current_roleta_dynamic_jackpot(guild.id)
+            compact_recovery = False
 
             try:
                 if result_kind in {"jackpot", "jackpot_mega"}:
@@ -1564,8 +1558,12 @@ class GincanaRoletaMixin:
                     await self._record_game_played(guild.id, actor.id, weekly_points=6)
                     await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                     await self._grant_weekly_points(guild.id, actor.id, 8)
-                    summary_lines.append("O símbolo coringa completou a combinação.")
-                    title = "🎰 Coringa premiado"
+                    if "⭐" in middle_digits:
+                        summary_lines.append("A estrela completou a combinação.")
+                        title = "🎰 Estrela premiada"
+                    else:
+                        summary_lines.append("O coringa completou a combinação.")
+                        title = "🎰 Coringa premiado"
                 elif result_kind == "partial":
                     race_won = True
                     race_payout = gross_payout = int(result_amount)
@@ -1584,7 +1582,9 @@ class GincanaRoletaMixin:
                     effect_note = self._race_effect_message(guild.id, actor.id, "666") if is_apostador else ""
                     if effect_note:
                         summary_lines.append(effect_note)
-                    summary_lines.append("O custo do giro foi recuperado." if result_amount >= paid_entry else "Parte do custo do giro foi recuperada.")
+                    compact_recovery = paid_entry > 0 and result_amount >= paid_entry
+                    if not compact_recovery:
+                        summary_lines.append("Parte do custo do giro foi recuperada.")
                     title = "🎰 Custo recuperado"
                 else:
                     race_won = False
@@ -1612,7 +1612,7 @@ class GincanaRoletaMixin:
                     opponent_ids=(),
                     valid=True,
                     allow_hunt=False,
-                    glitch_progress=result_kind != "return",
+                    glitch_progress=result_kind in {"jackpot", "jackpot_mega", "loss"},
                 )
                 if race_notes:
                     summary_lines = [*race_notes, *summary_lines]
@@ -1634,6 +1634,7 @@ class GincanaRoletaMixin:
                     gross_payout=gross_payout,
                     current_jackpot=current_jackpot,
                     result_delta=self._current_game_chip_total(guild.id, actor.id) - round_start_total,
+                    compact_recovery=compact_recovery,
                 )
             except Exception:
                 logging.getLogger("gincana.roleta").exception(

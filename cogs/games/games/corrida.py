@@ -1,11 +1,11 @@
 import asyncio
-import datetime
 import random
 
 import discord
 
 
 CORRIDA_STAKE = 40
+CORRIDA_MAX_PARTICIPANTS = 6
 CORRIDA_RODADA_CHEIA_THRESHOLD = 5
 CORRIDA_RODADA_CHEIA_BONUS = 40
 CORRIDA_RODADA_CHEIA_BONUS_LARGE = 50
@@ -23,23 +23,44 @@ _HORSE_TRIP = "<:horse2:1485795938990821547>"
 _HORSE_FINISH = "<:Mine:1485797167494070524>"
 _HORSE_DASH = "<:aaa:1486376725838430248>"
 
-_RACE_CONDITIONS = [
-    {"name": "Pista seca", "boost": 0.0, "trip": 0.0, "speed": 0.0},
-    {"name": "Pista molhada", "boost": -0.02, "trip": 0.08, "speed": -0.15},
-    {"name": "Pista pesada", "boost": -0.03, "trip": 0.04, "speed": -0.25},
-    {"name": "Pista rápida", "boost": 0.08, "trip": -0.02, "speed": 0.2},
-]
-_RACE_CONDITION_WEIGHTS = (0.34, 0.28, 0.26, 0.12)
+_RACE_WET_CHANCE = 0.28
+_RACE_NORMAL_CONDITION = {"key": "normal", "name": "", "trip": 0.0, "speed": 0.0}
+_RACE_WET_CONDITION = {"key": "wet", "name": "Pista molhada", "trip": 0.08, "speed": -0.15}
 
-_RACE_SPECIALS = [
-    {"name": "Corrida turbo", "boost": 0.12, "trip": -0.03, "speed": 0.35, "bonus_pool": 0, "color": discord.Color.dark_magenta()},
-    {"name": "Corrida pesada", "boost": -0.05, "trip": 0.1, "speed": -0.25, "bonus_pool": 0, "color": discord.Color.dark_orange()},
-    {"name": "Corrida de zebra", "boost": 0.04, "trip": 0.0, "speed": 0.0, "bonus_pool": 0, "zebra": True, "color": discord.Color.purple()},
-    {"name": "Grande prêmio", "boost": 0.02, "trip": 0.0, "speed": 0.15, "bonus_pool": 10, "color": discord.Color.gold()},
-]
+_RACE_PLANS = {
+    "equilibrado": {
+        "name": "Equilibrado",
+        "emoji": "⚖️",
+        "description": "Mantém um ritmo constante, sem vantagens nem riscos extras.",
+        "trip": 0.0,
+        "speed": 0.0,
+    },
+    "forcar_ritmo": {
+        "name": "Forçar o ritmo",
+        "emoji": "⚡",
+        "description": "Avança mais a cada rodada, mas tropeça com maior frequência.",
+        "trip": 0.04,
+        "speed": 0.10,
+    },
+    "conducao_tecnica": {
+        "name": "Condução técnica",
+        "emoji": "🛡️",
+        "description": "Reduz tropeços e suaviza quedas, em troca de um ritmo menor.",
+        "trip": -0.02,
+        "speed": -0.06,
+        "trip_move": 0.24,
+    },
+    "guardar_folego": {
+        "name": "Guardar fôlego",
+        "emoji": "🔥",
+        "description": "Começa mais contido e acelera quando a corrida entra na reta final.",
+        "trip": 0.0,
+        "speed": -0.12,
+        "final_speed": 0.15,
+    },
+}
 
 _RACE_IMPULSE_WINDOWS_NORMAL = ((3, "Largada"), (7, "Sprint final"))
-_RACE_IMPULSE_WINDOWS_FAST = ((2, "Largada"), (5, "Meio"), (8, "Sprint final"))
 _RACE_IMPULSE_INITIAL_DELAY = 0.0
 _RACE_IMPULSE_STEP_SECONDS = 1.0
 _RACE_IMPULSE_BUTTON_COUNT = 3
@@ -66,7 +87,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
         self.session = session
         self.guild = guild
         self.view_token = str(self.session.setdefault("_view_token", f"race:{guild_id}:{random.getrandbits(32):08x}"))
-        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label=f"🐎 Entrar ({len(cog._get_race_participants(guild, session))})", custom_id=f"{self.view_token}:join")
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label="Entrar", emoji="🐎", custom_id=f"{self.view_token}:join")
         self.join_button.callback = self._join_race
         self.start_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Iniciar", emoji="🏁", custom_id=f"{self.view_token}:start")
         self.start_button.callback = self._start_race
@@ -74,39 +95,40 @@ class _RaceLobbyView(discord.ui.LayoutView):
 
     def _build_layout(self):
         self.clear_items()
-        condition_name = str((self.session.get("condition") or {}).get("name") or "Pista seca")
-        special_name = str((self.session.get("special") or {}).get("name") or "")
         participants = self.cog._get_race_participants(self.guild, self.session)
-        pot_total = self.cog._race_pot_total(self.session)
-        bonus_pool = int(self.session.get("bonus_pool", 0) or 0)
-        pending_bonus = self.cog._race_rodada_cheia_pending_bonus(self.session)
-        effective_bonus = bonus_pool + pending_bonus
-        rodada_cheia_active = pending_bonus > 0
+        participant_count = len(participants)
+        is_closed = bool(self.session.get("starting") or self.session.get("started") or self.session.get("ended"))
+        self.join_button.disabled = is_closed or participant_count >= CORRIDA_MAX_PARTICIPANTS
+        self.start_button.disabled = is_closed
 
-        header_lines = [
-            "# 🐎 Corrida de cavalos",
-            f"**Condição:** {condition_name}",
-        ]
-        if special_name:
-            header_lines.append(f"**Especial:** {special_name}")
-        if rodada_cheia_active:
-            header_lines.append(f"🎉 **Rodada cheia ativada** (+{pending_bonus} fichas bônus)")
-        header_lines.append(f"**Entrada:** {self.cog._chip_amount(CORRIDA_STAKE)}")
-        header_lines.append(f"**Pote atual:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(effective_bonus)}" if effective_bonus > 0 else ""))
-        header_lines.append(f"**Tempo de corrida:** {_CORRIDA_DURATION_SECONDS}s")
+        header_lines = ["# 🐎 Corrida de cavalos"]
+        if self.cog._race_condition_is_wet(self.session):
+            header_lines.extend([
+                "🌧️ **Pista molhada**",
+                "O piso escorregadio aumenta a chance de tropeço.",
+                "",
+            ])
+        header_lines.extend([
+            f"**Entrada:** {self.cog._chip_amount(CORRIDA_STAKE)}",
+            f"**Participantes:** {participant_count}/{CORRIDA_MAX_PARTICIPANTS}",
+        ])
 
-        participants_lines = [f"### Participantes ({len(participants)})"]
+        participants_lines = ["### Participantes"]
         if participants:
             participants_lines.extend(f"• {member.mention}" for member in participants)
         else:
             participants_lines.append("• Ninguém entrou ainda.")
 
-        info_lines = ["Use o botão abaixo para entrar."]
-        info_lines.append("O criador da corrida ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
+        info_lines = [
+            "Clique em **Entrar** para escolher seu plano de corrida e confirmar a participação.",
+            "O criador da corrida ou a staff pode usar **Iniciar** quando houver pelo menos 2 participantes.",
+        ]
 
         row = discord.ui.ActionRow(self.join_button, self.start_button)
         container = discord.ui.Container(
             discord.ui.TextDisplay("\n".join(header_lines)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(self.cog._race_lobby_prize_lines(self.session))),
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(participants_lines)),
             discord.ui.Separator(),
@@ -129,16 +151,78 @@ class _RaceLobbyView(discord.ui.LayoutView):
             pass
 
 
+class _RacePlanSelect(discord.ui.Select):
+    def __init__(self, panel: "_RacePlanView"):
+        self.panel = panel
+        options = [
+            discord.SelectOption(
+                label=str(plan["name"]),
+                description=str(plan["description"]),
+                value=plan_key,
+                emoji=str(plan["emoji"]),
+            )
+            for plan_key, plan in _RACE_PLANS.items()
+        ]
+        super().__init__(
+            placeholder="Escolha seu plano de corrida",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id=f"race_plan:{panel.session_id}:{panel.user_id}",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.panel.confirm_plan(interaction, self.values[0])
+
+
+class _RacePlanView(discord.ui.LayoutView):
+    def __init__(self, cog: "GincanaCorridaMixin", guild_id: int, session_id: str, user_id: int):
+        super().__init__(timeout=30.0)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.session_id = str(session_id)
+        self.user_id = int(user_id)
+        self.confirmed = False
+        self.plan_select = _RacePlanSelect(self)
+        plan_lines = [
+            "# 🎯 Plano de corrida",
+            "Escolha uma estratégia. A escolha é definitiva para esta corrida.",
+            "",
+        ]
+        for plan in _RACE_PLANS.values():
+            plan_lines.append(f"{plan['emoji']} **{plan['name']}** — {plan['description']}")
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("\n".join(plan_lines)),
+                discord.ui.ActionRow(self.plan_select),
+                accent_color=discord.Color.blurple(),
+            )
+        )
+
+    async def confirm_plan(self, interaction: discord.Interaction, plan_key: str):
+        if int(getattr(interaction.user, "id", 0) or 0) != self.user_id:
+            await self.cog._send_component_feedback(interaction, "Esse seletor pertence a outra pessoa.")
+            return
+        if self.confirmed:
+            await self.cog._send_component_feedback(interaction, "Essa escolha já foi confirmada.")
+            return
+        self.confirmed = True
+        await self.cog._complete_race_join(
+            interaction,
+            guild_id=self.guild_id,
+            expected_session_id=self.session_id,
+            plan_key=str(plan_key),
+        )
+
+
 class _RaceLobbyClosedView(discord.ui.LayoutView):
     def __init__(self, session: dict, guild: discord.Guild, title: str, detail: str):
         super().__init__(timeout=None)
-        condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
-        special_name = str((session.get("special") or {}).get("name") or "")
         participants = int(len(session.get("locked_participants", set()) or []))
 
-        lines = [f"# {title}", f"**Condição:** {condition_name}"]
-        if special_name:
-            lines.append(f"**Especial:** {special_name}")
+        lines = [f"# {title}"]
+        if str((session.get("condition") or {}).get("key") or "normal") == "wet":
+            lines.append("🌧️ **Pista molhada**")
         lines.append(f"**Participantes:** {participants}")
         lines.append(detail)
 
@@ -167,9 +251,6 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.session = session
         self.stage_name = stage_name
         self.event_token = str(event_token)
-        self.last_best_user_id: int | None = None
-        self.last_best_target_bonus: float = 0.0
-        self.last_best_tier: str | None = None
         self.message: discord.Message | None = None
         self.finished = False
         self.step_index = -1
@@ -183,12 +264,6 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self._results_applied = False
         self._pending_render_signature = None
         self.activated_indices: set[int] = set()
-        # Timestamp UTC de quando o step atual começou (setado em _activate_step,
-        # limpo em _close_current_step). Usado no handle_press para detectar e
-        # descartar cliques atrasados: interactions cujo `created_at` é anterior
-        # a esse instante vieram de um step anterior que já foi fechado, e
-        # contabilizá-las no step atual altera o hits count aleatoriamente.
-        self.step_start_time: datetime.datetime | None = None
         self.buttons = [_RaceImpulseButton(self, idx) for idx in range(_RACE_IMPULSE_BUTTON_COUNT)]
         self._rebuild()
 
@@ -261,7 +336,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                     break
 
     def _make_result_entry(self) -> dict:
-        return {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT}
+        return {"pressed": [False] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT}
 
     async def handle_press(self, interaction: discord.Interaction, button_index: int):
         ack_needed = not interaction.response.is_done()
@@ -270,27 +345,15 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             current_step = int(self.step_index)
             active_index = self.active_index
             finished = bool(self.finished)
-            step_start = self.step_start_time
 
             if finished or active_index is None or current_step < 0:
                 return
             if interaction.guild is None or user is None:
                 return
 
-            # Descarta cliques atrasados. Com STEP_SECONDS curto (1.0s), é comum
-            # que um clique do step N chegue ao bot DEPOIS que _close_current_step
-            # e _activate_step(N+1) já tenham rodado. Sem esse filtro, o clique é
-            # contabilizado no step errado: times[N+1] é preenchido antes do
-            # usuário ver o novo botão acender, o que (a) pode dar um "acerto" ou
-            # "erro" aleatório no step N+1 e (b) bloqueia o clique correto do
-            # usuário no step N+1 via o guard `times[current_step] is not None`.
-            # interaction.created_at é timezone-aware UTC, step_start também.
-            interaction_time = getattr(interaction, "created_at", None)
-            if (
-                step_start is not None
-                and interaction_time is not None
-                and interaction_time < step_start
-            ):
+            custom_id = str((getattr(interaction, "data", None) or {}).get("custom_id") or "")
+            custom_parts = custom_id.rsplit(":", 2)
+            if len(custom_parts) != 3 or int(custom_parts[-2]) != current_step:
                 return
 
             user_id = int(getattr(user, "id", 0) or 0)
@@ -304,12 +367,12 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                 entry = self._make_result_entry()
                 self.results[user_id] = entry
 
-            times = entry["times"]
+            pressed = entry["pressed"]
             success = entry["success"]
-            if times[current_step] is not None:
+            if pressed[current_step]:
                 return
 
-            times[current_step] = 0.0
+            pressed[current_step] = True
             success[current_step] = int(button_index) == int(active_index)
         except Exception:
             return
@@ -324,10 +387,8 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.step_index = index
         self.active_index = self.order[index]
         self.activated_indices.add(int(self.active_index))
-        # Marca o instante em que o step começou. Cliques cujo `created_at` seja
-        # anterior a isso são descartados em handle_press como atrasados.
-        self.step_start_time = datetime.datetime.now(datetime.timezone.utc)
         for idx, button in enumerate(self.buttons):
+            button.custom_id = f"race_impulse:{self.event_token}:{index}:{idx}"
             button.disabled = idx != self.active_index
             button.label = _RACE_IMPULSE_EMOJI if idx in self.activated_indices else str(idx + 1)
             button.style = discord.ButtonStyle.secondary
@@ -340,10 +401,6 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             button.label = _RACE_IMPULSE_EMOJI if button.index in self.activated_indices else str(button.index + 1)
             button.style = discord.ButtonStyle.secondary
         self.active_index = None
-        # Limpa o timestamp do step ao fechar. Qualquer clique que chegar entre
-        # _close_current_step e _activate_step do próximo step é bloqueado pelo
-        # check `active_index is None` em handle_press.
-        self.step_start_time = None
         current_step = self.step_index
         if current_step < 0:
             return
@@ -352,31 +409,28 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             if entry is None:
                 entry = self._make_result_entry()
                 self.results[int(user_id)] = entry
-            if entry["times"][current_step] is None:
-                entry["times"][current_step] = _RACE_IMPULSE_STEP_SECONDS
+            if not entry["pressed"][current_step]:
                 entry["success"][current_step] = False
 
     def _successful_steps(self, entry: dict) -> int:
-        success = list(entry.get("success") or [])
-        if success:
-            return sum(1 for ok in success if bool(ok))
-        times = list(entry.get("times") or [])
-        return sum(1 for reaction_time in times if reaction_time is not None and float(reaction_time) < _RACE_IMPULSE_STEP_SECONDS)
+        return sum(1 for ok in list(entry.get("success") or []) if bool(ok))
+
+    def _impulse_chance_per_hit(self, user_id: int) -> float:
+        return 0.14 if self.cog._race_is(self.guild.id, int(user_id), "sortudo") else 0.09
 
     def _impulse_award_chance(self, user_id: int, hits: int) -> float:
-        if hits >= _RACE_IMPULSE_STAGE_COUNT:
-            chance = 0.35
-        elif hits == _RACE_IMPULSE_STAGE_COUNT - 1:
-            chance = 0.20
-        else:
-            chance = 0.0
-        if chance > 0.0 and self.cog._race_is(self.guild.id, int(user_id), "sortudo"):
-            chance += 0.20
-        return max(0.0, min(1.0, chance))
+        successful_hits = max(0, min(_RACE_IMPULSE_STAGE_COUNT, int(hits or 0)))
+        if successful_hits <= 0:
+            return 0.0
+        per_hit = self._impulse_chance_per_hit(user_id)
+        return 1.0 - ((1.0 - per_hit) ** successful_hits)
 
     def _random_impulse_tier(self, hits: int, user_id: int) -> str | None:
-        chance = self._impulse_award_chance(user_id, hits)
-        if chance <= 0.0 or random.random() >= chance:
+        successful_hits = max(0, min(_RACE_IMPULSE_STAGE_COUNT, int(hits or 0)))
+        if successful_hits <= 0:
+            return None
+        per_hit = self._impulse_chance_per_hit(user_id)
+        if not any(random.random() < per_hit for _ in range(successful_hits)):
             return None
         roll = random.random()
         if roll < 0.40:
@@ -410,21 +464,14 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         participants = list(self.participant_ids)
 
         awarded: list[tuple[int, str, float, int]] = []
-        self.last_best_user_id = None
-        self.last_best_target_bonus = 0.0
-        self.last_best_tier = None
-
         for user_id in participants:
-            entry = self.results.setdefault(user_id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT})
-            times = list(entry.get("times") or [])
-            if len(times) < _RACE_IMPULSE_STAGE_COUNT:
-                times.extend([None] * (_RACE_IMPULSE_STAGE_COUNT - len(times)))
+            entry = self.results.setdefault(user_id, self._make_result_entry())
             hits = self._successful_steps(entry)
             award_chance = self._impulse_award_chance(user_id, hits)
             tier = self._random_impulse_tier(hits, user_id)
             entry["hits"] = hits
             entry["award_chance"] = award_chance
-            entry["sortudo_bonus_applied"] = bool(award_chance > 0.35 and self.cog._race_is(self.guild.id, int(user_id), "sortudo"))
+            entry["sortudo_bonus_applied"] = bool(self.cog._race_is(self.guild.id, int(user_id), "sortudo") and hits > 0)
             entry["tier"] = tier
             entry["failed_trigger"] = bool(award_chance > 0.0 and not tier)
             if not tier:
@@ -443,10 +490,6 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             for user_id, tier, bonus, hits in awarded[:3]
         ]
         if awarded:
-            best_user_id, best_tier, best_bonus, _best_hits = awarded[0]
-            self.last_best_user_id = int(best_user_id)
-            self.last_best_target_bonus = float(best_bonus)
-            self.last_best_tier = str(best_tier)
             mention_lines = []
             for user_id, tier, _bonus, _hits in awarded[:3]:
                 member = self.guild.get_member(int(user_id))
@@ -473,8 +516,6 @@ class _RaceStateView(discord.ui.LayoutView):
         self.session = session
         self.finished = finished
 
-        condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
-        special_name = str((session.get("special") or {}).get("name") or "")
         narration = str(session.get("narration") or ("🏁 Todos cruzaram a linha." if finished else ""))
         lines = cog._build_race_lines(guild, session)
 
@@ -483,9 +524,9 @@ class _RaceStateView(discord.ui.LayoutView):
         else:
             title = "# 🔥 Reta final" if session.get("final_stretch") else "# 🐎 Corrida em andamento"
 
-        header_lines = [title, f"**Condição:** {condition_name}"]
-        if special_name:
-            header_lines.append(f"**Especial:** {special_name}")
+        header_lines = [title]
+        if cog._race_condition_is_wet(session):
+            header_lines.append("🌧️ **Pista molhada**")
         if session.get("rodada_cheia"):
             header_lines.append("🎉 **Rodada cheia**")
 
@@ -532,9 +573,10 @@ class GincanaCorridaMixin:
         refund_ids = [int(user_id) for user_id in set(session.get("locked_participants", set()) or [])]
         for user_id in refund_ids:
             try:
-                await self._change_user_chips(guild_id, int(user_id), CORRIDA_STAKE, reason="Devolução da corrida (cancelada)")
+                await self._refund_race_entry(guild_id, session, int(user_id), reason="Devolução da corrida (cancelada)")
             except Exception:
                 pass
+        await self._release_race_registry(session)
         session["ended"] = True
         session["starting"] = False
         session["started"] = False
@@ -574,18 +616,26 @@ class GincanaCorridaMixin:
         return participants
 
     def _get_race_impulse_schedule(self, session: dict) -> tuple[tuple[int, str], ...]:
-        condition_name = str((session.get("condition") or {}).get("name") or "").strip().lower()
-        if condition_name == "pista rápida":
-            return _RACE_IMPULSE_WINDOWS_FAST
         return _RACE_IMPULSE_WINDOWS_NORMAL
+
+    def _race_condition_is_wet(self, session: dict) -> bool:
+        return str((session.get("condition") or {}).get("key") or "normal") == "wet"
+
+    def _race_plan(self, session: dict, user_id: int) -> dict:
+        plan_key = str((session.get("plans") or {}).get(int(user_id)) or "equilibrado")
+        return dict(_RACE_PLANS.get(plan_key) or _RACE_PLANS["equilibrado"])
+
+    def _race_plan_label(self, session: dict, user_id: int) -> str:
+        plan = self._race_plan(session, user_id)
+        return f"{plan.get('emoji', '⚖️')} {plan.get('name', 'Equilibrado')}"
 
     def _race_pot_total(self, session: dict) -> int:
         participant_count = len(set(session.get("locked_participants", set()) or []))
-        return max(0, participant_count - 1) * CORRIDA_STAKE
+        return max(0, participant_count) * CORRIDA_STAKE
 
     def _race_rodada_cheia_pending_bonus(self, session: dict) -> int:
-        """Bonus that will be added at race start based on participant count tier."""
-        if session.get("started"):
+        """Bônus que será adicionado no início conforme o número de participantes."""
+        if session.get("started") or session.get("rodada_cheia"):
             return 0
         participant_count = len(set(session.get("locked_participants", set()) or []))
         if participant_count >= CORRIDA_RODADA_CHEIA_LARGE_THRESHOLD:
@@ -598,6 +648,48 @@ class GincanaCorridaMixin:
         if session.get("rodada_cheia"):
             return True
         return self._race_rodada_cheia_pending_bonus(session) > 0
+
+    def _race_lobby_prize_lines(self, session: dict) -> list[str]:
+        participant_count = len(set(session.get("locked_participants", set()) or []))
+        lines = ["### Premiação atual"]
+        if participant_count < 2:
+            lines.append("A distribuição aparece quando houver pelo menos **2 participantes**.")
+        else:
+            normal_pools = self._nominal_race_pools(participant_count, participant_count * CORRIDA_STAKE)
+            bonus_pool = self._race_rodada_cheia_pending_bonus(session)
+            bonus_pools = self._nominal_race_pools(participant_count, bonus_pool) if bonus_pool > 0 else []
+            for index, normal_amount in enumerate(normal_pools, start=1):
+                parts = [self._chip_amount(int(normal_amount))]
+                if index <= len(bonus_pools) and int(bonus_pools[index - 1]) > 0:
+                    parts.append(self._bonus_chip_amount(int(bonus_pools[index - 1])))
+                lines.append(f"{self._race_placement_emoji(index)} {' + '.join(parts)}")
+
+        if participant_count >= CORRIDA_RODADA_CHEIA_THRESHOLD:
+            bonus = self._race_rodada_cheia_pending_bonus(session)
+            lines.append(f"🎉 **Rodada Cheia:** {self._bonus_chip_amount(bonus)} distribuídas no pódio.")
+        else:
+            missing = CORRIDA_RODADA_CHEIA_THRESHOLD - participant_count
+            label = "participante" if missing == 1 else "participantes"
+            lines.append(f"Faltam **{missing} {label}** para ativar a Rodada Cheia.")
+        return lines
+
+    async def _refund_race_entry(self, guild_id: int, session: dict, user_id: int, *, reason: str):
+        raw_spend = (session.get("entry_spend") or {}).get(int(user_id)) or {"chips": CORRIDA_STAKE, "bonus": 0}
+        spend = self._normalize_entry_spend(raw_spend)
+        if spend["bonus"] > 0:
+            await self._change_user_bonus_chips(guild_id, int(user_id), int(spend["bonus"]), reason=reason)
+        if spend["chips"] > 0:
+            await self._change_user_chips(guild_id, int(user_id), int(spend["chips"]), reason=reason)
+
+    async def _release_race_registry(self, session: dict):
+        session_id = str(session.get("registry_session_id") or "")
+        if not session_id:
+            return
+        try:
+            await self._game_sessions.release(session_id)
+        except Exception:
+            pass
+        session["registry_created"] = False
 
     def _race_lobby_view_matches(self, session: dict, source_view: discord.ui.LayoutView | None) -> bool:
         if source_view is None:
@@ -616,8 +708,7 @@ class GincanaCorridaMixin:
         if finished:
             return discord.Color.green()
         if not session.get("started"):
-            special = session.get("special") or {}
-            return special.get("color") or discord.Color.blurple()
+            return discord.Color.blurple()
         if session.get("final_stretch"):
             return discord.Color.red()
         return discord.Color.orange()
@@ -668,7 +759,10 @@ class GincanaCorridaMixin:
                     state_emoji = _HORSE_BOOST
             if rank_map.get(member.id, 9999) != 9999 and state_emoji == _HORSE_FINISH:
                 pos = _CORRIDA_TRACK_LENGTH - 1
-            lines.append(f"{medal} {member.mention}")
+            plan_prefix = ""
+            if session.get("started"):
+                plan_prefix = f"{self._race_plan(session, member.id).get('emoji', '⚖️')} "
+            lines.append(f"{medal} {plan_prefix}{member.mention}")
             lines.append(self._render_race_track(pos, state_emoji))
             lines.append("")
         if lines and not lines[-1]:
@@ -676,35 +770,27 @@ class GincanaCorridaMixin:
         return lines
 
     def _make_race_embed(self, guild: discord.Guild, session: dict, *, finished: bool = False) -> discord.Embed:
-        pot_total = self._race_pot_total(session)
-        bonus_pool = int(session.get("bonus_pool", 0) or 0)
-        pending_bonus = self._race_rodada_cheia_pending_bonus(session)
-        effective_bonus = bonus_pool + pending_bonus
         title = "🐎 Corrida aberta"
         if session.get("started"):
             title = "🏁 Corrida encerrada" if finished else ("🔥 Reta final" if session.get("final_stretch") else "🐎 Corrida em andamento")
 
-        condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
-        special_name = str((session.get("special") or {}).get("name") or "")
-        narration = str(session.get("narration") or ("" if session.get("started") else "📣 A corrida vai começar."))
-        lines = self._build_race_lines(guild, session)
-        description_parts = [f"Condição: **{condition_name}**"]
-        if special_name:
-            description_parts.append(f"Especial: **{special_name}**")
+        narration = str(session.get("narration") or "")
+        description_parts: list[str] = []
+        if self._race_condition_is_wet(session):
+            description_parts.append("🌧️ **Pista molhada**")
         if self._race_is_rodada_cheia(session):
             description_parts.append("🎉 **Rodada cheia**")
-        description_parts.append("")
-        description_parts.extend(lines)
-        description_parts.append("")
-        description_parts.append("────────")
-        description_parts.append(narration)
+        if description_parts:
+            description_parts.append("")
+        description_parts.extend(self._build_race_lines(guild, session))
+        if narration:
+            description_parts.extend(["", "────────", narration])
         embed = discord.Embed(title=title, description="\n".join(description_parts), color=self._race_color(session, finished=finished))
 
         if not session.get("started"):
             embed.add_field(name="Entrada", value=self._chip_amount(CORRIDA_STAKE), inline=True)
-            embed.add_field(name="Pote atual", value=self._chip_amount(pot_total) + (f" • Bônus: {self._bonus_chip_amount(effective_bonus)}" if effective_bonus > 0 else ""), inline=True)
-            embed.add_field(name="Duração", value=f"**{_CORRIDA_DURATION_SECONDS}s**", inline=True)
-            embed.set_footer(text="Entre no lobby. O criador ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
+            embed.add_field(name="Participantes", value=f"**{len(self._get_race_participants(guild, session))}/{CORRIDA_MAX_PARTICIPANTS}**", inline=True)
+            embed.set_footer(text="Clique em Entrar para escolher seu plano. O criador ou a staff pode iniciar com pelo menos 2 participantes.")
         return embed
 
     async def _close_lobby_message(self, session: dict, guild: discord.Guild, *, title: str, detail: str):
@@ -728,16 +814,48 @@ class GincanaCorridaMixin:
             return
 
         session = self._get_race_session(guild.id)
-        if session is None or session.get("ended") or session.get("started"):
+        if session is None or session.get("ended") or session.get("started") or session.get("starting"):
             await self._send_component_feedback(interaction, "Essa corrida não está mais aceitando entradas.")
             return
 
         locked = session.setdefault("locked_participants", set())
         if user.id in locked:
-            await self._send_component_feedback(interaction, "Você já entrou nessa corrida.")
+            plan_name = self._race_plan_label(session, user.id)
+            await self._send_component_feedback(interaction, f"Você já está participando desta corrida com o plano **{plan_name}**.")
+            return
+        if len(locked) >= CORRIDA_MAX_PARTICIPANTS:
+            await self._send_component_feedback(interaction, "Essa corrida já atingiu o limite de 6 participantes.")
+            return
+        if await self._game_sessions.is_user_busy(user.id, except_session_id=str(session.get("registry_session_id") or "")):
+            await self._send_component_feedback(interaction, "Você já está participando de outro jogo.")
             return
 
+        plan_view = _RacePlanView(
+            self,
+            guild.id,
+            str(session.get("registry_session_id") or ""),
+            user.id,
+        )
+        try:
+            await interaction.response.send_message(view=plan_view, ephemeral=True)
+        except Exception:
+            await self._send_component_feedback(interaction, "Não foi possível abrir a escolha de plano agora.")
+
+    async def _complete_race_join(self, interaction: discord.Interaction, *, guild_id: int, expected_session_id: str, plan_key: str):
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or int(guild.id) != int(guild_id) or not isinstance(user, discord.Member):
+            await self._send_component_feedback(interaction, "Servidor inválido.")
+            return
+        if plan_key not in _RACE_PLANS:
+            await self._send_component_feedback(interaction, "Plano de corrida inválido.")
+            return
         await self._safe_defer_component_interaction(interaction)
+
+        session = self._get_race_session(guild.id)
+        if session is None or str(session.get("registry_session_id") or "") != str(expected_session_id):
+            await self._send_component_feedback(interaction, "Essa corrida não está mais disponível.")
+            return
 
         needs_negative_confirm = self._needs_negative_confirmation(guild.id, user.id, CORRIDA_STAKE)
         if needs_negative_confirm:
@@ -745,22 +863,96 @@ class GincanaCorridaMixin:
             if not confirmed:
                 return
 
-        entry_text = self._entry_consume_text(guild.id, user.id, CORRIDA_STAKE)
-        entry_spend = self._entry_spend_parts(guild.id, user.id, CORRIDA_STAKE)
-        paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE, reason="Entrada na corrida")
-        if needs_negative_confirm:
-            chip_note = None
-        if not paid:
-            await self._send_component_feedback(interaction, chip_note or "Você não tem saldo suficiente para entrar nessa corrida.")
-            return
+        join_lock = session.setdefault("_join_lock", asyncio.Lock())
+        async with join_lock:
+            session = self._get_race_session(guild.id)
+            if session is None or str(session.get("registry_session_id") or "") != str(expected_session_id):
+                await self._send_component_feedback(interaction, "Essa corrida não está mais disponível.")
+                return
+            if session.get("ended") or session.get("started") or session.get("starting"):
+                await self._send_component_feedback(interaction, "Essa corrida não está mais aceitando entradas.")
+                return
 
-        locked.add(user.id)
-        session.setdefault("entry_spend", {})[user.id] = entry_spend
-        session.setdefault("race_interactions", {})[user.id] = interaction
-        session.setdefault("progress", {})[user.id] = 0.0
-        session.setdefault("state_map", {})[user.id] = _HORSE_START
-        view.join_button.label = f"🐎 Entrar ({len(self._get_race_participants(guild, session))})"
-        await self._send_race_lobby_feedback(interaction, guild.id, user.id, chip_note or entry_text)
+            locked = session.setdefault("locked_participants", set())
+            if user.id in locked:
+                await self._send_component_feedback(interaction, "Você já está participando desta corrida.")
+                return
+            if len(locked) >= CORRIDA_MAX_PARTICIPANTS:
+                await self._send_component_feedback(interaction, "Essa corrida já atingiu o limite de 6 participantes.")
+                return
+            registry_session_id = str(session.get("registry_session_id") or "")
+            if await self._game_sessions.is_user_busy(user.id, except_session_id=registry_session_id):
+                await self._send_component_feedback(interaction, "Você já está participando de outro jogo.")
+                return
+
+            entry_text = self._entry_consume_text(guild.id, user.id, CORRIDA_STAKE)
+            entry_spend = self._entry_spend_parts(guild.id, user.id, CORRIDA_STAKE)
+            paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE, reason="Entrada na corrida")
+            if needs_negative_confirm:
+                chip_note = None
+            if not paid:
+                await self._send_component_feedback(interaction, chip_note or "Você não tem saldo suficiente para entrar nessa corrida.")
+                return
+
+            registry_created_here = False
+            reservation_ok = False
+            try:
+                if not session.get("registry_created"):
+                    created = await self._game_sessions.create_pending(
+                        session_id=registry_session_id,
+                        game_type="corrida",
+                        guild_id=guild.id,
+                        owner_id=user.id,
+                        ttl=self._RACE_STALE_LOBBY_SECONDS,
+                    )
+                    if not created.ok:
+                        reservation = created
+                    else:
+                        registry_created_here = True
+                        session["registry_created"] = True
+                        reservation = await self._game_sessions.activate(
+                            session_id=registry_session_id,
+                            user_ids={user.id},
+                            ttl=self._RACE_STALE_LOBBY_SECONDS,
+                        )
+                else:
+                    reservation = await self._game_sessions.activate(
+                        session_id=registry_session_id,
+                        user_ids=set(locked) | {user.id},
+                        ttl=self._RACE_STALE_LOBBY_SECONDS,
+                    )
+                reservation_ok = bool(reservation.ok)
+            except Exception:
+                reservation_ok = False
+                reservation = None
+
+            if not reservation_ok:
+                refund_session = {"entry_spend": {user.id: entry_spend}}
+                await self._refund_race_entry(guild.id, refund_session, user.id, reason="Devolução da corrida (entrada recusada)")
+                if registry_created_here:
+                    await self._release_race_registry(session)
+                code = str(getattr(reservation, "code", "") or "")
+                if code == "guild_full":
+                    feedback = "O servidor já atingiu o limite de 6 jogadores ativos."
+                elif code == "user_busy":
+                    feedback = "Você já está participando de outro jogo."
+                else:
+                    feedback = "Não foi possível reservar sua vaga nesta corrida. A entrada foi devolvida."
+                await self._send_component_feedback(interaction, feedback)
+                return
+
+            locked.add(user.id)
+            session.setdefault("entry_spend", {})[user.id] = entry_spend
+            session.setdefault("race_interactions", {})[user.id] = interaction
+            session.setdefault("progress", {})[user.id] = 0.0
+            session.setdefault("state_map", {})[user.id] = _HORSE_START
+            session.setdefault("plans", {})[user.id] = plan_key
+            self._touch_runtime_state(session, kind="corrida", guild_id=guild.id)
+
+        plan = _RACE_PLANS[plan_key]
+        confirmation = chip_note or entry_text
+        confirmation += f"\n🎯 **Plano:** {plan['emoji']} {plan['name']}"
+        await self._send_race_lobby_feedback(interaction, guild.id, user.id, confirmation)
         await self._refresh_race_message(guild.id)
 
     async def _handle_race_start_button(self, interaction: discord.Interaction, view: _RaceLobbyView):
@@ -783,13 +975,15 @@ class GincanaCorridaMixin:
             return
 
         participants = self._get_race_participants(guild, session)
+        if is_owner and user.id not in set(session.get("locked_participants", set()) or []):
+            await self._send_component_feedback(interaction, "Você precisa entrar na corrida antes de iniciá-la.")
+            return
         if len(participants) < 2:
             await self._send_component_feedback(interaction, "A corrida precisa de pelo menos 2 participantes para começar.")
             return
 
-        session["starting"] = True
         try:
-            started_ok = await self._finish_race_lobby(guild.id, reason="manual_start", source_view=view, allow_when_starting=True)
+            started_ok = await self._finish_race_lobby(guild.id, reason="manual_start", source_view=view)
             if not started_ok:
                 fresh_session = self._race_sessions.get(guild.id)
                 if fresh_session is not None and not fresh_session.get("ended"):
@@ -1098,13 +1292,6 @@ class GincanaCorridaMixin:
             elif not completed_all_steps and event_view.active_index is not None:
                 event_view._close_current_step()
             awards = list(event_view._apply_results() or [])
-            if event_view.last_best_user_id is not None and event_view.last_best_target_bonus > float((session.get("best_impulse") or {}).get("bonus", 0.0) or 0.0):
-                session["best_impulse"] = {
-                    "user_id": int(event_view.last_best_user_id),
-                    "stage": stage_name,
-                    "bonus": float(event_view.last_best_target_bonus),
-                    "tier": str(event_view.last_best_tier or ""),
-                }
             if session.get("active_impulse_message") is event_message:
                 session["impulse_status"] = ""
                 if not awards and not str(session.get("narration") or "").strip():
@@ -1132,16 +1319,23 @@ class GincanaCorridaMixin:
 
     async def _finish_race_lobby(self, guild_id: int, *, reason: str, source_view: discord.ui.LayoutView | None = None, allow_when_starting: bool = False) -> bool:
         session = self._get_race_session(guild_id)
-        if session is not None:
-            self._touch_runtime_state(session, kind='corrida', guild_id=guild_id)
-        if session is None or session.get("ended") or session.get("started"):
+        if session is None:
             return False
-        if session.get("starting") and not allow_when_starting:
-            return False
-        if not self._race_lobby_view_matches(session, source_view):
-            return False
+        join_lock = session.setdefault("_join_lock", asyncio.Lock())
+        async with join_lock:
+            session = self._get_race_session(guild_id)
+            if session is not None:
+                self._touch_runtime_state(session, kind='corrida', guild_id=guild_id)
+            if session is None or session.get("ended") or session.get("started"):
+                return False
+            if session.get("starting") and not allow_when_starting:
+                return False
+            if not self._race_lobby_view_matches(session, source_view):
+                return False
+            session["starting"] = True
         guild = self.bot.get_guild(guild_id)
         if guild is None:
+            await self._release_race_registry(session)
             self._race_sessions.pop(guild_id, None)
             return False
 
@@ -1149,18 +1343,21 @@ class GincanaCorridaMixin:
         locked_ids = set(session.get("locked_participants", set()))
         if len(locked_ids) == 1:
             only_id = next(iter(locked_ids))
-            await self._change_user_chips(guild.id, only_id, CORRIDA_STAKE, reason="Devolução da corrida (1 jogador)")
+            await self._refund_race_entry(guild.id, session, only_id, reason="Devolução da corrida (1 jogador)")
             session["starting"] = False
             session["ended"] = True
+            await self._release_race_registry(session)
             await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="A corrida precisa de pelo menos **2 participantes**. A entrada foi devolvida.")
             self._race_sessions.pop(guild_id, None)
             return True
         if len(participants) < 2:
             for user_id in locked_ids:
-                await self._change_user_chips(guild.id, user_id, CORRIDA_STAKE, reason="Devolução da corrida (cancelada)")
+                await self._refund_race_entry(guild.id, session, user_id, reason="Devolução da corrida (cancelada)")
             session["starting"] = False
             session["ended"] = True
-            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não restaram participantes suficientes. Todas as entradas foram devolvidas.")
+            await self._release_race_registry(session)
+            detail = "O lobby foi encerrado sem participantes." if not locked_ids else "Não restaram participantes suficientes. Todas as entradas foram devolvidas."
+            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail=detail)
             self._race_sessions.pop(guild_id, None)
             return True
 
@@ -1185,8 +1382,6 @@ class GincanaCorridaMixin:
         session["impulse_flash_levels"] = {}
         session["narration_hold_ticks"] = 0
         session["finish_meta"] = {}
-        session["early_rank_snapshot"] = {}
-        session["best_impulse"] = None
         session["stale_ticks"] = 0
         session["impulse_status"] = ""
         session["impulse_tasks"] = []
@@ -1205,12 +1400,12 @@ class GincanaCorridaMixin:
                 pass
         session["view"] = None
 
+        await self._game_sessions.touch(str(session.get("registry_session_id") or ""), ttl=self._RACE_STALE_ACTIVE_SECONDS)
         await self._refresh_race_message(guild.id)
         session["starting"] = False
         await asyncio.sleep(1.0)
 
         condition = session.get("condition") or {}
-        special = session.get("special") or {}
         tick = 0
         track_end = float(_CORRIDA_TRACK_LENGTH - 1)
 
@@ -1261,8 +1456,11 @@ class GincanaCorridaMixin:
                     continue
 
                 cur = float(progress.get(member.id, 0.0))
-                trip_chance = 0.12 + float(condition.get("trip", 0.0)) + float(special.get("trip", 0.0))
-                speed_bonus = float(condition.get("speed", 0.0)) + float(special.get("speed", 0.0))
+                plan = self._race_plan(session, member.id)
+                trip_chance = 0.12 + float(condition.get("trip", 0.0)) + float(plan.get("trip", 0.0))
+                speed_bonus = float(condition.get("speed", 0.0)) + float(plan.get("speed", 0.0))
+                if session.get("final_stretch") and "final_speed" in plan:
+                    speed_bonus = float(condition.get("speed", 0.0)) + float(plan.get("final_speed", 0.0))
 
                 if session.get("final_stretch"):
                     trip_chance = max(0.02, trip_chance - 0.03)
@@ -1278,7 +1476,7 @@ class GincanaCorridaMixin:
                     trip_chance = max(0.01, trip_chance - 0.06)
 
                 if random.random() < trip_chance and cur < track_end - 0.5:
-                    move = max(0.18, impulse_per_tick * 0.8)
+                    move = max(float(plan.get("trip_move", 0.18)), impulse_per_tick * 0.8)
                     state_map[member.id] = _HORSE_TRIP
                     tick_events.append(("trip", member))
                 else:
@@ -1333,25 +1531,23 @@ class GincanaCorridaMixin:
             if finishers_this_tick:
                 finish_meta = session.setdefault("finish_meta", {})
                 already_arrived = {int(user_id) for group in arrival_groups for user_id in group}
-                ordered_finishers = [(user_id, score) for user_id, score in sorted(finishers_this_tick, key=lambda item: (-item[1], item[0])) if int(user_id) not in already_arrived]
-                primary_finisher = ordered_finishers[:1]
-                delayed_finishers = ordered_finishers[1:]
-                for user_id, score in primary_finisher:
-                    arrival_groups.append([int(user_id)])
-                    finish_meta[int(user_id)] = {"tick": tick, "score": float(score)}
-                    progress[int(user_id)] = track_end
-                    state_map[int(user_id)] = _HORSE_FINISH
-                for user_id, _score in delayed_finishers:
-                    fallback_gap = random.uniform(0.35, 1.10)
-                    progress[int(user_id)] = max(track_end - fallback_gap, track_end - 1.20)
-                    impulse_state = dict((session.get("active_impulses") or {}).get(int(user_id)) or {})
-                    delayed_kind = str(impulse_state.get("kind") or "").lower()
-                    if int(impulse_state.get("ticks_left") or 0) > 0:
-                        state_map[int(user_id)] = _HORSE_DASH if delayed_kind == "grande" else _HORSE_BOOST
-                    elif state_map.get(int(user_id)) == _HORSE_TRIP:
-                        pass
+                ordered_finishers = [
+                    (int(user_id), float(score))
+                    for user_id, score in sorted(finishers_this_tick, key=lambda item: (-item[1], item[0]))
+                    if int(user_id) not in already_arrived
+                ]
+                tick_groups: list[list[int]] = []
+                group_scores: list[float] = []
+                for user_id, score in ordered_finishers:
+                    if not tick_groups or abs(group_scores[-1] - score) > 0.18:
+                        tick_groups.append([user_id])
+                        group_scores.append(score)
                     else:
-                        state_map[int(user_id)] = _HORSE_RUN
+                        tick_groups[-1].append(user_id)
+                    finish_meta[user_id] = {"tick": tick, "score": score}
+                    progress[user_id] = track_end
+                    state_map[user_id] = _HORSE_FINISH
+                arrival_groups.extend(tick_groups)
                 arrived_ids = {int(user_id) for group in arrival_groups for user_id in group}
 
             leader_progress = max((float(progress.get(member.id, 0.0)) for member in participants), default=0.0)
@@ -1359,8 +1555,6 @@ class GincanaCorridaMixin:
             ordered_after = self._build_finalized_order(guild, session)
             leader_after = ordered_after[0].id if ordered_after else 0
             session["_visible_before_progress"] = {member.id: float(progress.get(member.id, 0.0)) for member in participants}
-            if tick == 2 and not session.get("early_rank_snapshot"):
-                session["early_rank_snapshot"] = {member.id: rank for rank, member in self._ordered_race_members(guild, session)}
             hold_ticks = int(session.get("narration_hold_ticks", 0) or 0)
             impulse_event_this_tick = self._has_impulse_event(tick_events)
             if len(arrived_ids) >= len(participants):
@@ -1405,23 +1599,29 @@ class GincanaCorridaMixin:
             state_map[member.id] = _HORSE_FINISH
 
         session["ended"] = True
-        total_pot = self._race_pot_total(session)
         bonus_pool = int(session.get("bonus_pool", 0) or 0)
         participant_count = len(set(session.get("locked_participants", set()) or []))
         prize_pot = max(0, participant_count) * CORRIDA_STAKE
-        rewards, placements = self._allocate_race_rewards(final_groups, prize_pot)
+        rewards, _placements = self._allocate_race_rewards(final_groups, prize_pot)
         bonus_rewards, _bonus_placements = self._allocate_race_rewards(final_groups, bonus_pool) if bonus_pool > 0 else ({}, [])
-        result_lines: list[str] = []
-        if final_groups:
-            first_group = final_groups[0]
-            winner = first_group[0]
-            winner_amount = int(rewards.get(winner.id, 0) or 0)
-            winner_net = max(0, winner_amount - CORRIDA_STAKE)
-            winner_bonus = int(bonus_rewards.get(winner.id, 0) or 0)
-            winner_text = self._chip_text(winner_net, kind='gain')
-            if winner_bonus > 0:
-                winner_text += f" + {self._bonus_chip_amount(winner_bonus)}"
-            result_lines.append(f"🏆 **Vencedor:** {winner.mention} — **ganho líquido:** {winner_text}")
+        result_lines: list[str] = ["### Premiação"]
+        rank_map = _shared_rank_map([[member.id for member in group] for group in final_groups])
+        rewarded_any = False
+        for member in final_order:
+            normal_amount = int(rewards.get(member.id, 0) or 0)
+            bonus_amount = int(bonus_rewards.get(member.id, 0) or 0)
+            if normal_amount <= 0 and bonus_amount <= 0:
+                continue
+            rewarded_any = True
+            reward_parts: list[str] = []
+            if normal_amount > 0:
+                reward_parts.append(self._chip_amount(normal_amount))
+            if bonus_amount > 0:
+                reward_parts.append(self._bonus_chip_amount(bonus_amount))
+            result_lines.append(f"{self._race_placement_emoji(rank_map.get(member.id, 9999))} {member.mention} — {' + '.join(reward_parts)}")
+        if not rewarded_any:
+            result_lines.append("Nenhuma premiação foi distribuída.")
+
         finish_meta = session.get("finish_meta") or {}
         if len(final_order) >= 2:
             leader = final_order[0]
@@ -1433,27 +1633,6 @@ class GincanaCorridaMixin:
                 if diff <= 0.18:
                     result_lines.append(f"📸 Chegada apertadíssima entre {leader.mention} e {runner_up.mention}!")
 
-        best_impulse = session.get("best_impulse") or {}
-        best_impulse_user = guild.get_member(int(best_impulse.get("user_id") or 0)) if best_impulse else None
-        if best_impulse_user is not None:
-            stage = str(best_impulse.get("stage") or "impulso").lower()
-            tier = str(best_impulse.get("tier") or "").lower()
-            tier_text = {"pequeno": "impulso pequeno", "medio": "impulso médio", "grande": "impulso grande"}.get(tier, "impulso")
-            result_lines.append(f"⚡ Melhor impulso: {best_impulse_user.mention} ({tier_text}, {stage}).")
-
-        early_rank_snapshot = session.get("early_rank_snapshot") or {}
-        final_rank_map = _shared_rank_map([[member.id for member in group] for group in final_groups])
-        recovery_candidates: list[tuple[int, discord.Member]] = []
-        for member in final_order:
-            start_rank = int(early_rank_snapshot.get(member.id, 999))
-            end_rank = int(final_rank_map.get(member.id, 999))
-            gain = start_rank - end_rank
-            if gain >= 2:
-                recovery_candidates.append((gain, member))
-        if recovery_candidates:
-            recovery_candidates.sort(key=lambda item: (-item[0], item[1].display_name.casefold()))
-            recovery_member = recovery_candidates[0][1]
-            result_lines.append(f"🚀 Recuperação da corrida: {recovery_member.mention}.")
         session["narration"] = "🏁 Todos cruzaram a linha."
         session["impulse_status"] = ""
 
@@ -1476,9 +1655,9 @@ class GincanaCorridaMixin:
             refund = await self._maybe_apply_coringa_lobby_refund(guild.id, int(user_id), CORRIDA_STAKE)
             if refund > 0:
                 coringa_refunds.append((int(user_id), int(refund)))
-        winner_ids = {member.id for member in (final_groups[0] if final_groups else [])}
-        runner_up_ids = {member.id for member in (final_groups[1] if len(final_groups) > 1 else [])}
-        third_ids = {member.id for member in (final_groups[2] if len(final_groups) > 2 else [])}
+        winner_ids = {member.id for member in final_order if rank_map.get(member.id) == 1}
+        runner_up_ids = {member.id for member in final_order if rank_map.get(member.id) == 2}
+        third_ids = {member.id for member in final_order if rank_map.get(member.id) == 3}
 
         def _race_reward_reason(uid: int) -> str:
             if uid in winner_ids:
@@ -1563,6 +1742,7 @@ class GincanaCorridaMixin:
         )
         await self._send_first_game_notices(achievement_channel, guild.id, first_game_user_ids)
 
+        await self._release_race_registry(session)
         self._race_sessions.pop(guild_id, None)
         return True
 
@@ -1580,62 +1760,44 @@ class GincanaCorridaMixin:
             return True
 
         voice_channel = getattr(getattr(message.author, "voice", None), "channel", None)
-
-        needs_negative_confirm = self._needs_negative_confirmation(guild.id, message.author.id, CORRIDA_STAKE)
-        if needs_negative_confirm:
-            confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, CORRIDA_STAKE, title="🐎 Confirmar entrada")
-            if not confirmed:
-                return True
-
-        entry_spend = self._entry_spend_parts(guild.id, message.author.id, CORRIDA_STAKE)
-        paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, CORRIDA_STAKE, reason="Entrada na corrida")
-        if needs_negative_confirm:
-            chip_note = None
-        if not paid:
-            try:
-                await message.channel.send(embed=self._make_embed("🐎 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False))
-            except Exception:
-                pass
-            return True
-
-        condition = random.choices(_RACE_CONDITIONS, weights=_RACE_CONDITION_WEIGHTS, k=1)[0]
-        special = random.choice(_RACE_SPECIALS) if random.random() < 0.18 else None
-        bonus_pool = int((special or {}).get("bonus_pool", 0) or 0)
+        condition = dict(_RACE_WET_CONDITION if random.random() < _RACE_WET_CHANCE else _RACE_NORMAL_CONDITION)
+        registry_session_id = f"corrida:{guild.id}:{message.id}:{random.getrandbits(24):06x}"
 
         session = {
             "voice_channel_id": getattr(voice_channel, "id", 0),
             "text_channel_id": message.channel.id,
             "owner_id": message.author.id,
-            "locked_participants": {message.author.id},
-            "entry_spend": {message.author.id: entry_spend},
-            "progress": {message.author.id: 0.0},
-            "state_map": {message.author.id: _HORSE_START},
+            "registry_session_id": registry_session_id,
+            "registry_created": False,
+            "locked_participants": set(),
+            "entry_spend": {},
+            "plans": {},
+            "progress": {},
+            "state_map": {},
             "arrival_groups": [],
             "active_impulses": {},
             "impulse_flash_users": set(),
             "impulse_flash_levels": {},
             "narration_hold_ticks": 0,
             "finish_meta": {},
-            "early_rank_snapshot": {},
-            "best_impulse": None,
             "stale_ticks": 0,
             "message": None,
             "view": None,
             "ended": False,
             "started": False,
             "final_stretch": False,
-            "narration": "📣 A corrida vai começar.",
-            "condition": dict(condition),
-            "special": dict(special) if special else None,
-            "bonus_pool": bonus_pool,
+            "narration": "",
+            "condition": condition,
+            "bonus_pool": 0,
             "starting": False,
             "impulse_status": "",
             "impulse_tasks": [],
             "impulse_ticks_fired": set(),
             "active_impulse_message": None,
             "active_impulse_task": None,
-            "_visible_before_progress": {message.author.id: 0.0},
+            "_visible_before_progress": {},
             "_edit_lock": asyncio.Lock(),
+            "_join_lock": asyncio.Lock(),
             "_last_render_key": None,
             "_pending_render_key": None,
             "_aux_tasks": set(),
@@ -1648,7 +1810,6 @@ class GincanaCorridaMixin:
             panel_message = await message.channel.send(view=view)
         except Exception:
             self._race_sessions.pop(guild.id, None)
-            await self._change_user_chips(guild.id, message.author.id, CORRIDA_STAKE, reason="Devolução da corrida (erro)")
             return True
 
         session["message"] = panel_message

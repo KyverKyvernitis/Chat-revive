@@ -3,7 +3,6 @@ import base64
 import random
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import discord
@@ -106,12 +105,6 @@ class GincanaBase:
     _CHIP_BONUS_EMOJI = "<:laranja:1487076933819830443>"
     _EFFECT_EMOJI = "<:star:1487936913431072780>"
     _MAX_CHIP_DEBT = 100
-    _ACHIEVEMENT_THUMBNAIL_FILENAME = "achievement-unlocked.gif"
-    _ACHIEVEMENT_THUMBNAIL_PATH = (
-        Path(__file__).resolve().parents[1]
-        / "assets"
-        / _ACHIEVEMENT_THUMBNAIL_FILENAME
-    )
 
     def __init__(self, bot: commands.Bot, db: SettingsDB):
         self.bot = bot
@@ -776,22 +769,22 @@ class GincanaBase:
             "first_game": {
                 "name": "O começo",
                 "emoji": "🏆",
-                "description": "{mention} jogou pela primeira vez.",
+                "description": "{mention} concluiu uma partida pela primeira vez.",
             },
             "lets_go_gambling": {
                 "name": "Let's go gambling!",
                 "emoji": "🎰",
-                "description": "{mention} girou pela primeira vez.",
+                "description": "{mention} girou uma roleta pela primeira vez.",
             },
             "roulette_first_loss": {
                 "name": "aw dang it...",
                 "emoji": "💥",
-                "description": "{mention} perdeu pela primeira vez.",
+                "description": "{mention} perdeu em uma roleta pela primeira vez.",
             },
             "roulette_first_jackpot": {
                 "name": "I won... I actually won!",
                 "emoji": "🍀",
-                "description": "{mention} jackpot!!",
+                "description": "{mention} conseguiu seu primeiro jackpot.",
             },
             "roulette_double_jackpot": {
                 "name": "I CAN'T STOP WINNING",
@@ -816,45 +809,24 @@ class GincanaBase:
     def _normalize_game_achievements(self, raw: object) -> dict:
         source = raw if isinstance(raw, dict) else {}
         unlocked_source = source.get("unlocked") if isinstance(source.get("unlocked"), dict) else {}
+        unlocked: dict[str, dict[str, float]] = {}
         catalog = self._achievement_catalog()
-        catalog_order = {key: index for index, key in enumerate(catalog)}
-        parsed: list[tuple[str, float, int]] = []
-
         for key, value in unlocked_source.items():
             key_text = str(key or "")
             if key_text not in catalog:
                 continue
             value_map = value if isinstance(value, dict) else {}
             try:
-                unlocked_at = max(0.0, float(value_map.get("unlocked_at", 0.0) or 0.0))
+                unlocked_at = float(value_map.get("unlocked_at", 0.0) or 0.0)
             except Exception:
                 unlocked_at = 0.0
-            try:
-                ordinal = max(0, int(value_map.get("ordinal", 0) or 0))
-            except Exception:
-                ordinal = 0
-            parsed.append((key_text, unlocked_at, ordinal))
-
-        ordinals = [ordinal for _key, _unlocked_at, ordinal in parsed]
-        has_valid_ordinals = bool(parsed) and all(ordinal > 0 for ordinal in ordinals) and len(set(ordinals)) == len(ordinals)
-        if has_valid_ordinals:
-            parsed.sort(key=lambda item: (item[2], item[1], catalog_order[item[0]]))
-        else:
-            parsed.sort(key=lambda item: (item[1], catalog_order[item[0]]))
-
-        unlocked: dict[str, dict[str, float | int]] = {}
-        for ordinal, (key, unlocked_at, _stored_ordinal) in enumerate(parsed, start=1):
-            unlocked[key] = {
-                "unlocked_at": unlocked_at,
-                "ordinal": ordinal,
-            }
-
+            unlocked[key_text] = {"unlocked_at": max(0.0, unlocked_at)}
         try:
             jackpot_streak = max(0, int(source.get("roulette_jackpot_streak", 0) or 0))
         except Exception:
             jackpot_streak = 0
         return {
-            "schema_version": 2,
+            "schema_version": 1,
             "unlocked": unlocked,
             "roulette_jackpot_streak": min(2, jackpot_streak),
         }
@@ -865,11 +837,7 @@ class GincanaBase:
         unlocked = state["unlocked"]
         return sorted(
             unlocked,
-            key=lambda key: (
-                int(unlocked[key].get("ordinal", 0) or 0),
-                float(unlocked[key].get("unlocked_at", 0.0) or 0.0),
-                key,
-            ),
+            key=lambda key: (float(unlocked[key].get("unlocked_at", 0.0) or 0.0), key),
         )
 
     def _get_unlocked_achievements(self, guild_id: int, user_id: int) -> list[str]:
@@ -880,34 +848,6 @@ class GincanaBase:
             if key in catalog
         ]
 
-    def _achievement_progress_for_key(self, guild_id: int, user_id: int, achievement_key: str) -> tuple[int, int]:
-        catalog = self._achievement_catalog()
-        total = len(catalog)
-        key = str(achievement_key or "").strip()
-        if key not in catalog:
-            return 0, total
-        doc = self.db.user_cache.get((int(guild_id), int(user_id)), {})
-        state = self._normalize_game_achievements(doc.get("game_achievements"))
-        entry = state["unlocked"].get(key)
-        if not isinstance(entry, dict):
-            return 0, total
-        try:
-            count = int(entry.get("ordinal", 0) or 0)
-        except Exception:
-            count = 0
-        return max(0, min(total, count)), total
-
-    def _next_achievement_ordinal(self, unlocked: dict) -> int:
-        current = 0
-        for value in unlocked.values():
-            if not isinstance(value, dict):
-                continue
-            try:
-                current = max(current, int(value.get("ordinal", 0) or 0))
-            except Exception:
-                continue
-        return current + 1
-
     async def _unlock_achievement(self, guild_id: int, user_id: int, achievement_key: str) -> bool:
         key = str(achievement_key or "").strip()
         if key not in self._achievement_catalog():
@@ -917,10 +857,7 @@ class GincanaBase:
             state = self._normalize_game_achievements(doc.get("game_achievements"))
             if key in state["unlocked"]:
                 return False
-            state["unlocked"][key] = {
-                "unlocked_at": float(time.time()),
-                "ordinal": self._next_achievement_ordinal(state["unlocked"]),
-            }
+            state["unlocked"][key] = {"unlocked_at": float(time.time())}
             doc["game_achievements"] = state
             await self.db._save_user_doc(guild_id, user_id, doc)
             return True
@@ -940,61 +877,32 @@ class GincanaBase:
             unlocked = state["unlocked"]
             now = float(time.time())
 
-            def unlock(key: str) -> None:
-                if key in unlocked:
-                    return
-                unlocked[key] = {
-                    "unlocked_at": now,
-                    "ordinal": self._next_achievement_ordinal(unlocked),
-                }
-                unlocked_now.append(key)
-
             if jackpot:
                 state["roulette_jackpot_streak"] = min(2, int(state["roulette_jackpot_streak"]) + 1)
-                unlock("roulette_first_jackpot")
-                if state["roulette_jackpot_streak"] >= 2:
-                    unlock("roulette_double_jackpot")
+                if "roulette_first_jackpot" not in unlocked:
+                    unlocked["roulette_first_jackpot"] = {"unlocked_at": now}
+                    unlocked_now.append("roulette_first_jackpot")
+                if state["roulette_jackpot_streak"] >= 2 and "roulette_double_jackpot" not in unlocked:
+                    unlocked["roulette_double_jackpot"] = {"unlocked_at": now}
+                    unlocked_now.append("roulette_double_jackpot")
             else:
                 state["roulette_jackpot_streak"] = 0
-                if lost:
-                    unlock("roulette_first_loss")
+                if lost and "roulette_first_loss" not in unlocked:
+                    unlocked["roulette_first_loss"] = {"unlocked_at": now}
+                    unlocked_now.append("roulette_first_loss")
 
             doc["game_achievements"] = state
             await self.db._save_user_doc(guild_id, user_id, doc)
         return unlocked_now
 
-    def _make_achievement_view(
-        self,
-        achievement_key: str,
-        mention: str,
-        *,
-        unlocked_count: int,
-        total_count: int,
-        thumbnail_url: str | None = None,
-    ) -> discord.ui.LayoutView | None:
+    def _make_achievement_view(self, achievement_key: str, mention: str) -> discord.ui.LayoutView | None:
         item = self._achievement_catalog().get(str(achievement_key or ""))
         if item is None:
             return None
-        total = max(1, int(total_count or 0))
-        count = max(1, min(total, int(unlocked_count or 0)))
         description = str(item["description"]).format(mention=str(mention or "Alguém"))
-        content = (
-            f"### 🏆 Conquista desbloqueada ({count}/{total})\n\n"
-            f"{item['emoji']} **{item['name']}**\n"
-            f"-# {description}"
-        )
-        body = discord.ui.TextDisplay(content)
-        if thumbnail_url:
-            body = discord.ui.Section(
-                body,
-                accessory=discord.ui.Thumbnail(
-                    str(thumbnail_url),
-                    description="Conquista desbloqueada",
-                ),
-            )
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(
-            body,
+            discord.ui.TextDisplay(f"# {item['emoji']} {item['name']}\n-# {description}"),
             accent_color=discord.Color.gold(),
         ))
         return view
@@ -1011,62 +919,12 @@ class GincanaBase:
             channel = self._get_gincana_channel(guild) if guild is not None else None
         if channel is None or not hasattr(channel, "send"):
             return False
-        unlocked_count, total_count = self._achievement_progress_for_key(guild_id, user_id, achievement_key)
-        if unlocked_count <= 0:
-            return False
         mention = f"<@{int(user_id)}>"
-        thumbnail_path = self._ACHIEVEMENT_THUMBNAIL_PATH
-        use_thumbnail = thumbnail_path.is_file()
-        attachment_url = (
-            f"attachment://{self._ACHIEVEMENT_THUMBNAIL_FILENAME}"
-            if use_thumbnail
-            else None
-        )
-        view = self._make_achievement_view(
-            achievement_key,
-            mention,
-            unlocked_count=unlocked_count,
-            total_count=total_count,
-            thumbnail_url=attachment_url,
-        )
+        view = self._make_achievement_view(achievement_key, mention)
         if view is None:
             return False
-
-        if use_thumbnail:
-            image_file = None
-            try:
-                image_file = discord.File(
-                    str(thumbnail_path),
-                    filename=self._ACHIEVEMENT_THUMBNAIL_FILENAME,
-                )
-                await channel.send(
-                    view=view,
-                    file=image_file,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                return True
-            except Exception:
-                pass
-            finally:
-                if image_file is not None:
-                    try:
-                        image_file.close()
-                    except Exception:
-                        pass
-
-        fallback_view = self._make_achievement_view(
-            achievement_key,
-            mention,
-            unlocked_count=unlocked_count,
-            total_count=total_count,
-        )
-        if fallback_view is None:
-            return False
         try:
-            await channel.send(
-                view=fallback_view,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
             return True
         except Exception:
             return False
@@ -1537,7 +1395,7 @@ class GincanaBase:
                     {"key": "midas", "emoji": "✨", "title": "Midas", "desc": f"Ao abrir um Buckshot ou Truco, a partida tem **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} de chance** de começar dourada."},
                     {"key": "premio_extra", "emoji": "🎁", "title": "Prêmio Extra", "desc": f"Seu Daily rende **+5** {self._CHIP_BONUS_EMOJI}. Quando a ofensiva aumenta o prêmio, você recebe **mais 5** {self._CHIP_BONUS_EMOJI}."},
                     {"key": "bencao", "emoji": "🙏", "title": "Bênção", "desc": "A cada **7h**, você recebe uma jogada grátis. Pode guardar até **2** e usar na Roleta ou em Cartas."},
-                    {"key": "wind_boost", "emoji": "🍃", "title": "Wind Boost", "desc": "Na Corrida, boas sequências têm **20% a mais de chance** de gerar um impulso."},
+                    {"key": "wind_boost", "emoji": "🍃", "title": "Wind Boost", "desc": "Na Corrida, cada botão acertado tem **14% de chance** de gerar um impulso, em vez de **9%**."},
                 ],
             },
             "coringa": {

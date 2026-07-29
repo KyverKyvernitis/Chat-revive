@@ -377,6 +377,8 @@ function defaultGuildDoc(guildId: string): Record<string, unknown> {
     guild_id: snowflakeToLong(guildId),
     bot_prefix: "_",
     tts_prefix: ".",
+    atts_prefix: "%",
+    teto_prefix: "'",
     gtts_prefix: ".",
     edge_prefix: ",",
     speech_limit_seconds: 30,
@@ -841,6 +843,8 @@ const sections: DashboardSectionDefinition[] = [
       { id: "tts.rate", label: "Velocidade", description: "Ajuste de -100% a +100%.", type: "text", scope: "guild", path: "tts_defaults.rate", maxLength: 16, placeholder: "+0%", group: "Voz" },
       { id: "tts.pitch", label: "Tom", description: "Ajuste de -100Hz a +100Hz.", type: "text", scope: "guild", path: "tts_defaults.pitch", maxLength: 16, placeholder: "+0Hz", group: "Voz" },
       { id: "tts.voice_channel_id", label: "Canal de voz preferido", description: "Canal usado como referência quando configurado.", type: "channel", scope: "guild", path: "tts_voice_channel_id", group: "Voz" },
+      { id: "tts.atts_prefix", label: "Prefixo ATTS", type: "text", scope: "guild", path: "atts_prefix", maxLength: 8, placeholder: "%", group: "Prefixos" },
+      { id: "tts.teto_prefix", label: "Prefixo Kasane Teto", description: "Aciona a engine experimental no phone worker.", type: "text", scope: "guild", path: "teto_prefix", maxLength: 8, placeholder: "'", group: "Prefixos" },
       { id: "tts.gtts_prefix", label: "Prefixo gTTS", type: "text", scope: "guild", path: "gtts_prefix", maxLength: 8, placeholder: ".", group: "Prefixos" },
       { id: "tts.edge_prefix", label: "Prefixo Edge", type: "text", scope: "guild", path: "edge_prefix", maxLength: 8, placeholder: ",", group: "Prefixos" },
       { id: "tts.speech_limit_seconds", label: "Limite por leitura", description: "Tempo máximo reproduzido em cada mensagem.", type: "number", scope: "guild", path: "speech_limit_seconds", min: 1, max: 600, group: "Comportamento" },
@@ -1008,6 +1012,38 @@ function serializeFieldValue(field: DashboardFieldDefinition, value: unknown): u
   if (field.type === "color_panel_layout") return normalizeColorPanelLayout(value);
   return value;
 }
+const DASHBOARD_PREFIX_FIELD_IDS = new Set([
+  "general.bot_prefix",
+  "tts.atts_prefix",
+  "tts.teto_prefix",
+  "tts.gtts_prefix",
+  "tts.edge_prefix",
+]);
+
+function normalizeDashboardPrefix(raw: unknown, maxLength = 8): string {
+  return String(raw ?? "").trim().slice(0, maxLength);
+}
+
+function validateDashboardPrefixes(guild: Record<string, unknown>): void {
+  const entries: Array<[string, string]> = [
+    ["bot", normalizeDashboardPrefix(getPath(guild, "bot_prefix"))],
+    ["ATTS", normalizeDashboardPrefix(getPath(guild, "atts_prefix"))],
+    ["Kasane Teto", normalizeDashboardPrefix(getPath(guild, "teto_prefix"))],
+    ["gTTS", normalizeDashboardPrefix(getPath(guild, "gtts_prefix"))],
+    ["Edge", normalizeDashboardPrefix(getPath(guild, "edge_prefix"))],
+  ];
+  const seen = new Map<string, string>();
+  for (const [label, value] of entries) {
+    if (!value) throw new Error(`O prefixo de ${label} não pode ficar vazio.`);
+    if (/\s/u.test(value) || Array.from(value).some((character) => character.codePointAt(0)! < 33)) {
+      throw new Error(`O prefixo de ${label} não pode conter espaços ou caracteres invisíveis.`);
+    }
+    const other = seen.get(value);
+    if (other) throw new Error(`Os prefixos de ${other} e ${label} não podem ser iguais (${value}).`);
+    seen.set(value, label);
+  }
+}
+
 function normalizeFieldValue(field: DashboardFieldDefinition, raw: unknown): unknown {
   if (field.type === "boolean") return raw === true || raw === "true" || raw === "1" || raw === 1;
   if (field.type === "number") {
@@ -1049,6 +1085,7 @@ function normalizeFieldValue(field: DashboardFieldDefinition, raw: unknown): unk
   if (field.type === "form_fields") return normalizeFormFields(raw);
   if (field.type === "color_slots") return normalizeColorSlots(raw);
   if (field.type === "color_panel_layout") return normalizeColorPanelLayout(raw);
+  if (DASHBOARD_PREFIX_FIELD_IDS.has(field.id)) return normalizeDashboardPrefix(raw, field.maxLength ?? 8);
   return String(raw ?? "").slice(0, field.maxLength ?? (field.type === "textarea" ? 1800 : 300));
 }
 function allFields() { return sections.flatMap((section) => section.fields); }
@@ -1214,6 +1251,9 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
         patches.set(field.scope, scopePatch);
         saved.push(field.id);
         changedSections.add(field.id.split(".")[0] || field.scope);
+      }
+      if (saved.some((fieldId) => DASHBOARD_PREFIX_FIELD_IDS.has(fieldId))) {
+        validateDashboardPrefixes(docs.guild);
       }
       if (saved.includes("color_roles.panel_layout")) {
         const layout = normalizeColorPanelLayout(getPath(docs.guild, "color_roles.panel_layout"));

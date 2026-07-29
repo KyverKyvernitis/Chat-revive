@@ -63,6 +63,7 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
         guild_defaults,
         bot_prefix_default=str(getattr(config, "BOT_PREFIX", "_") or "_"),
         atts_prefix_default=str(getattr(config, "TTS_ATTS_PREFIX", "%") or "%"),
+        teto_prefix_default=str(getattr(config, "TTS_TETO_PREFIX", "'") or "'"),
     )
 
     # Comandos `_join`, `_leave`, `_clear`, etc passam por aqui antes de qualquer
@@ -91,8 +92,8 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             legacy_prefix
             and legacy_prefix != routing.bot_prefix
             and message.content.startswith(legacy_prefix)
-            and legacy_prefix in {routing.atts_prefix, routing.gtts_prefix, routing.edge_prefix}
-            and len({routing.atts_prefix, routing.gtts_prefix, routing.edge_prefix}) < 3
+            and legacy_prefix in set(routing.speech_prefixes())
+            and len(set(routing.speech_prefixes())) < len(routing.speech_prefixes())
         ):
             return MessageGateDecision(
                 should_process_tts=True,
@@ -103,14 +104,17 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
                 reason="legacy_tts_prefix_matched",
             )
 
-    # Casa um dos prefixos de fala (ATTS / gTTS / Edge). Se nenhum casar,
+    # Casa um dos prefixos de fala (ATTS / Teto / gTTS / Edge). Se nenhum casar,
     # a mensagem é texto comum e o gate ignora.
     forced_engine, active_prefix = match_engine_prefix(
         message.content,
         atts_prefix=routing.atts_prefix,
+        teto_prefix=routing.teto_prefix,
         edge_prefix=routing.edge_prefix,
         gtts_prefix=routing.gtts_prefix,
     )
+    if forced_engine == "teto" and not getattr(config, "TTS_TETO_ENABLED", True):
+        return MessageGateDecision(False, False, guild_defaults, reason="teto_disabled")
     if not forced_engine or not active_prefix:
         for legacy_prefix in legacy_prefixes:
             if legacy_prefix and legacy_prefix != routing.bot_prefix and message.content.startswith(legacy_prefix):

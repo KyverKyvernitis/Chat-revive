@@ -484,6 +484,16 @@ TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TURBO_BENCHM
 # Mantemos os nomes antigos TTS_PIPER_EXPERIMENT_* apenas como alias de migração.
 TTS_ATTS_PREFIX = (os.getenv("TTS_ATTS_PREFIX") or os.getenv("TTS_PIPER_EXPERIMENT_PREFIX") or "%").strip() or "%"
 TTS_ATTS_ENABLED = _parse_bool(os.getenv("TTS_ATTS_ENABLED", os.getenv("TTS_PIPER_EXPERIMENT_ENABLED", "true")), True)
+
+# Kasane Teto: engine UTAU exclusiva do phone worker. O bot nunca tenta
+# carregar voicebank/resampler na VPS; quando o worker não estiver pronto, usa
+# a configuração normal do usuário como fallback.
+TTS_TETO_ENABLED = _parse_bool(os.getenv("TTS_TETO_ENABLED", "true"), True)
+TTS_TETO_PREFIX = (os.getenv("TTS_TETO_PREFIX", "'") or "'").strip() or "'"
+TTS_TETO_ENGINE = "teto"
+TTS_TETO_MAX_TEXT_LENGTH = max(16, _parse_int(os.getenv("TTS_TETO_MAX_TEXT_LENGTH", "180"), 180))
+TTS_TETO_WORKER_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("TTS_TETO_WORKER_TIMEOUT_SECONDS", "25"), 25.0))
+TTS_TETO_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TETO_MAX_AUDIO_MB", "8"), 8))
 TTS_PIPER_EXPERIMENT_ENABLED = TTS_ATTS_ENABLED
 TTS_PIPER_EXPERIMENT_GUILD_ID = _parse_int(os.getenv("TTS_PIPER_EXPERIMENT_GUILD_ID", "0"), 0)
 TTS_PIPER_EXPERIMENT_PREFIX = TTS_ATTS_PREFIX
@@ -528,7 +538,7 @@ TTS_WORKER_AGENT_PREFERRED_ENGINE = (os.getenv("TTS_WORKER_AGENT_PREFERRED_ENGIN
 TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD = max(1, _parse_int(os.getenv("TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD", "3"), 3))
 TTS_WORKER_AGENT_RAW_AUDIO_ENABLED = _parse_bool(os.getenv("TTS_WORKER_AGENT_RAW_AUDIO_ENABLED", "true"), True)
 TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED = _parse_bool(os.getenv("TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED", "true"), True)
-TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES = (os.getenv("TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native") or "android_native").strip().lower().replace("-", "_")
+TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES = (os.getenv("TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native,teto") or "android_native,teto").strip().lower().replace("-", "_")
 TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS = max(0, _parse_int(os.getenv("TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS", "120"), 120))
 TTS_WORKER_AGENT_WORKER_SLOW_MARGIN = max(1.0, _parse_float(os.getenv("TTS_WORKER_AGENT_WORKER_SLOW_MARGIN", "1.15"), 1.15))
 TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS = max(0.0, _parse_float(os.getenv("TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS", "120"), 120.0))

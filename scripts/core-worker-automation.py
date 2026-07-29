@@ -37,6 +37,14 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("install.sh", 0o755),
     ("README.md", 0o644),
     ("phone-worker.env.example", 0o600),
+    ("teto_renderer/__init__.py", 0o644),
+    ("teto_renderer/errors.py", 0o644),
+    ("teto_renderer/cache.py", 0o644),
+    ("teto_renderer/voicebank.py", 0o644),
+    ("teto_renderer/phonemizer.py", 0o644),
+    ("teto_renderer/prosody.py", 0o644),
+    ("teto_renderer/renderer.py", 0o644),
+    ("scripts/validate-teto-assets.py", 0o755),
 )
 
 PENDING_PATH = ROOT / "data" / "core_worker_automation_pending.json"

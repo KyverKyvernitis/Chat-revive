@@ -1,3 +1,29 @@
+# Phone Worker Termux
+
+## Patch 86.1: Kasane Teto leve no TTS Agent
+
+A versão `1.10.38` adiciona a engine experimental `teto` ao phone worker. Ela é acionada pelo prefixo ASCII `'` no bot, mas só é anunciada em `available_engines` quando `PHONE_WORKER_TETO_ENABLED=true`, a voicebank UTAU, o resampler e o FFmpeg passam pela validação. Nenhuma voicebank ou binário de terceiros é incluído no repositório ou nos ZIPs de update.
+
+O renderer é headless e reduzido: lê `oto.ini`, converte texto em aliases compatíveis, renderiza uma frase por vez, reutiliza fragmentos em cache e devolve WAV ao TTS Agent. Antes de sintetizar, bloqueia execução durante build/update pesado e verifica memória disponível, bateria e temperatura. Em qualquer indisponibilidade, o TTS Agent usa a engine normal do usuário como fallback, sem travar a fila do bot.
+
+Configuração mínima no `~/.phone-worker.env`:
+
+```env
+CORE_WORKER_PROFILE=turbo
+PHONE_WORKER_TETO_ENABLED=true
+PHONE_WORKER_TETO_VOICEBANK_DIR=$HOME/voicebanks/kasane-teto
+PHONE_WORKER_TETO_RESAMPLER_COMMAND=$HOME/bin/straycat
+```
+
+Valide antes de habilitar:
+
+```bash
+python ~/phone-worker/scripts/validate-teto-assets.py \
+  --voicebank "$HOME/voicebanks/kasane-teto" \
+  --resampler "$HOME/bin/straycat" \
+  --render-test
+```
+
 ## Patch 86.0: self-builder e publicação de APK validados
 
 A versão `1.10.37` mantém o Termux como builder bootstrap e não move o Gradle para a VPS. Além da restauração de todos os executáveis do bundle, o pipeline agora aguarda a atualização do runtime antes de tentar o APK, trata ausência temporária de builder como pendência e recompõe as capacidades mínimas do perfil Turbo/Builder mesmo quando existe um snapshot antigo no arquivo de ambiente.

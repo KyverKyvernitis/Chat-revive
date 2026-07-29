@@ -17,6 +17,7 @@ from discord.ext import commands
 
 import config
 from .common import _shorten, validate_mode
+from .prefix import validate_prefix_values
 from .utils.embed import build_settings_panel_text_from_embed, human_voice_name, human_language_name, human_rate, human_pitch
 
 TTS_PANEL_EXPIRE_AFTER_SECONDS = 180.0
@@ -482,6 +483,31 @@ class ATTSPrefixModal(discord.ui.Modal, title="Alterar prefixo do ATTS"):
         await self.cog._apply_server_prefix_from_modal(
             interaction,
             prefix_kind="atts",
+            prefix=str(self.new_prefix),
+            panel_message=self.panel_message,
+        )
+
+
+class TetoPrefixModal(discord.ui.Modal, title="Alterar prefixo da Kasane Teto"):
+    new_prefix = discord.ui.TextInput(
+        label="Novo prefixo da Kasane Teto",
+        placeholder="Ex.: '",
+        required=True,
+        min_length=1,
+        max_length=8,
+    )
+
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message, owner_id: int, guild_id: int):
+        super().__init__()
+        self.cog = cog
+        self.panel_message = panel_message
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._apply_server_prefix_from_modal(
+            interaction,
+            prefix_kind="teto",
             prefix=str(self.new_prefix),
             panel_message=self.panel_message,
         )
@@ -2099,9 +2125,11 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
 
 
 class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
-    bot_prefix = discord.ui.TextInput(label="Prefixo do bot", placeholder="Ex.: _", required=False, max_length=8)
-    gtts_prefix = discord.ui.TextInput(label="Prefixo do gTTS", placeholder="Ex.: .", required=False, max_length=8)
-    edge_prefix = discord.ui.TextInput(label="Prefixo do Edge", placeholder="Ex.: ,", required=False, max_length=8)
+    bot_prefix = discord.ui.TextInput(label="Prefixo do bot", placeholder="Ex.: _", required=True, max_length=8)
+    atts_prefix = discord.ui.TextInput(label="Prefixo do ATTS", placeholder="Ex.: %", required=True, max_length=8)
+    teto_prefix = discord.ui.TextInput(label="Prefixo da Kasane Teto", placeholder="Ex.: '", required=True, max_length=8)
+    gtts_prefix = discord.ui.TextInput(label="Prefixo do gTTS", placeholder="Ex.: .", required=True, max_length=8)
+    edge_prefix = discord.ui.TextInput(label="Prefixo do Edge", placeholder="Ex.: ,", required=True, max_length=8)
 
     def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None):
         super().__init__()
@@ -2113,23 +2141,47 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
             defaults = db.get_guild_tts_defaults(guild_id) if db is not None and guild_id else {}
         except Exception:
             defaults = {}
-        self.bot_prefix.default = str((defaults or {}).get("bot_prefix") or getattr(config, "PREFIX", "_") or "_")[:8]
-        self.gtts_prefix.default = str((defaults or {}).get("tts_prefix") or (defaults or {}).get("gtts_prefix") or getattr(config, "TTS_PREFIX", ".") or ".")[:8]
-        self.edge_prefix.default = str((defaults or {}).get("edge_prefix") or getattr(config, "EDGE_TTS_PREFIX", ",") or ",")[:8]
+        bot_prefix = str((defaults or {}).get("bot_prefix") or getattr(config, "PREFIX", "_") or "_")[:8]
+        atts_prefix = str((defaults or {}).get("atts_prefix") or getattr(config, "TTS_ATTS_PREFIX", "%") or "%")[:8]
+        teto_prefix = str((defaults or {}).get("teto_prefix") or getattr(config, "TTS_TETO_PREFIX", "'") or "'")[:8]
+        edge_prefix = str((defaults or {}).get("edge_prefix") or getattr(config, "EDGE_TTS_PREFIX", ",") or ",")[:8]
+        gtts_prefix = str((defaults or {}).get("gtts_prefix") or (defaults or {}).get("tts_prefix") or getattr(config, "TTS_PREFIX", ".") or ".")[:8]
+        # Guilds antigas podiam herdar o mesmo `tts_prefix` para gTTS e Edge.
+        # O modal já abre com um valor migrável, sem exigir que a staff descubra
+        # manualmente por que uma configuração histórica ficou inválida.
+        occupied = {bot_prefix, atts_prefix, teto_prefix, edge_prefix}
+        if not gtts_prefix or gtts_prefix in occupied:
+            gtts_prefix = next((candidate for candidate in (".", "!", ";", "~", "?") if candidate not in occupied), ".")
+        self.bot_prefix.default = bot_prefix
+        self.atts_prefix.default = atts_prefix
+        self.teto_prefix.default = teto_prefix
+        self.gtts_prefix.default = gtts_prefix
+        self.edge_prefix.default = edge_prefix
 
     async def on_submit(self, interaction: discord.Interaction):
-        updates = {}
-        parts = []
-        for field_name, label, keys in [
-            ("bot_prefix", "bot", ("bot_prefix",)),
-            ("gtts_prefix", "gTTS", ("gtts_prefix", "tts_prefix")),
-            ("edge_prefix", "Edge", ("edge_prefix",)),
-        ]:
-            value = _item_value(getattr(self, field_name, None))
-            if value:
-                for key in keys:
-                    updates[key] = value[:8]
-                parts.append(f"{label}: {value[:8]}")
+        values = {
+            "bot_prefix": _item_value(self.bot_prefix)[:8],
+            "atts_prefix": _item_value(self.atts_prefix)[:8],
+            "teto_prefix": _item_value(self.teto_prefix)[:8],
+            "gtts_prefix": _item_value(self.gtts_prefix)[:8],
+            "edge_prefix": _item_value(self.edge_prefix)[:8],
+        }
+        valid, validation_error = validate_prefix_values(**values)
+        if not valid:
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Prefixo inválido", validation_error, ok=False),
+                ephemeral=True,
+            )
+            return
+        updates = dict(values)
+        updates["tts_prefix"] = values["gtts_prefix"]
+        parts = [
+            f"bot: {values['bot_prefix']}",
+            f"ATTS: {values['atts_prefix']}",
+            f"Teto: {values['teto_prefix']}",
+            f"gTTS: {values['gtts_prefix']}",
+            f"Edge: {values['edge_prefix']}",
+        ]
         await _save_tts_modal_updates(
             self.cog,
             interaction,
@@ -2137,9 +2189,9 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
             server=True,
             updates=updates,
             history_label="os prefixos do servidor",
-            history_value=", ".join(parts) if parts else "sem alterações",
+            history_value=", ".join(parts),
             success_title="Prefixos atualizados",
-            success_description="Salvo: " + (", ".join(parts) if parts else "sem alterações") + ".",
+            success_description="Salvo: " + ", ".join(parts) + ".",
         )
 
 
@@ -2956,6 +3008,7 @@ class PrefixTargetSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="Bot", description="Símbolo usado nos comandos do bot. Exemplo: _panel", value="bot", emoji="🤖"),
             discord.SelectOption(label="ATTS", description="Símbolo antes da frase para usar ATTS. Exemplo: %bom dia", value="atts", emoji="📱"),
+            discord.SelectOption(label="Kasane Teto", description="Símbolo antes da frase para usar a Teto. Exemplo: 'bom dia", value="teto", emoji="🥖"),
             discord.SelectOption(label="gTTS", description="Símbolo antes da frase para usar gTTS. Exemplo: .bom dia", value="gtts", emoji="🔤"),
             discord.SelectOption(label="Edge", description="Símbolo antes da frase para usar Edge. Exemplo: ,bom dia", value="edge", emoji="🔊"),
         ]
@@ -2970,6 +3023,8 @@ class PrefixTargetSelect(discord.ui.Select):
             await interaction.response.send_modal(BotPrefixModal(self.cog, source_panel_message, owner_id, guild_id))
         elif value == "atts":
             await interaction.response.send_modal(ATTSPrefixModal(self.cog, source_panel_message, owner_id, guild_id))
+        elif value == "teto":
+            await interaction.response.send_modal(TetoPrefixModal(self.cog, source_panel_message, owner_id, guild_id))
         elif value == "edge":
             await interaction.response.send_modal(EdgePrefixModal(self.cog, source_panel_message, owner_id, guild_id))
         else:
@@ -3044,7 +3099,7 @@ class TTSAdvancedActionsView(_BaseTTSView):
             self._target_owner(interaction),
             self.guild_id,
             "Modo de TTS",
-            "Escolhe o motor padrão usado por comandos antigos. Os prefixos ATTS, Edge e gTTS continuam escolhendo o motor por mensagem.",
+            "Escolhe o motor padrão usado por comandos antigos. Os prefixos ATTS, Kasane Teto, Edge e gTTS continuam escolhendo o motor por mensagem.",
             ModeSelect(self.cog, server=self.server),
             source_panel_message=self.source_panel_message,
             target_user_id=self.target_user_id,
@@ -3072,7 +3127,7 @@ class TTSMainPanelSelect(discord.ui.Select):
         self.server = bool(server)
         if self.server:
             options = [
-                discord.SelectOption(label="Prefixos", description="Símbolos do bot, ATTS, Edge e gTTS", value="prefixes", emoji="⌨️"),
+                discord.SelectOption(label="Prefixos", description="Símbolos do bot, ATTS, Teto, Edge e gTTS", value="prefixes", emoji="⌨️"),
                 discord.SelectOption(label="ATTS", description="Android TTS padrão do servidor", value="atts", emoji="📱"),
                 discord.SelectOption(label="Edge", description="Idioma, voz e leitura Edge padrão do servidor", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Idioma gTTS padrão do servidor", value="gtts", emoji="🔤"),

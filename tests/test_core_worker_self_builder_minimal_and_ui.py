@@ -32,6 +32,48 @@ def _write(path: Path, size: int, marker: bytes = b"x") -> Path:
     return path
 
 
+def test_phone_worker_update_targets_preserve_nested_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load("phone_worker_nested_update_target_test", PHONE_WORKER_PATH)
+    monkeypatch.setattr(module, "_phone_worker_dir", lambda: tmp_path)
+
+    target = "teto_renderer/renderer.py"
+    assert module._normalize_worker_update_target(target) == target
+    path, mode = module._safe_update_target_path(target)
+    assert path == (tmp_path / target).resolve()
+    assert mode == 0o644
+
+    for invalid in ("../renderer.py", "/tmp/renderer.py", "teto_renderer/../renderer.py", "renderer.py"):
+        with pytest.raises(ValueError):
+            module._normalize_worker_update_target(invalid)
+
+
+def test_apk_builder_respects_shared_heavy_resource_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load("phone_worker_shared_heavy_lock_test", PHONE_WORKER_PATH)
+    monkeypatch.setattr(module, "_current_core_worker_roles_and_capabilities", lambda: (["apk-builder"], ["apk-builder"]))
+    monkeypatch.setenv("PHONE_WORKER_APK_BUILD_ENABLED", "true")
+    monkeypatch.setenv("PHONE_WORKER_APK_BUILD_DIR", str(tmp_path / "builds"))
+
+    assert module._HEAVY_RESOURCE_LOCK.acquire(blocking=False)
+    try:
+        result = module._apply_apk_build_debug({"source_zip_url": "https://example.invalid/source.zip"})
+    finally:
+        module._HEAVY_RESOURCE_LOCK.release()
+
+    assert result["ok"] is False
+    assert result["busy"] is True
+    assert result["retryable"] is True
+    assert "recurso pesado ocupado" in result["summary"]
+
+
+def test_teto_request_is_first_but_falls_back_when_unavailable() -> None:
+    module = _load("phone_worker_teto_engine_order_test", PHONE_WORKER_PATH)
+    handler = object.__new__(module.WorkerHandler)
+    payload = {"engine": "teto", "preferred_engine": "edge", "fallback_engine": "edge"}
+
+    assert handler._tts_agent_engine_order(payload, ["teto", "edge", "gtts"]) == ["teto", "edge", "gtts"]
+    assert handler._tts_agent_engine_order(payload, ["edge", "gtts"]) == ["edge", "gtts"]
+
+
 def test_self_builder_collects_only_transitive_runtime_libraries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load("phone_worker_minimal_runtime_test", PHONE_WORKER_PATH)
     jdk = tmp_path / "jdk"

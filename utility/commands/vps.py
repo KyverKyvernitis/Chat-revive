@@ -463,7 +463,7 @@ class VpsCommandMixin:
         total_members = 0
         total_synts = 0
         guild_rows: list[tuple[str, str]] = []
-        engine_order = {"android_native": 0, "edge": 1, "gtts": 2, "piper": 3, "other": 9}
+        engine_order = {"android_native": 0, "teto": 1, "edge": 2, "gtts": 3, "piper": 4, "other": 9}
 
         for guild in guilds:
             guild_id = int(getattr(guild, "id", 0) or 0)
@@ -530,6 +530,8 @@ class VpsCommandMixin:
             return "gTTS"
         if key in {"android_native", "android", "android_tts", "native_android", "atts"}:
             return "ATTS"
+        if key in {"teto", "kasane_teto", "teto_utau", "utau"}:
+            return "Kasane Teto"
         if key in {"piper", "piper_tts"}:
             return "Piper legado"
         if key in {"other", "unknown", "desconhecida"}:
@@ -547,6 +549,7 @@ class VpsCommandMixin:
             "Android nativo": "android_native",
             "Edge": "edge",
             "gTTS": "gtts",
+            "Kasane Teto": "teto",
             "Piper legado": "piper",
             "Outras": "other",
         }.get(label, label.casefold())
@@ -671,7 +674,7 @@ class VpsCommandMixin:
                 elif avg_ms > 0:
                     target["avg_synth_ms"] = max(float(target.get("avg_synth_ms", 0.0) or 0.0), avg_ms)
 
-            order = {"android_native": 0, "edge": 1, "gtts": 2, "piper": 3, "auto": 5}
+            order = {"android_native": 0, "teto": 1, "edge": 2, "gtts": 3, "piper": 4, "auto": 5}
             lines: list[str] = []
             total = 0
             for key, data in sorted(combined.items(), key=lambda item: (order.get(item[0], 99), item[0])):

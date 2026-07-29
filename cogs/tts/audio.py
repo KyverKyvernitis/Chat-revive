@@ -96,13 +96,16 @@ TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS = max(0, int(getattr(config, "TTS_WORKER_AG
 TTS_WORKER_AGENT_BUSY_RETRY_DELAY_SECONDS = max(0.05, float(getattr(config, "TTS_WORKER_AGENT_BUSY_RETRY_DELAY_SECONDS", 0.35) or 0.35))
 TTS_WORKER_AGENT_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_WORKER_AGENT_MAX_AUDIO_MB", 8) or 8))
 TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, int(getattr(config, "TTS_WORKER_AGENT_MAX_TEXT_LENGTH", 1200) or 1200))
+TTS_TETO_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_TETO_MAX_TEXT_LENGTH", 180) or 180))
+TTS_TETO_WORKER_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "TTS_TETO_WORKER_TIMEOUT_SECONDS", 25.0) or 25.0))
+TTS_TETO_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TETO_MAX_AUDIO_MB", 8) or 8))
 TTS_WORKER_AGENT_PREFERRED_ENGINE = str(getattr(config, "TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
 TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD = max(1, int(getattr(config, "TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD", 3) or 3))
 TTS_WORKER_AGENT_RAW_AUDIO_ENABLED = bool(getattr(config, "TTS_WORKER_AGENT_RAW_AUDIO_ENABLED", True))
 TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED = bool(getattr(config, "TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED", True))
 TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES = {
     item.strip().lower().replace("-", "_")
-    for item in str(getattr(config, "TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native") or "android_native").split(",")
+    for item in str(getattr(config, "TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native,teto") or "android_native,teto").split(",")
     if item.strip()
 }
 TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS = max(0, int(getattr(config, "TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS", 120) or 120))
@@ -3311,15 +3314,27 @@ class TTSAudioMixin:
         return result
 
     def _tts_agent_payload_for_item(self, item: QueueItem) -> dict[str, Any]:
+        engine = str(item.engine or "gtts").strip().lower().replace("-", "_") or "gtts"
+        if engine in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"}:
+            engine = "gtts"
+        is_teto = engine == "teto"
+        max_text_length = TTS_TETO_MAX_TEXT_LENGTH if is_teto else TTS_WORKER_AGENT_MAX_TEXT_LENGTH
+        timeout_seconds = TTS_TETO_WORKER_TIMEOUT_SECONDS if is_teto else TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS
+        max_audio_mb = TTS_TETO_MAX_AUDIO_MB if is_teto else TTS_WORKER_AGENT_MAX_AUDIO_MB
+        fallback_engine = str(getattr(item, "piper_fallback_engine", "") or "gtts").strip().lower().replace("-", "_") or "gtts"
+        if fallback_engine in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"}:
+            fallback_engine = "gtts"
         return {
-            "text": str(item.text or "")[:TTS_WORKER_AGENT_MAX_TEXT_LENGTH],
-            "engine": "gtts" if str(item.engine or "gtts").strip().lower().replace("-", "_") in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"} else str(item.engine or "gtts").strip().lower().replace("-", "_"),
+            "text": str(item.text or "")[:max_text_length],
+            "engine": engine,
             "voice": str(item.voice or ""),
             "language": str(item.language or ""),
             "rate": str(item.rate or "+0%"),
             "pitch": str(item.pitch or "+0Hz"),
-            "preferred_engine": TTS_WORKER_AGENT_PREFERRED_ENGINE,
-            "fallback_engine": "gtts" if str(getattr(item, "piper_fallback_engine", "") or "gtts").strip().lower().replace("-", "_") in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"} else str(getattr(item, "piper_fallback_engine", "") or "gtts"),
+            # Uma requisição explícita da Teto não pode ser desviada pela engine
+            # global preferida do worker; o fallback continua separado abaixo.
+            "preferred_engine": "teto" if is_teto else TTS_WORKER_AGENT_PREFERRED_ENGINE,
+            "fallback_engine": fallback_engine,
             "fallback_voice": str(getattr(item, "piper_fallback_voice", "") or item.voice or ""),
             "fallback_language": str(getattr(item, "piper_fallback_language", "") or item.language or GTTS_DEFAULT_LANGUAGE),
             "fallback_rate": str(getattr(item, "piper_fallback_rate", "") or item.rate or "+0%"),
@@ -3327,8 +3342,8 @@ class TTSAudioMixin:
             "model_name": str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME),
             "cache_key": self._cache_key(item),
             "cache_mode": "prefer",
-            "timeout_seconds": TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
-            "max_audio_bytes": TTS_WORKER_AGENT_MAX_AUDIO_MB * 1024 * 1024,
+            "timeout_seconds": timeout_seconds,
+            "max_audio_bytes": max_audio_mb * 1024 * 1024,
             "guild_id": int(item.guild_id or 0),
             "channel_id": int(item.channel_id or 0),
             "author_id": int(item.author_id or 0),
@@ -3354,8 +3369,10 @@ class TTSAudioMixin:
         text = str(item.text or "").strip()
         if not text:
             raise RuntimeError("texto vazio para TTS Agent")
-        if len(text) > TTS_WORKER_AGENT_MAX_TEXT_LENGTH:
-            raise RuntimeError(f"texto grande demais para TTS Agent: {len(text)} > {TTS_WORKER_AGENT_MAX_TEXT_LENGTH}")
+        engine = str(item.engine or "gtts").strip().lower().replace("-", "_") or "gtts"
+        max_text_length = TTS_TETO_MAX_TEXT_LENGTH if engine == "teto" else TTS_WORKER_AGENT_MAX_TEXT_LENGTH
+        if len(text) > max_text_length:
+            raise RuntimeError(f"texto grande demais para TTS Agent: {len(text)} > {max_text_length}")
 
         metrics = self._get_metrics_store()
         metrics["tts_agent_synth_attempts"] = int(metrics.get("tts_agent_synth_attempts", 0) or 0) + 1
@@ -3369,8 +3386,8 @@ class TTSAudioMixin:
                 data = await self._request_phone_worker_tts_audio(
                     task="tts_agent_synthesize",
                     payload=self._tts_agent_payload_for_item(item),
-                    timeout_seconds=TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
-                    max_audio_mb=TTS_WORKER_AGENT_MAX_AUDIO_MB,
+                    timeout_seconds=TTS_TETO_WORKER_TIMEOUT_SECONDS if engine == "teto" else TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
+                    max_audio_mb=TTS_TETO_MAX_AUDIO_MB if engine == "teto" else TTS_WORKER_AGENT_MAX_AUDIO_MB,
                     stream_to_file=True,
                 )
                 request_ms = (time.monotonic() - request_started) * 1000.0
@@ -3509,8 +3526,9 @@ class TTSAudioMixin:
             except Exception as e:
                 logger.warning("[tts_agent] TTS no worker falhou; usando fallback local/VPS | guild=%s engine=%s erro=%s", item.guild_id, item.engine, e)
 
-        if item.engine == "android_native" and not use_agent:
-            logger.warning("[tts_android_native] Android TTS nativo indisponível; usando fallback local | guild=%s motivo=%s", item.guild_id, agent_decision)
+        if item.engine in {"android_native", "teto"}:
+            label = "Kasane Teto" if item.engine == "teto" else "Android TTS nativo"
+            logger.warning("[tts_fallback] %s indisponível; usando engine normal do usuário | guild=%s motivo=%s", label, item.guild_id, agent_decision)
             return await self._generate_piper_fallback_file(item)
 
         if item.engine == "piper":

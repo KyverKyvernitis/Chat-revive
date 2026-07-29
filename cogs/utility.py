@@ -415,6 +415,8 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
     async def _get_prefix_data(self, guild: discord.Guild | None) -> dict[str, str]:
         defaults = {
             "bot_prefix": str(getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_")) or "_"),
+            "atts_prefix": str(getattr(config, "TTS_ATTS_PREFIX", "%") or "%"),
+            "teto_prefix": str(getattr(config, "TTS_TETO_PREFIX", "'") or "'"),
             "gtts_prefix": ".",
             "edge_prefix": ",",
         }
@@ -432,6 +434,8 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
 
         guild_defaults = guild_defaults or {}
         defaults["bot_prefix"] = str(guild_defaults.get("bot_prefix", defaults["bot_prefix"]) or defaults["bot_prefix"])
+        defaults["atts_prefix"] = str(guild_defaults.get("atts_prefix", defaults["atts_prefix"]) or defaults["atts_prefix"])
+        defaults["teto_prefix"] = str(guild_defaults.get("teto_prefix", defaults["teto_prefix"]) or defaults["teto_prefix"])
         defaults["gtts_prefix"] = str(guild_defaults.get("gtts_prefix", guild_defaults.get("tts_prefix", defaults["gtts_prefix"])) or defaults["gtts_prefix"])
         defaults["edge_prefix"] = str(guild_defaults.get("edge_prefix", defaults["edge_prefix"]) or defaults["edge_prefix"])
         return defaults
@@ -447,6 +451,8 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
 
     def _build_help_pages(self, *, guild: discord.Guild | None, prefixes: dict[str, str], root_ids: dict[str, int]) -> list[HelpPage]:
         bot_prefix = prefixes["bot_prefix"]
+        atts_prefix = prefixes["atts_prefix"]
+        teto_prefix = prefixes["teto_prefix"]
         gtts_prefix = prefixes["gtts_prefix"]
         edge_prefix = prefixes["edge_prefix"]
 
@@ -493,12 +499,13 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
             "**10.** Jogos"
         )
         prefixes_text = (
-            f"**Bot:** `{bot_prefix}`  ·  **ATTS:** `%`  ·  "
+            f"**Bot:** `{bot_prefix}`  ·  **ATTS:** `{atts_prefix}`  ·  **Teto:** `{teto_prefix}`  ·  "
             f"**gTTS:** `{gtts_prefix}`  ·  **Edge:** `{edge_prefix}`"
         )
         quick_start = (
             f"› {help_slash} ou {prefix_help} — abre esta central\n"
             f"› {tts_menu_slash} ou {prefix_panel} — painel pessoal de TTS\n"
+            f"› `{teto_prefix}bom dia` — fala usando Kasane Teto no phone worker\n"
             f"› `{edge_prefix}oi cheguei na call` — fala usando Edge\n"
             f"› `{gtts_prefix}teste de voz` — fala usando gTTS"
         )
@@ -521,6 +528,12 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
             body=(
                 "Não são painéis: são **prefixos de fala**. Você manda a mensagem "
                 "começando com o prefixo e o bot fala.\n\n"
+                f"### ATTS — `{atts_prefix}`\n"
+                f"Exemplo: `{atts_prefix}olá pelo celular`\n"
+                "Usa o Android TTS nativo do phone worker.\n\n"
+                f"### Kasane Teto — `{teto_prefix}`\n"
+                f"Exemplo: `{teto_prefix}bom dia pessoal`\n"
+                "Engine UTAU experimental do phone worker; se estiver indisponível, usa a voz normal configurada.\n\n"
                 f"### gTTS — `{gtts_prefix}`\n"
                 f"Exemplo: `{gtts_prefix}olá tudo bem`\n"
                 "Voz padrão da web, leve, funciona em qualquer cenário.\n\n"

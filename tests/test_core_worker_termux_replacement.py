@@ -183,7 +183,7 @@ def test_termux_bootstrap_requires_self_builder_toolchain() -> None:
     phone_worker = read(ROOT / "deploy/termux/phone-worker/phone_worker.py")
     automation = read(ROOT / "scripts/core-worker-automation.py")
     workers = read(ROOT / "utility/commands/workers.py")
-    assert 'PHONE_WORKER_VERSION = "1.10.37"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.10.38"' in phone_worker
     assert 'env["CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN"] = "true"' in phone_worker
     assert '_prepare_apk_self_builder_toolchain(project_dir, env)' in phone_worker
     assert '"runtime": "termux-bionic-direct"' in phone_worker

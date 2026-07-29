@@ -1,6 +1,6 @@
 """Monta o payload de TTS a partir de uma mensagem do Discord.
 
-Aplica o engine forçado pelo prefixo (gTTS/Edge/ATTS), preenche valores
+Aplica o engine forçado pelo prefixo (gTTS/Edge/ATTS/Teto), preenche valores
 default quando o user não configurou, renderiza o texto final (limpo +
 prefixo de autor se ligado) e devolve o `QueueItem` pronto pro dispatcher.
 """
@@ -69,6 +69,15 @@ async def build_message_tts_payload(
         resolved["voice"] = resolved.get("android_voice") or ""
         resolved["rate"] = resolved.get("android_rate") or "1.0"
         resolved["pitch"] = resolved.get("android_pitch") or "1.0"
+    elif forced_engine == "teto":
+        # Teto é exclusiva do phone worker. Os campos normais continuam
+        # guardados no QueueItem como fallback caso o renderer esteja offline,
+        # ocupado, aquecido ou sem assets válidos.
+        resolved["engine"] = "teto"
+        resolved["language"] = "pt-BR"
+        resolved["voice"] = "kasane-teto-standard"
+        resolved["rate"] = "1.0"
+        resolved["pitch"] = "C4"
 
     # Texto final: tira o prefixo de fala, limpa marcadores e prepende o
     # nome falado do autor quando o servidor tem essa opção ligada.

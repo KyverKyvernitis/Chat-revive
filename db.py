@@ -664,6 +664,7 @@ class SettingsDB:
             "bot_prefix": str(g.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(g.get("tts_prefix", ",") or ","),
             "atts_prefix": str(g.get("atts_prefix", getattr(config, "TTS_ATTS_PREFIX", "%")) or getattr(config, "TTS_ATTS_PREFIX", "%")),
+            "teto_prefix": str(g.get("teto_prefix", getattr(config, "TTS_TETO_PREFIX", "'")) or getattr(config, "TTS_TETO_PREFIX", "'")),
             "gtts_prefix": str(g.get("gtts_prefix", g.get("tts_prefix", ".")) or "."),
             "edge_prefix": str(g.get("edge_prefix", ",") or ","),
             "speech_limit_seconds": int(g.get("speech_limit_seconds", 30) or 30),
@@ -692,6 +693,7 @@ class SettingsDB:
         bot_prefix: Optional[str] = None,
         tts_prefix: Optional[str] = None,
         atts_prefix: Optional[str] = None,
+        teto_prefix: Optional[str] = None,
         gtts_prefix: Optional[str] = None,
         edge_prefix: Optional[str] = None,
         speech_limit_seconds: Optional[int] = None,
@@ -727,6 +729,8 @@ class SettingsDB:
             doc["tts_prefix"] = str(tts_prefix or ",")[:8]
         if atts_prefix is not None:
             doc["atts_prefix"] = str(atts_prefix or getattr(config, "TTS_ATTS_PREFIX", "%"))[:8]
+        if teto_prefix is not None:
+            doc["teto_prefix"] = str(teto_prefix or getattr(config, "TTS_TETO_PREFIX", "'"))[:8]
         if gtts_prefix is not None:
             doc["gtts_prefix"] = str(gtts_prefix or ".")[:8]
         if edge_prefix is not None:
@@ -1044,6 +1048,7 @@ class SettingsDB:
             "bot_prefix": str(guild.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(guild.get("tts_prefix", ",") or ","),
             "atts_prefix": str(guild.get("atts_prefix", getattr(config, "TTS_ATTS_PREFIX", "%")) or getattr(config, "TTS_ATTS_PREFIX", "%")),
+            "teto_prefix": str(guild.get("teto_prefix", getattr(config, "TTS_TETO_PREFIX", "'")) or getattr(config, "TTS_TETO_PREFIX", "'")),
             "gtts_prefix": str(guild.get("gtts_prefix", guild.get("tts_prefix", ".")) or "."),
             "edge_prefix": str(guild.get("edge_prefix", ",") or ","),
             "speech_limit_seconds": int(guild.get("speech_limit_seconds", 30) or 30),
@@ -2641,8 +2646,12 @@ _TTS_SYNT_ENGINE_ALIASES = {
     "atts": "android_native",
     "piper": "piper",
     "piper_tts": "piper",
+    "teto": "teto",
+    "teto_utau": "teto",
+    "kasane_teto": "teto",
+    "utau": "teto",
 }
-_TTS_SYNT_ENGINE_KEYS = ("android_native", "edge", "gtts", "piper", "other")
+_TTS_SYNT_ENGINE_KEYS = ("android_native", "edge", "gtts", "piper", "teto", "other")
 
 
 def _normalize_tts_synt_engine(engine: object) -> str:

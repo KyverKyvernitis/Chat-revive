@@ -85,6 +85,10 @@ cp "$SRC_DIR/bootstrap-phone-worker.sh" "$WORKER_DIR/bootstrap-phone-worker.sh"
 cp "$SRC_DIR/install.sh" "$WORKER_DIR/install.sh"
 cp "$SRC_DIR/README.md" "$WORKER_DIR/README.md" 2>/dev/null || true
 cp "$SRC_DIR/phone-worker.env.example" "$WORKER_DIR/phone-worker.env.example" 2>/dev/null || true
+mkdir -p "$WORKER_DIR/teto_renderer" "$WORKER_DIR/scripts"
+cp "$SRC_DIR"/teto_renderer/*.py "$WORKER_DIR/teto_renderer/" 2>/dev/null || true
+cp "$SRC_DIR/scripts/validate-teto-assets.py" "$WORKER_DIR/scripts/validate-teto-assets.py" 2>/dev/null || true
+chmod +x "$WORKER_DIR/scripts/validate-teto-assets.py" 2>/dev/null || true
 # Compatibilidade com atalhos antigos em ~/ como wrappers pequenos, nunca cópia
 # completa: isso evita script antigo fora de ~/phone-worker disparar pip/clang.
 chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/music_agent.py" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/start-phone-music-agent.sh" "$WORKER_DIR/pair-phone-worker.sh" "$WORKER_DIR/bootstrap-phone-worker.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true

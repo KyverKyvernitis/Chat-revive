@@ -66,6 +66,10 @@ _CORE_JOB_ACTIVE: dict[str, Any] = {}
 _CORE_JOB_LAST_RESULT: dict[str, Any] = {}
 _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 _APK_BUILD_THREAD_LOCK = threading.Lock()
+_HEAVY_RESOURCE_LOCK = threading.Lock()
+_TETO_RENDERER_LOCK = threading.RLock()
+_TETO_RENDERER: Any = None
+_TETO_RENDERER_ERROR = ""
 _MUSIC_STREAM_LOCK = threading.RLock()
 _MUSIC_STREAMS: dict[str, dict[str, Any]] = {}
 PCM_SAMPLE_RATE = 48000
@@ -77,7 +81,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.37"
+PHONE_WORKER_VERSION = "1.10.38"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -306,7 +310,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-gtts", "tts-edge", "tts-android-native", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-gtts", "tts-edge", "tts-android-native", "tts-teto", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -2003,6 +2007,98 @@ def _safe_name(name: Any, fallback: str = "file.bin") -> str:
     return "/".join(parts) or fallback
 
 
+def _available_memory_mb() -> int | None:
+    try:
+        for line in Path("/proc/meminfo").read_text("utf-8", errors="replace").splitlines():
+            if line.startswith("MemAvailable:"):
+                parts = line.split()
+                return max(0, int(parts[1]) // 1024)
+    except Exception:
+        return None
+    return None
+
+
+def _teto_resource_snapshot() -> dict[str, Any]:
+    memory_mb = _available_memory_mb()
+    min_memory_mb = max(128, _env_int("PHONE_WORKER_TETO_MIN_FREE_MEMORY_MB", 1200))
+    battery = _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot())
+    level = battery.get("level") if isinstance(battery, dict) else None
+    temperature = battery.get("temperature_c") if isinstance(battery, dict) else None
+    status = str((battery or {}).get("status") or "").strip().lower() if isinstance(battery, dict) else ""
+    charging = bool((battery or {}).get("charging")) if isinstance(battery, dict) else False
+    charging = charging or status in {"charging", "full"}
+    min_battery = max(0, min(100, _env_int("PHONE_WORKER_TETO_MIN_BATTERY_PERCENT", 25)))
+    max_temperature = max(30.0, _env_float("PHONE_WORKER_TETO_MAX_BATTERY_TEMP_C", 43.0))
+    allow_low_when_charging = _env_bool("PHONE_WORKER_TETO_ALLOW_LOW_BATTERY_WHEN_CHARGING", True)
+    core_job = _core_job_runtime_snapshot()
+    active_type = str(core_job.get("active_type") or "").strip().lower()
+    heavy_types = {
+        "apk_build_debug", "apk_build", "worker_update", "self_update",
+        "boot_repair", "audio_convert", "media_convert", "maintenance_heavy",
+    }
+    reasons: list[str] = []
+    if _APK_BUILD_THREAD_LOCK.locked() or active_type in heavy_types:
+        reasons.append(f"tarefa pesada ativa: {active_type or 'apk_build'}")
+    if memory_mb is not None and memory_mb < min_memory_mb:
+        reasons.append(f"memória disponível baixa: {memory_mb} MB < {min_memory_mb} MB")
+    try:
+        if temperature is not None and float(temperature) > max_temperature:
+            reasons.append(f"bateria aquecida: {float(temperature):.1f} °C > {max_temperature:.1f} °C")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if level is not None and float(level) < min_battery and not (charging and allow_low_when_charging):
+            reasons.append(f"bateria baixa: {float(level):.0f}% < {min_battery}%")
+    except (TypeError, ValueError):
+        pass
+    return {
+        "ok": not reasons,
+        "reason": "; ".join(reasons) if reasons else "ok",
+        "memory_available_mb": memory_mb,
+        "minimum_memory_mb": min_memory_mb,
+        "battery_level": level,
+        "battery_temperature_c": temperature,
+        "charging": charging,
+        "active_heavy_job": active_type,
+    }
+
+
+def _get_teto_renderer():
+    global _TETO_RENDERER, _TETO_RENDERER_ERROR
+    with _TETO_RENDERER_LOCK:
+        if _TETO_RENDERER is not None:
+            return _TETO_RENDERER
+        try:
+            from teto_renderer import TetoRenderer
+            _TETO_RENDERER = TetoRenderer(resource_guard=_teto_resource_snapshot)
+            _TETO_RENDERER_ERROR = ""
+            return _TETO_RENDERER
+        except Exception as exc:
+            _TETO_RENDERER_ERROR = f"{type(exc).__name__}: {_short_text(exc, limit=180)}"
+            raise RuntimeError(f"renderer Teto indisponível: {_TETO_RENDERER_ERROR}") from exc
+
+
+def _teto_status(*, force: bool = False) -> dict[str, Any]:
+    enabled = _env_bool("PHONE_WORKER_TETO_ENABLED", False)
+    result: dict[str, Any] = {
+        "ok": False,
+        "available": False,
+        "ready": False,
+        "enabled": enabled,
+        "engine": "teto",
+    }
+    if not enabled:
+        result["last_error"] = "PHONE_WORKER_TETO_ENABLED=false"
+        result["resources"] = {"ok": False, "reason": "engine desativada"}
+        return result
+    try:
+        result.update(_get_teto_renderer().status(force=force))
+    except Exception as exc:
+        result["last_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=180)}"
+    result["resources"] = _teto_resource_snapshot()
+    return result
+
+
 def _turbo_dependency_snapshot() -> dict[str, Any]:
     profile = _current_core_worker_profile()
     deps: dict[str, Any] = {
@@ -2019,6 +2115,7 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
         "edge_tts": False,
         "gtts": False,
         "android_native_tts": False,
+        "teto_tts": False,
     }
     model = str(os.getenv("PHONE_WORKER_PIPER_MODEL", "") or "").strip()
     config = str(os.getenv("PHONE_WORKER_PIPER_CONFIG", "") or "").strip()
@@ -2044,6 +2141,14 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
     deps["android_native_url"] = str(android_status.get("url") or _android_tts_base_url())
     if android_status.get("last_error"):
         deps["android_native_error"] = _short_text(android_status.get("last_error"), limit=100)
+    teto_status = _teto_status()
+    deps["teto"] = teto_status
+    teto_resources = teto_status.get("resources") if isinstance(teto_status.get("resources"), dict) else {}
+    deps["teto_tts"] = bool(teto_status.get("ready") and teto_resources.get("ok", True))
+    deps["teto_enabled"] = bool(teto_status.get("enabled"))
+    deps["teto_fingerprint"] = str(teto_status.get("fingerprint") or "")[:64]
+    if teto_status.get("last_error"):
+        deps["teto_error"] = _short_text(teto_status.get("last_error"), limit=120)
     missing = [key for key in ("ffmpeg", "ffprobe", "edge_tts", "gtts") if not deps.get(key)]
     deps["ok"] = not missing
     deps["missing"] = missing
@@ -2054,19 +2159,20 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
 def _tts_agent_available_engines(deps: dict[str, Any] | None = None) -> list[str]:
     deps = deps if isinstance(deps, dict) else _turbo_dependency_snapshot()
     engines: list[str] = []
+    if deps.get("teto_tts"):
+        engines.append("teto")
     if deps.get("android_native_tts"):
         engines.append("android_native")
-    # Piper ficou legado. O fluxo normal anuncia ATTS/Edge/gTTS.
+    # Piper ficou legado. O fluxo normal anuncia Teto/ATTS/Edge/gTTS.
     if deps.get("edge_tts"):
         engines.append("edge")
     if deps.get("gtts"):
         engines.append("gtts")
     return engines
 
-
 def _tts_agent_preferred_engine(available: list[str]) -> str:
     requested = str(os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
-    aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
+    aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto"}
     requested = aliases.get(requested, requested)
     if requested != "auto" and requested in available:
         return requested
@@ -2120,6 +2226,7 @@ def _tts_agent_snapshot() -> dict[str, Any]:
         "preferred_engine": preferred,
         "selected_engine": preferred or last_engine,
         "deps": deps,
+        "teto": deps.get("teto") if isinstance(deps.get("teto"), dict) else _teto_status(),
         "active": active,
         "concurrency_limit": _tts_agent_queue_limit(),
         "total": total,
@@ -4775,12 +4882,19 @@ class WorkerHandler(BaseHTTPRequestHandler):
         requested = str(body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
         preferred = str(body.get("preferred_engine") or os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
         fallback = str(body.get("fallback_engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
+        aliases = {
+            "google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts",
+            "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native",
+            "native_android": "android_native", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto",
+        }
         requested = aliases.get(requested, requested)
         preferred = aliases.get(preferred, preferred)
         fallback = aliases.get(fallback, fallback)
         order: list[str] = []
-        if preferred != "auto":
+        if requested == "teto":
+            # Prefixo explícito: Teto deve ser tentada antes de qualquer preferência global.
+            order.append("teto")
+        elif preferred != "auto":
             order.append(preferred)
         order.append(requested)
         if fallback != requested:
@@ -4789,7 +4903,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             order.append(candidate)
         deduped: list[str] = []
         for engine in order:
-            if engine not in {"android_native", "edge", "gtts"}:
+            if engine not in {"teto", "android_native", "edge", "gtts"}:
                 continue
             if engine not in available:
                 continue
@@ -4809,17 +4923,24 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def _tts_agent_standard_cache_key(self, body: dict[str, Any], *, engine: str) -> str:
         normalized_engine = str(engine or body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
+        aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto"}
         normalized_engine = aliases.get(normalized_engine, normalized_engine)
         requested_engine = str(body.get("engine") or normalized_engine).strip().lower().replace("-", "_") or normalized_engine
         requested_engine = aliases.get(requested_engine, requested_engine)
         provided = str(body.get("cache_key") or "").strip()
-        if provided and requested_engine == normalized_engine:
+        if provided and requested_engine == normalized_engine and normalized_engine != "teto":
             with contextlib.suppress(Exception):
                 return self._sanitize_tts_cache_key(provided)
         text = " ".join(str(body.get("text") or "").strip().split()).lower()
         text = text.replace("!!", "!").replace("??", "?").replace("..", ".")
-        if normalized_engine == "android_native":
+        if normalized_engine == "teto":
+            status = _teto_status()
+            fingerprint = str(status.get("fingerprint") or "unavailable")
+            voice = str(body.get("voice") or "kasane-teto-standard").strip() or "kasane-teto-standard"
+            language = str(body.get("language") or "pt-BR").strip() or "pt-BR"
+            base_pitch = str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4")
+            payload = f"teto|{fingerprint}|{voice}|{language}|{base_pitch}|{text}"
+        elif normalized_engine == "android_native":
             language = str(body.get("language") or body.get("fallback_language") or "pt-BR").strip().replace("_", "-") or "pt-BR"
             voice = str(body.get("voice") or "auto").strip() or "auto"
             rate = str(body.get("rate") or "1.0").strip() or "1.0"
@@ -4908,7 +5029,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 tmp.unlink()
 
     def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int, raw_response: bool = False) -> dict[str, Any]:
-        engine = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts"}.get(str(engine or "gtts").strip().lower().replace("-", "_"), str(engine or "gtts").strip().lower().replace("-", "_"))
+        normalized = str(engine or "gtts").strip().lower().replace("-", "_") or "gtts"
+        engine = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto"}.get(normalized, normalized)
         text = str(body.get("text") or "").strip()
         if not text:
             raise ValueError("texto vazio")
@@ -4932,7 +5054,29 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     return hit
         audio_format = "mp3"
         data = b""
-        if engine == "android_native":
+        response: dict[str, Any] = {}
+        teto_meta: dict[str, Any] = {}
+        if engine == "teto":
+            if not _HEAVY_RESOURCE_LOCK.acquire(blocking=False):
+                raise RuntimeError("recurso pesado ocupado por build ou manutenção")
+            teto_started = time.monotonic()
+            try:
+                rendered = _get_teto_renderer().synthesize(
+                    text,
+                    timeout_seconds=float(timeout),
+                    max_audio_bytes=max_audio_bytes,
+                )
+            finally:
+                _HEAVY_RESOURCE_LOCK.release()
+            data = bytes(rendered.pop("audio", b"") or b"")
+            audio_format = self._normalize_tts_cache_format(rendered.get("audio_format") or "wav")
+            teto_meta = dict(rendered)
+            stage_ms["teto_render"] = round((time.monotonic() - teto_started) * 1000.0, 2)
+            logs.append(
+                f"teto voicebank={rendered.get('voicebank') or 'Kasane Teto'} "
+                f"rendered={rendered.get('rendered_phonemes') or 0} missing={len(rendered.get('missing_phonemes') or [])}"
+            )
+        elif engine == "android_native":
             synth_timeout_ms = max(1000, min(timeout * 1000, int(float(body.get("android_timeout_ms") or os.getenv("PHONE_WORKER_ANDROID_TTS_SYNTH_TIMEOUT_MS") or timeout * 1000))))
             android_payload = {
                 "text": text,
@@ -4948,7 +5092,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             android_started = time.monotonic()
             raw_enabled = _env_bool("PHONE_WORKER_ANDROID_TTS_RAW_ENABLED", True)
             raw_error = ""
-            response: dict[str, Any] = {}
+            response = {}
             if raw_enabled:
                 try:
                     data, raw_meta = _android_tts_raw_request(
@@ -5054,6 +5198,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "android_synth_ms": response.get("android_synth_ms") if engine == "android_native" and isinstance(response, dict) else None,
             "android_voice": response.get("voice") if engine == "android_native" and isinstance(response, dict) else "",
             "android_locale": response.get("locale") if engine == "android_native" and isinstance(response, dict) else "",
+            "teto_voicebank": teto_meta.get("voicebank") if engine == "teto" else "",
+            "teto_fingerprint": teto_meta.get("voicebank_fingerprint") if engine == "teto" else "",
+            "teto_rendered_phonemes": teto_meta.get("rendered_phonemes") if engine == "teto" else None,
+            "teto_missing_phonemes": teto_meta.get("missing_phonemes") if engine == "teto" else [],
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
@@ -5079,6 +5227,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
         max_chars = max(64, _env_int("PHONE_WORKER_TTS_AGENT_MAX_TEXT_LENGTH", 1200))
         if len(text) > max_chars:
             raise ValueError(f"texto grande demais para TTS Agent ({len(text)} > {max_chars})")
+        requested_engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
+        if requested_engine in {"kasane_teto", "teto_utau", "utau"}:
+            requested_engine = "teto"
+        if requested_engine == "teto":
+            teto_max_chars = max(16, _env_int("PHONE_WORKER_TETO_MAX_CHARACTERS", 180))
+            if len(text) > teto_max_chars:
+                raise ValueError(f"texto grande demais para Teto ({len(text)} > {teto_max_chars})")
         limit = _tts_agent_queue_limit()
         with _TTS_AGENT_LOCK:
             if _TTS_AGENT_ACTIVE >= limit:
@@ -9310,7 +9465,21 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
     lock_handle: Any | None = None
     active_marker = work_dir / ".build-active"
 
+    if not _HEAVY_RESOURCE_LOCK.acquire(blocking=False):
+        return _apk_build_failure_result(
+            summary="recurso pesado ocupado por renderização ou manutenção",
+            version_name=version_name,
+            version_code=version_code,
+            source_fingerprint=source_fingerprint,
+            source_sha256=expected_source_sha,
+            notification_id=notification_id,
+            work_dir=work_dir,
+            gradle_log=gradle_log,
+            extra={"busy": True, "retryable": True},
+        )
+
     if not _APK_BUILD_THREAD_LOCK.acquire(blocking=False):
+        _HEAVY_RESOURCE_LOCK.release()
         return _apk_build_failure_result(
             summary="build APK já está em execução neste processo do phone worker",
             version_name=version_name,
@@ -9700,6 +9869,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             active_marker.unlink()
         _release_apk_build_file_lock(lock_handle)
         _APK_BUILD_THREAD_LOCK.release()
+        _HEAVY_RESOURCE_LOCK.release()
         if not keep_workdir and not preserve_workdir:
             with contextlib.suppress(Exception):
                 shutil.rmtree(work_dir)
@@ -9716,16 +9886,39 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "install.sh": ("worker", "install.sh", 0o755),
     "README.md": ("worker", "README.md", 0o644),
     "phone-worker.env.example": ("worker", "phone-worker.env.example", 0o600),
+    "teto_renderer/__init__.py": ("worker", "teto_renderer/__init__.py", 0o644),
+    "teto_renderer/errors.py": ("worker", "teto_renderer/errors.py", 0o644),
+    "teto_renderer/cache.py": ("worker", "teto_renderer/cache.py", 0o644),
+    "teto_renderer/voicebank.py": ("worker", "teto_renderer/voicebank.py", 0o644),
+    "teto_renderer/phonemizer.py": ("worker", "teto_renderer/phonemizer.py", 0o644),
+    "teto_renderer/prosody.py": ("worker", "teto_renderer/prosody.py", 0o644),
+    "teto_renderer/renderer.py": ("worker", "teto_renderer/renderer.py", 0o644),
+    "scripts/validate-teto-assets.py": ("worker", "scripts/validate-teto-assets.py", 0o755),
 }
 
 
+def _normalize_worker_update_target(target: str) -> str:
+    raw = str(target or "").strip().replace("\\", "/")
+    if not raw or raw.startswith("/"):
+        raise ValueError(f"arquivo de update não permitido: {raw or '<vazio>'}")
+    parts = raw.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"arquivo de update não permitido: {raw}")
+    normalized = "/".join(parts)
+    if normalized not in _WORKER_UPDATE_TARGETS:
+        raise ValueError(f"arquivo de update não permitido: {normalized}")
+    return normalized
+
+
 def _safe_update_target_path(target: str) -> tuple[Path, int]:
-    clean = str(target or "").replace("\\", "/").split("/")[-1].strip()
-    if clean not in _WORKER_UPDATE_TARGETS:
-        raise ValueError(f"arquivo de update não permitido: {clean or '<vazio>'}")
+    clean = _normalize_worker_update_target(target)
     location, filename, mode = _WORKER_UPDATE_TARGETS[clean]
-    base = _phone_worker_dir() if location == "worker" else Path.home()
-    path = (base / filename).expanduser()
+    base = (_phone_worker_dir() if location == "worker" else Path.home()).expanduser().resolve()
+    path = (base / filename).resolve()
+    try:
+        path.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"destino de update escapou da pasta permitida: {clean}") from exc
     return path, mode
 
 
@@ -9744,7 +9937,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
     files = payload.get("files")
     if not isinstance(files, list) or not files:
         raise ValueError("payload de update sem arquivos")
-    if len(files) > 12:
+    if len(files) > 24:
         raise ValueError("arquivos demais no update")
 
     updated: list[dict[str, Any]] = []
@@ -9759,7 +9952,8 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         target = str(item.get("target") or item.get("name") or "").strip()
         try:
-            path, mode = _safe_update_target_path(target)
+            normalized_target = _normalize_worker_update_target(target)
+            path, mode = _safe_update_target_path(normalized_target)
             raw = _b64decode(str(item.get("data_b64") or ""), max_bytes=max_file_bytes)
             total += len(raw)
             if total > max_total_bytes:
@@ -9788,7 +9982,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
                         applied_paths.append(home_copy)
                 except Exception as mirror_exc:
                     errors.append(f"{target} mirror: {type(mirror_exc).__name__}: {_short_text(mirror_exc, limit=80)}")
-            updated.append({"target": path.name, "paths": [str(p) for p in applied_paths], "bytes": len(raw), "sha256": actual[:12]})
+            updated.append({"target": normalized_target, "paths": [str(p) for p in applied_paths], "bytes": len(raw), "sha256": actual[:12]})
         except Exception as exc:
             errors.append(f"{target or '<sem alvo>'}: {type(exc).__name__}: {_short_text(exc, limit=100)}")
 

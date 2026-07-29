@@ -93,6 +93,7 @@ def _install_runtime_stubs() -> None:
 _install_runtime_stubs()
 
 from cogs.tts.audio import QueueItem
+from cogs.tts.prefix import match_engine_prefix, validate_prefix_values
 from cogs.tts.utils.message_dispatch import dispatch_message_tts
 from cogs.tts.utils.message_gate import analyze_message_for_tts
 
@@ -229,6 +230,80 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue_item.text, "olá android")
         self.assertEqual(queue_item.engine, "android_native")
         self.assertEqual(queue_item.piper_fallback_engine, "gtts")
+
+    async def test_kasane_teto_prefix_enqueues_with_normal_engine_fallback(self):
+        cog = FakeCog(db=FakeDB(
+            guild_defaults={"teto_prefix": "'", "gtts_prefix": ".", "edge_prefix": ",", "atts_prefix": "%"},
+            resolved={
+                "engine": "edge",
+                "voice": "pt-BR-FranciscaNeural",
+                "language": "pt-br",
+                "rate": "+5%",
+                "pitch": "+2Hz",
+            },
+        ))
+        message = make_message("'olá teto")
+
+        decision = await analyze_message_for_tts(cog, message)
+        self.assertTrue(decision.should_process_tts)
+        self.assertEqual(decision.forced_engine, "teto")
+        self.assertEqual(decision.active_prefix, "'")
+
+        result = await dispatch_message_tts(
+            cog,
+            message,
+            guild_defaults=decision.guild_defaults,
+            active_prefix=decision.active_prefix,
+            forced_engine=decision.forced_engine,
+        )
+
+        self.assertTrue(result.enqueued)
+        _, queue_item = cog.enqueue_calls[0]
+        self.assertEqual(queue_item.text, "olá teto")
+        self.assertEqual(queue_item.engine, "teto")
+        self.assertEqual(queue_item.voice, "kasane-teto-standard")
+        self.assertEqual(queue_item.piper_fallback_engine, "edge")
+        self.assertEqual(queue_item.piper_fallback_voice, "pt-BR-FranciscaNeural")
+
+    async def test_typographic_apostrophe_does_not_activate_teto(self):
+        cog = FakeCog(db=FakeDB(guild_defaults={"teto_prefix": "'"}))
+        message = make_message("’olá teto")
+
+        decision = await analyze_message_for_tts(cog, message)
+
+        self.assertFalse(decision.should_process_tts)
+        self.assertEqual(decision.reason, "no_engine_prefix")
+
+    async def test_disabled_teto_engine_does_not_enqueue(self):
+        cog = FakeCog(db=FakeDB(guild_defaults={"teto_prefix": "'"}))
+        message = make_message("'olá teto")
+
+        with patch("cogs.tts.utils.message_gate.config.TTS_TETO_ENABLED", False):
+            decision = await analyze_message_for_tts(cog, message)
+
+        self.assertFalse(decision.should_process_tts)
+        self.assertEqual(decision.reason, "teto_disabled")
+
+    def test_longest_speech_prefix_wins_and_collisions_are_rejected(self):
+        engine, prefix = match_engine_prefix(
+            "''teste",
+            atts_prefix="%",
+            teto_prefix="''",
+            edge_prefix=",",
+            gtts_prefix="'",
+        )
+        self.assertEqual((engine, prefix), ("teto", "''"))
+
+        valid, reason = validate_prefix_values(
+            bot_prefix="_",
+            atts_prefix="%",
+            teto_prefix="'",
+            edge_prefix=",",
+            gtts_prefix="'",
+        )
+        self.assertFalse(valid)
+        self.assertIn("Kasane Teto", reason)
+        self.assertIn("gTTS", reason)
 
     async def test_native_tts_experimental_prefix_is_available_in_any_guild_by_default(self):
         cog = FakeCog(db=FakeDB(guild_defaults={"tts_prefix": "."}, resolved={"engine": "gtts", "language": "pt-br"}))

@@ -31,6 +31,10 @@ def status_source_badge(source: str) -> str:
 
 def status_engine_label(engine: str) -> str:
     value = str(engine or "gtts").lower()
+    if value in {"android_native", "atts", "android", "android_tts", "native"}:
+        return "📱 ATTS"
+    if value in {"teto", "kasane_teto", "teto_utau", "utau"}:
+        return "🥖 Kasane Teto"
     if value == "edge":
         return "🗣️ Edge"
     return "🌐 gTTS"

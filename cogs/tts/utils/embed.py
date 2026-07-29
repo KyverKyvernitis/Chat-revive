@@ -129,6 +129,8 @@ def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) 
     title = _clean_display_value(getattr(embed, "title", ""), fallback="TTS do servidor" if server else "TTS")
     description = _clean_display_value(getattr(embed, "description", ""), fallback="")
 
+    atts_prefix = _field_value(embed, "Prefixo do ATTS", default="%")
+    teto_prefix = _field_value(embed, "Prefixo da Kasane Teto", default="'")
     edge_prefix = _field_value(embed, "Prefixo do modo Edge", default=",")
     gtts_prefix = _field_value(embed, "Prefixo do modo gTTS", default=".")
     edge_voice = human_voice_name(_field_value(embed, "Voz do Edge"))
@@ -144,6 +146,13 @@ def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) 
     lines.extend([
         "",
         "Cada prefixo usa seus próprios ajustes.",
+        "",
+        "**ATTS**",
+        f"Use: {_prefix_example(atts_prefix)}",
+        "",
+        "**Kasane Teto · experimental**",
+        f"Use: {_prefix_example(teto_prefix)}",
+        "Execução: phone worker, com fallback automático.",
         "",
         "**Edge**",
         f"Use: {_prefix_example(edge_prefix)}",
@@ -208,6 +217,8 @@ def status_engine_label(engine: str) -> str:
     value = str(engine or "gtts").lower()
     if value in {"android_native", "atts", "android", "android_tts", "native"}:
         return "📱 ATTS"
+    if value in {"teto", "kasane_teto", "teto_utau", "utau"}:
+        return "🥖 Kasane Teto"
     if value == "edge":
         return "🗣️ Edge"
     return "🌐 gTTS"
@@ -270,6 +281,9 @@ def build_settings_embed(*, title: str, description: str, resolved: dict, guild_
     embed.add_field(name="Idioma do gTTS", value=f"`{resolved.get('gtts_language', resolved.get('language', 'Não definido'))}`", inline=True)
     embed.add_field(name="Velocidade do Edge", value=f"`{resolved.get('edge_rate', resolved.get('rate', '+0%'))}`", inline=True)
     embed.add_field(name="Tom do Edge", value=f"`{resolved.get('edge_pitch', resolved.get('pitch', '+0Hz'))}`", inline=True)
+    embed.add_field(name="Prefixo do ATTS", value=f"`{guild_defaults.get('atts_prefix', '%')}`", inline=True)
+    teto_prefix = str(guild_defaults.get("teto_prefix") or "'")
+    embed.add_field(name="Prefixo da Kasane Teto", value=f"`{teto_prefix}`", inline=True)
     embed.add_field(name="Prefixo do modo gTTS", value=f"`{guild_defaults.get('gtts_prefix', guild_defaults.get('tts_prefix', '.'))}`", inline=True)
     embed.add_field(name="Prefixo do modo Edge", value=f"`{guild_defaults.get('edge_prefix', ',')}`", inline=True)
     if not server and spoken_name_text is not None:

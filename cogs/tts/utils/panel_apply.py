@@ -1,6 +1,7 @@
 import discord
 
 from ..common import validate_mode
+from ..prefix import validate_prefix_values
 
 async def _apply_server_prefix_from_modal(
     cog,
@@ -38,19 +39,56 @@ async def _apply_server_prefix_from_modal(
         return
 
     cleaned = cleaned[:8]
+    defaults = dict(db.get_guild_tts_defaults(interaction.guild.id) or {})
+    proposed = {
+        "bot_prefix": str(defaults.get("bot_prefix") or "_"),
+        "atts_prefix": str(defaults.get("atts_prefix") or "%"),
+        "teto_prefix": str(defaults.get("teto_prefix") or "'"),
+        "edge_prefix": str(defaults.get("edge_prefix") or ","),
+        "gtts_prefix": str(defaults.get("gtts_prefix") or defaults.get("tts_prefix") or "."),
+    }
+    target_key = "gtts_prefix" if prefix_kind not in {"bot", "atts", "teto", "edge"} else f"{prefix_kind}_prefix"
+    proposed[target_key] = cleaned
+    migration_updates = {}
+    if prefix_kind != "gtts":
+        occupied_without_gtts = {
+            proposed["bot_prefix"],
+            proposed["atts_prefix"],
+            proposed["teto_prefix"],
+            proposed["edge_prefix"],
+        }
+        if proposed["gtts_prefix"] in occupied_without_gtts:
+            replacement = next(
+                (candidate for candidate in (".", "!", ";", "~", "?") if candidate not in occupied_without_gtts),
+                ".",
+            )
+            proposed["gtts_prefix"] = replacement
+            migration_updates = {"gtts_prefix": replacement, "tts_prefix": replacement}
+    valid, validation_error = validate_prefix_values(**proposed)
+    if not valid:
+        await interaction.response.send_message(
+            embed=cog._make_embed("Prefixo inválido", validation_error, ok=False),
+            ephemeral=True,
+        )
+        return
 
     if prefix_kind == "bot":
-        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, bot_prefix=cleaned))
+        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, bot_prefix=cleaned, **migration_updates))
         desc = f"O prefixo do bot do servidor agora é `{cleaned}`"
         history_entry = cog._server_history_text(interaction, "o prefixo dos comandos", cog._quote_value(cleaned))
         title = "Prefixo do bot atualizado"
     elif prefix_kind == "atts":
-        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, atts_prefix=cleaned))
+        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, atts_prefix=cleaned, **migration_updates))
         desc = f"O prefixo do ATTS do servidor agora é `{cleaned}`"
         history_entry = cog._server_history_text(interaction, "o prefixo do ATTS", cog._quote_value(cleaned))
         title = "Prefixo do ATTS atualizado"
+    elif prefix_kind == "teto":
+        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, teto_prefix=cleaned, **migration_updates))
+        desc = f"O prefixo da Kasane Teto do servidor agora é `{cleaned}`"
+        history_entry = cog._server_history_text(interaction, "o prefixo da Kasane Teto", cog._quote_value(cleaned))
+        title = "Prefixo da Kasane Teto atualizado"
     elif prefix_kind == "edge":
-        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, edge_prefix=cleaned))
+        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, edge_prefix=cleaned, **migration_updates))
         desc = f"O prefixo do modo Edge do servidor agora é `{cleaned}`"
         history_entry = cog._server_history_text(interaction, "o prefixo do modo Edge", cog._quote_value(cleaned))
         title = "Prefixo do modo Edge atualizado"
@@ -129,7 +167,7 @@ async def _apply_mode_from_panel(cog, interaction: discord.Interaction, mode: st
     effective_user_id, effective_user_name, is_public_user_panel = cog._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
     if server:
         await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, engine=value))
-        desc = f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge e gTTS continuam escolhendo o motor por mensagem."
+        desc = f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Kasane Teto, Edge e gTTS continuam escolhendo o motor por mensagem."
         history_entry = cog._server_history_text(interaction, "o modo padrão do servidor", value)
         await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
         cog._append_public_panel_history(message_id, history_entry)
@@ -137,7 +175,7 @@ async def _apply_mode_from_panel(cog, interaction: discord.Interaction, mode: st
     else:
         history_entry = cog._user_history_text(interaction, "o próprio modo" if effective_user_id == interaction.user.id else "o modo", value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
         await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, engine=value, history_entry=history_entry)
-        desc = f"O modo de TTS de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge e gTTS continuam escolhendo o motor por mensagem."
+        desc = f"O modo de TTS de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Kasane Teto, Edge e gTTS continuam escolhendo o motor por mensagem."
         cog._append_public_panel_history(message_id, history_entry)
         last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get("user_last_changes", []) or [])
 

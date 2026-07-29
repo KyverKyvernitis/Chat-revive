@@ -2,7 +2,7 @@
 
 Tem dois tipos de prefixo aqui:
 - prefixo do BOT (`_join`, `_leave`, `_help` etc) — comandos de controle
-- prefixo de FALA (`%`, `,`, `.`) — escolhe a engine de TTS pra essa mensagem
+- prefixo de FALA (`%`, `'`, `,`, `.`) — escolhe a engine de TTS pra essa mensagem
 
 Cada guild pode customizar todos os prefixos via painel de servidor; este
 módulo só aplica e devolve a decisão pro cog principal executar.
@@ -26,15 +26,28 @@ class PrefixControlCommand:
 class PrefixRoutingConfig:
     bot_prefix: str
     atts_prefix: str
+    teto_prefix: str
     gtts_prefix: str
     edge_prefix: str
-def build_prefix_routing_config(guild_defaults: dict[str, Any] | None, *, bot_prefix_default: str, atts_prefix_default: str = "%") -> PrefixRoutingConfig:
+
+    def speech_prefixes(self) -> tuple[str, ...]:
+        return (self.atts_prefix, self.teto_prefix, self.edge_prefix, self.gtts_prefix)
+
+
+def build_prefix_routing_config(
+    guild_defaults: dict[str, Any] | None,
+    *,
+    bot_prefix_default: str,
+    atts_prefix_default: str = "%",
+    teto_prefix_default: str = "'",
+) -> PrefixRoutingConfig:
     # Cada prefixo tem um fallback hardcoded — usado quando a guild ainda
     # não configurou nada ou o doc tá faltando o campo.
     defaults = guild_defaults or {}
     return PrefixRoutingConfig(
         bot_prefix=str(defaults.get("bot_prefix", bot_prefix_default) or bot_prefix_default),
         atts_prefix=str(defaults.get("atts_prefix", atts_prefix_default) or atts_prefix_default),
+        teto_prefix=str(defaults.get("teto_prefix", teto_prefix_default) or teto_prefix_default),
         gtts_prefix=str(defaults.get("gtts_prefix", defaults.get("tts_prefix", ".")) or "."),
         edge_prefix=str(defaults.get("edge_prefix", ",") or ","),
     )
@@ -89,16 +102,55 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
     return None
 
 
-def match_engine_prefix(content: str, *, atts_prefix: str, edge_prefix: str, gtts_prefix: str) -> tuple[str | None, str | None]:
-    # Ordem importa: ATTS primeiro porque % é a engine rápida principal; depois
-    # Edge/gTTS preservam o comportamento antigo e evitam overlap.
+def _clean_configurable_prefix(value: object) -> str:
+    return str(value or "").strip()[:8]
+
+
+def validate_prefix_values(*, bot_prefix: object, atts_prefix: object, teto_prefix: object, edge_prefix: object, gtts_prefix: object) -> tuple[bool, str]:
+    values = {
+        "bot": _clean_configurable_prefix(bot_prefix),
+        "ATTS": _clean_configurable_prefix(atts_prefix),
+        "Kasane Teto": _clean_configurable_prefix(teto_prefix),
+        "Edge": _clean_configurable_prefix(edge_prefix),
+        "gTTS": _clean_configurable_prefix(gtts_prefix),
+    }
+    empty = [label for label, value in values.items() if not value]
+    if empty:
+        return False, f"O prefixo de {empty[0]} não pode ficar vazio."
+    for label, value in values.items():
+        if any(char.isspace() for char in value) or any(ord(char) < 33 for char in value):
+            return False, f"O prefixo de {label} não pode conter espaços ou caracteres invisíveis."
+    seen: dict[str, str] = {}
+    for label, value in values.items():
+        other = seen.get(value)
+        if other:
+            return False, f"Os prefixos de {other} e {label} não podem ser iguais (`{value}`)."
+        seen[value] = label
+    return True, ""
+
+
+def match_engine_prefix(
+    content: str,
+    *,
+    atts_prefix: str,
+    teto_prefix: str = "'",
+    edge_prefix: str,
+    gtts_prefix: str,
+) -> tuple[str | None, str | None]:
+    # Prefixos maiores são testados primeiro para evitar que um prefixo curto
+    # capture configurações de vários caracteres. A ordem abaixo só desempata
+    # tamanhos iguais e preserva o ATTS como primeira engine histórica.
     text = str(content or "")
-    if atts_prefix and text.startswith(atts_prefix):
-        return "android_native", atts_prefix
-    if edge_prefix and text.startswith(edge_prefix):
-        return "edge", edge_prefix
-    if gtts_prefix and text.startswith(gtts_prefix):
-        return "gtts", gtts_prefix
+    candidates = [
+        ("android_native", str(atts_prefix or "")),
+        ("teto", str(teto_prefix or "")),
+        ("edge", str(edge_prefix or "")),
+        ("gtts", str(gtts_prefix or "")),
+    ]
+    candidates.sort(key=lambda item: len(item[1]), reverse=True)
+    for engine, prefix in candidates:
+        if prefix and text.startswith(prefix):
+            return engine, prefix
     return None, None
 
 

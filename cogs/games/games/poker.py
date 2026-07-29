@@ -604,6 +604,7 @@ class GincanaPokerMixin:
         await self._persist_poker_player_stack(game.guild_id, winner_id, normal=game.stack_normal.get(winner_id, 0), bonus=game.stack_bonus.get(winner_id, 0), reason="Vitória no poker")
         await self._persist_poker_player_stack(game.guild_id, loser_id, normal=game.stack_normal.get(loser_id, 0), bonus=game.stack_bonus.get(loser_id, 0), reason="Derrota no poker")
         await self._record_poker_result(game.guild_id, winner_id, loser_id)
+        first_game_user_ids = await self._unlock_first_game_for_users(game.guild_id, game.players)
         await self._disable_poker_views(game)
         if game.status_message is not None:
             try:
@@ -630,6 +631,8 @@ class GincanaPokerMixin:
                 )
             except Exception:
                 pass
+        achievement_channel = getattr(game.status_message, "channel", None) or guild.get_channel(game.channel_id)
+        await self._send_first_game_notices(achievement_channel, game.guild_id, first_game_user_ids)
 
     async def _finish_poker_game(self, game: PokerGame):
         self._touch_poker_game(game)
@@ -673,6 +676,7 @@ class GincanaPokerMixin:
             await self._record_poker_result(game.guild_id, player_b.id, player_a.id)
         else:
             await self._record_poker_round(game.guild_id, player_a.id, player_b.id)
+        first_game_user_ids = await self._unlock_first_game_for_users(game.guild_id, game.players)
 
         payout_map = {
             player_a.id: game.pot if outcome > 0 else (game.pot // 2 if outcome == 0 else 0),
@@ -756,6 +760,8 @@ class GincanaPokerMixin:
                 )
             except Exception:
                 pass
+        achievement_channel = getattr(game.status_message, "channel", None) or guild.get_channel(game.channel_id)
+        await self._send_first_game_notices(achievement_channel, game.guild_id, first_game_user_ids)
 
     async def _update_poker_dm(self, game: PokerGame, player_id: int):
         self._touch_poker_game(game)

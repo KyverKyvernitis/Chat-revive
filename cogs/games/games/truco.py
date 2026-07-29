@@ -1006,6 +1006,7 @@ class GincanaTrucoMixin:
             game.status = "finished"
             await self._truco_release_game(game)
 
+        first_game_user_ids = await self._unlock_first_game_for_users(game.guild_id, game.players)
         guild = self.bot.get_guild(game.guild_id)
         winner_text = self._truco_member_mention(guild, winner_id)
         loser_text = self._truco_member_mention(guild, loser_id)
@@ -1065,6 +1066,10 @@ class GincanaTrucoMixin:
         if not delivered and public_race_notices:
             self._queue_private_race_notices(game.guild_id, owner_id, public_race_notices)
         await self._truco_refresh_private_views(game)
+        achievement_channel = getattr(game.status_message, "channel", None)
+        if achievement_channel is None and guild is not None:
+            achievement_channel = guild.get_channel(game.channel_id)
+        await self._send_first_game_notices(achievement_channel, game.guild_id, first_game_user_ids)
 
     async def _expire_truco_invite(self, game: TrucoGame):
         lock = self._truco_get_play_lock(game)

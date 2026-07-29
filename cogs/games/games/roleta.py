@@ -1656,7 +1656,18 @@ class GincanaRoletaMixin:
                     current_jackpot=self._current_roleta_dynamic_jackpot(guild.id),
                     result_delta=self._current_game_chip_total(guild.id, actor.id) - round_start_total,
                 )
+            first_game_unlocked = await self._unlock_achievement(guild.id, actor.id, "first_game")
+            roulette_achievements = await self._record_roulette_achievement_result(
+                guild.id,
+                actor.id,
+                jackpot=result_kind in {"jackpot", "jackpot_mega"},
+                lost=result_kind == "loss",
+            )
             await self._deliver_game_result(source_message, spin_message, view=result_view)
+            if first_game_unlocked:
+                await self._send_achievement_notice(source_message.channel, guild.id, actor.id, "first_game")
+            for achievement_key in roulette_achievements:
+                await self._send_achievement_notice(source_message.channel, guild.id, actor.id, achievement_key)
             return True
 
         async def _execute_carta_round(
@@ -1794,7 +1805,18 @@ class GincanaRoletaMixin:
                 gross_payout=gross_payout,
                 result_delta=self._current_game_chip_total(guild.id, actor.id) - round_start_total,
             )
+            first_game_unlocked = await self._unlock_achievement(guild.id, actor.id, "first_game")
+            roulette_achievements = await self._record_roulette_achievement_result(
+                guild.id,
+                actor.id,
+                jackpot=result_kind == "jackpot",
+                lost=result_kind == "loss",
+            )
             await self._deliver_game_result(source_message, spin_message, view=result_view)
+            if first_game_unlocked:
+                await self._send_achievement_notice(source_message.channel, guild.id, actor.id, "first_game")
+            for achievement_key in roulette_achievements:
+                await self._send_achievement_notice(source_message.channel, guild.id, actor.id, achievement_key)
             return True
         async def _run_carta_trigger_locked(self, message: discord.Message) -> bool:
             guild = message.guild
@@ -1872,6 +1894,12 @@ class GincanaRoletaMixin:
                     except Exception:
                         pass
                     return True
+                await self._unlock_and_send_achievement(
+                    message.channel,
+                    guild.id,
+                    message.author.id,
+                    "lets_go_gambling",
+                )
                 await self._execute_carta_round(
                     source_message=message,
                     guild=guild,
@@ -1980,6 +2008,12 @@ class GincanaRoletaMixin:
                         pass
                     return True
                 self._mark_roleta_trigger_used(guild.id, message.author.id)
+                await self._unlock_and_send_achievement(
+                    message.channel,
+                    guild.id,
+                    message.author.id,
+                    "lets_go_gambling",
+                )
                 await self._execute_roleta_round(
                     source_message=message,
                     guild=guild,

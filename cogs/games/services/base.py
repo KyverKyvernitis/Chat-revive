@@ -130,6 +130,7 @@ class GincanaBase:
         self._truco_guild_sessions: dict[int, set[str]] = {}
         self._gincana_message_edit_locks: dict[int, asyncio.Lock] = {}
         self._race_progress_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._achievement_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._race_private_notices: dict[tuple[int, int], list[str]] = {}
 
 
@@ -715,67 +716,249 @@ class GincanaBase:
         )
 
     async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
-        await self._set_user_chips_value(guild_id, user_id, int(amount), mark_activity=True)
-        await self.db.set_user_bonus_chips(guild_id, user_id, 0)
-        doc = self.db._get_user_doc(guild_id, user_id)
-        doc["last_chip_reset_at"] = 0.0
-        doc["chip_recharge_manual_initialized"] = False
-        doc.pop("race_key", None)
-        doc.pop("race_active", None)
-        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses", "race_state"):
-            doc.pop(field, None)
-        await self.db._save_user_doc(guild_id, user_id, doc)
-        return int(amount)
+        async with self._achievement_lock(guild_id, user_id):
+            await self._set_user_chips_value(guild_id, user_id, int(amount), mark_activity=True)
+            await self.db.set_user_bonus_chips(guild_id, user_id, 0)
+            doc = self.db._get_user_doc(guild_id, user_id)
+            doc["last_chip_reset_at"] = 0.0
+            doc["chip_recharge_manual_initialized"] = False
+            doc.pop("race_key", None)
+            doc.pop("race_active", None)
+            doc.pop("game_achievements", None)
+            for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses", "race_state"):
+                doc.pop(field, None)
+            await self.db._save_user_doc(guild_id, user_id, doc)
+            await self.db.clear_user_game_achievements(guild_id, user_id)
+            return int(amount)
 
     async def _force_full_reset_ficha_profile(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
-        doc = self.db._get_user_doc(guild_id, user_id)
-        doc["chips"] = int(amount)
-        doc["bonus_chips"] = 0
-        doc["last_chip_reset_at"] = 0.0
-        doc["chip_recharge_manual_initialized"] = False
-        doc["daily_last_claim_key"] = ""
-        doc["daily_streak"] = 0
-        doc["weekly_points_week"] = ""
-        doc["weekly_points"] = 0
-        doc["game_stats"] = {}
-        doc["has_chip_activity"] = False
-        doc.pop("race_key", None)
-        doc.pop("race_active", None)
-        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses", "race_state"):
-            doc.pop(field, None)
-        await self.db._save_user_doc(guild_id, user_id, doc)
-        return int(doc["chips"])
+        async with self._achievement_lock(guild_id, user_id):
+            doc = self.db._get_user_doc(guild_id, user_id)
+            doc["chips"] = int(amount)
+            doc["bonus_chips"] = 0
+            doc["last_chip_reset_at"] = 0.0
+            doc["chip_recharge_manual_initialized"] = False
+            doc["daily_last_claim_key"] = ""
+            doc["daily_streak"] = 0
+            doc["weekly_points_week"] = ""
+            doc["weekly_points"] = 0
+            doc["game_stats"] = {}
+            doc["has_chip_activity"] = False
+            doc.pop("race_key", None)
+            doc.pop("race_active", None)
+            doc.pop("game_achievements", None)
+            for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses", "race_state"):
+                doc.pop(field, None)
+            await self.db._save_user_doc(guild_id, user_id, doc)
+            await self.db.clear_user_game_achievements(guild_id, user_id)
+            return int(doc["chips"])
 
     def _iter_active_chip_user_ids(self, guild_id: int) -> list[int]:
-        return list(self.db.get_chip_activity_user_ids(guild_id))
+        user_ids = {int(user_id) for user_id in self.db.get_chip_activity_user_ids(guild_id)}
+        for (stored_guild_id, user_id), doc in list(self.db.user_cache.items()):
+            if int(stored_guild_id) != int(guild_id):
+                continue
+            achievement_data = doc.get("game_achievements") or {}
+            unlocked = achievement_data.get("unlocked") or {}
+            if isinstance(unlocked, dict) and unlocked:
+                user_ids.add(int(user_id))
+        return sorted(user_ids)
 
-    def _achievement_catalog(self) -> list[dict]:
-        return [
-            {"key": "first_game", "name": "🎉 Primeiro sangue", "check": lambda chips, stats, weekly: stats.get("games_played", 0) >= 1},
-            {"key": "sortudo", "name": "🎰 Sortudo", "check": lambda chips, stats, weekly: stats.get('roleta_jackpots', 0) >= 1},
-            {"key": "na_mosca", "name": "🎯 Na mosca", "check": lambda chips, stats, weekly: stats.get('alvo_bullseyes', 0) >= 1},
-            {"key": "sobrevivente", "name": "💥 Sobrevivente", "check": lambda chips, stats, weekly: stats.get('buckshot_survivals', 0) >= 1},
-            {"key": "veterano", "name": "🧩 Veterano", "check": lambda chips, stats, weekly: stats.get("games_played", 0) >= 25},
-            {"key": "rico", "name": "💰 Rico", "check": lambda chips, stats, weekly: chips >= 400},
-            {"key": "rei_alvo", "name": "🏹 Rei do alvo", "check": lambda chips, stats, weekly: stats.get('alvo_wins', 0) >= 5},
-            {"key": "mesa_quente", "name": "🃏 Mesa quente", "check": lambda chips, stats, weekly: stats.get('poker_wins', 0) >= 3},
-            {"key": "teimoso", "name": "😤 Teimoso", "check": lambda chips, stats, weekly: (stats.get('poker_losses', 0) + stats.get('buckshot_eliminations', 0)) >= 10},
-            {"key": "embalado", "name": "📈 Embalado", "check": lambda chips, stats, weekly: weekly >= 100},
-        ]
+    def _achievement_catalog(self) -> dict[str, dict[str, str]]:
+        return {
+            "first_game": {
+                "name": "O começo",
+                "emoji": "🏆",
+                "description": "{mention} concluiu uma partida pela primeira vez.",
+            },
+            "lets_go_gambling": {
+                "name": "Let's go gambling!",
+                "emoji": "🎰",
+                "description": "{mention} girou uma roleta pela primeira vez.",
+            },
+            "roulette_first_loss": {
+                "name": "aw dang it...",
+                "emoji": "💥",
+                "description": "{mention} perdeu em uma roleta pela primeira vez.",
+            },
+            "roulette_first_jackpot": {
+                "name": "I won... I actually won!",
+                "emoji": "🍀",
+                "description": "{mention} conseguiu seu primeiro jackpot.",
+            },
+            "roulette_double_jackpot": {
+                "name": "I CAN'T STOP WINNING",
+                "emoji": "🔥",
+                "description": "{mention} conseguiu dois jackpots seguidos.",
+            },
+            "target_bullseye": {
+                "name": "Na mosca",
+                "emoji": "🎯",
+                "description": "{mention} acertou exatamente o centro do alvo.",
+            },
+        }
+
+    def _achievement_lock(self, guild_id: int, user_id: int) -> asyncio.Lock:
+        key = (int(guild_id), int(user_id))
+        lock = self._achievement_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._achievement_locks[key] = lock
+        return lock
+
+    def _normalize_game_achievements(self, raw: object) -> dict:
+        source = raw if isinstance(raw, dict) else {}
+        unlocked_source = source.get("unlocked") if isinstance(source.get("unlocked"), dict) else {}
+        unlocked: dict[str, dict[str, float]] = {}
+        catalog = self._achievement_catalog()
+        for key, value in unlocked_source.items():
+            key_text = str(key or "")
+            if key_text not in catalog:
+                continue
+            value_map = value if isinstance(value, dict) else {}
+            try:
+                unlocked_at = float(value_map.get("unlocked_at", 0.0) or 0.0)
+            except Exception:
+                unlocked_at = 0.0
+            unlocked[key_text] = {"unlocked_at": max(0.0, unlocked_at)}
+        try:
+            jackpot_streak = max(0, int(source.get("roulette_jackpot_streak", 0) or 0))
+        except Exception:
+            jackpot_streak = 0
+        return {
+            "schema_version": 1,
+            "unlocked": unlocked,
+            "roulette_jackpot_streak": min(2, jackpot_streak),
+        }
+
+    def _get_unlocked_achievement_keys(self, guild_id: int, user_id: int) -> list[str]:
+        doc = self.db.user_cache.get((int(guild_id), int(user_id)), {})
+        state = self._normalize_game_achievements(doc.get("game_achievements"))
+        unlocked = state["unlocked"]
+        return sorted(
+            unlocked,
+            key=lambda key: (float(unlocked[key].get("unlocked_at", 0.0) or 0.0), key),
+        )
 
     def _get_unlocked_achievements(self, guild_id: int, user_id: int) -> list[str]:
-        chips = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
-        bonus = self._get_user_bonus_chips(guild_id, user_id)
-        stats = self.db.get_user_game_stats(guild_id, user_id)
-        weekly = self.db.get_user_weekly_points(guild_id, user_id)
-        unlocked = []
-        for item in self._achievement_catalog():
-            try:
-                if item["check"](chips, stats, weekly):
-                    unlocked.append(str(item["name"]))
-            except Exception:
-                pass
+        catalog = self._achievement_catalog()
+        return [
+            f"{catalog[key]['emoji']} {catalog[key]['name']}"
+            for key in self._get_unlocked_achievement_keys(guild_id, user_id)
+            if key in catalog
+        ]
+
+    async def _unlock_achievement(self, guild_id: int, user_id: int, achievement_key: str) -> bool:
+        key = str(achievement_key or "").strip()
+        if key not in self._achievement_catalog():
+            return False
+        async with self._achievement_lock(guild_id, user_id):
+            doc = self.db._get_user_doc(guild_id, user_id)
+            state = self._normalize_game_achievements(doc.get("game_achievements"))
+            if key in state["unlocked"]:
+                return False
+            state["unlocked"][key] = {"unlocked_at": float(time.time())}
+            doc["game_achievements"] = state
+            await self.db._save_user_doc(guild_id, user_id, doc)
+            return True
+
+    async def _record_roulette_achievement_result(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        jackpot: bool,
+        lost: bool,
+    ) -> list[str]:
+        unlocked_now: list[str] = []
+        async with self._achievement_lock(guild_id, user_id):
+            doc = self.db._get_user_doc(guild_id, user_id)
+            state = self._normalize_game_achievements(doc.get("game_achievements"))
+            unlocked = state["unlocked"]
+            now = float(time.time())
+
+            if jackpot:
+                state["roulette_jackpot_streak"] = min(2, int(state["roulette_jackpot_streak"]) + 1)
+                if "roulette_first_jackpot" not in unlocked:
+                    unlocked["roulette_first_jackpot"] = {"unlocked_at": now}
+                    unlocked_now.append("roulette_first_jackpot")
+                if state["roulette_jackpot_streak"] >= 2 and "roulette_double_jackpot" not in unlocked:
+                    unlocked["roulette_double_jackpot"] = {"unlocked_at": now}
+                    unlocked_now.append("roulette_double_jackpot")
+            else:
+                state["roulette_jackpot_streak"] = 0
+                if lost and "roulette_first_loss" not in unlocked:
+                    unlocked["roulette_first_loss"] = {"unlocked_at": now}
+                    unlocked_now.append("roulette_first_loss")
+
+            doc["game_achievements"] = state
+            await self.db._save_user_doc(guild_id, user_id, doc)
+        return unlocked_now
+
+    def _make_achievement_view(self, achievement_key: str, mention: str) -> discord.ui.LayoutView | None:
+        item = self._achievement_catalog().get(str(achievement_key or ""))
+        if item is None:
+            return None
+        description = str(item["description"]).format(mention=str(mention or "Alguém"))
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# {item['emoji']} {item['name']}\n-# {description}"),
+            accent_color=discord.Color.gold(),
+        ))
+        return view
+
+    async def _send_achievement_notice(
+        self,
+        channel,
+        guild_id: int,
+        user_id: int,
+        achievement_key: str,
+    ) -> bool:
+        if channel is None or not hasattr(channel, "send"):
+            guild = self.bot.get_guild(int(guild_id)) if getattr(self, "bot", None) is not None else None
+            channel = self._get_gincana_channel(guild) if guild is not None else None
+        if channel is None or not hasattr(channel, "send"):
+            return False
+        mention = f"<@{int(user_id)}>"
+        view = self._make_achievement_view(achievement_key, mention)
+        if view is None:
+            return False
+        try:
+            await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+            return True
+        except Exception:
+            return False
+
+    async def _unlock_and_send_achievement(
+        self,
+        channel,
+        guild_id: int,
+        user_id: int,
+        achievement_key: str,
+    ) -> bool:
+        unlocked = await self._unlock_achievement(guild_id, user_id, achievement_key)
+        if unlocked:
+            await self._send_achievement_notice(channel, guild_id, user_id, achievement_key)
         return unlocked
+
+    async def _unlock_first_game_for_users(self, guild_id: int, user_ids) -> list[int]:
+        unlocked_user_ids: list[int] = []
+        seen: set[int] = set()
+        for raw_user_id in user_ids:
+            try:
+                user_id = int(raw_user_id)
+            except (TypeError, ValueError):
+                continue
+            if user_id <= 0 or user_id in seen:
+                continue
+            seen.add(user_id)
+            if await self._unlock_achievement(guild_id, user_id, "first_game"):
+                unlocked_user_ids.append(user_id)
+        return unlocked_user_ids
+
+    async def _send_first_game_notices(self, channel, guild_id: int, user_ids) -> None:
+        for user_id in user_ids:
+            await self._send_achievement_notice(channel, guild_id, int(user_id), "first_game")
 
     async def _grant_weekly_points(self, guild_id: int, user_id: int, amount: int):
         if amount > 0:
@@ -2087,6 +2270,9 @@ class GincanaBase:
             balance_lines.append(rank_text)
         balance_lines.append(f"🎁 **Diário**: {self._daily_bonus_text(guild_id, member.id)}")
         balance_lines.append(f"⏳ **Recarga**: {self._chip_recharge_compact_text(guild_id, member.id)}")
+        achievements = self._get_unlocked_achievements(guild_id, member.id)
+        if achievements:
+            balance_lines.append(f"🏆 **Conquistas:** {' • '.join(achievements)}")
         if not race_identity:
             balance_lines.append("**🧬 Raça:** Use **race** pra definir sua raça")
         if chips < 0:

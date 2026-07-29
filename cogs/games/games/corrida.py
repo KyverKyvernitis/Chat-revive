@@ -1539,6 +1539,10 @@ class GincanaCorridaMixin:
             )
         public_race_notices = self._clean_race_notices(public_race_notices)
 
+        first_game_user_ids = await self._unlock_first_game_for_users(
+            guild.id,
+            [member.id for member in final_order],
+        )
         session["starting"] = False
         result_limit = max(0, 20 - len(public_race_notices))
         session["result_lines"] = result_lines[:result_limit] + public_race_notices[:20]
@@ -1553,6 +1557,11 @@ class GincanaCorridaMixin:
                 session["message"] = None
         if public_race_notices and not result_delivered:
             self._queue_private_race_notices(guild.id, owner_id, public_race_notices)
+        achievement_channel = (
+            getattr(message, "channel", None)
+            or guild.get_channel(int(session.get("text_channel_id", 0) or 0))
+        )
+        await self._send_first_game_notices(achievement_channel, guild.id, first_game_user_ids)
 
         self._race_sessions.pop(guild_id, None)
         return True

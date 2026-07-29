@@ -888,6 +888,10 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             if public_race_notices:
                 lines.extend(public_race_notices)
 
+            first_game_user_ids = await self._unlock_first_game_for_users(
+                guild.id,
+                [member.id for member in eligible],
+            )
             result_delivered = False
             if lobby_message is not None:
                 final_view = _BuckshotLobbyClosedView(
@@ -899,6 +903,11 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 result_delivered = edit_state in {'ok', 'skipped'}
             if public_race_notices and not result_delivered:
                 self._queue_private_race_notices(guild.id, owner_id, public_race_notices)
+            achievement_channel = (
+                getattr(lobby_message, "channel", None)
+                or guild.get_channel(int(session.get("text_channel_id", 0) or 0))
+            )
+            await self._send_first_game_notices(achievement_channel, guild.id, first_game_user_ids)
             current = self._buckshot_sessions.get(guild_id)
             if current is session:
                 self._buckshot_sessions.pop(guild_id, None)

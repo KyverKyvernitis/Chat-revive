@@ -139,12 +139,12 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
             custom_id="games_chip_admin_reset_user_confirm",
             default=False,
         )
-        self.add_item(_modal_label("Usuário", self.target_select, "Fichas, bônus e raça serão reiniciados."))
+        self.add_item(_modal_label("Usuário", self.target_select, "Fichas, bônus, raça e conquistas serão reiniciados."))
         self.add_item(
             _modal_label(
                 "Confirmar reset",
                 self.confirm_checkbox,
-                "Restaura fichas, bônus e raça do usuário.",
+                "Restaura fichas, bônus, raça e conquistas do usuário.",
             )
         )
 
@@ -312,7 +312,7 @@ class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
             _modal_label(
                 "Confirmar reset do servidor",
                 self.confirm_checkbox,
-                "Apaga fichas, raças e progresso de todos os perfis ativos.",
+                "Apaga fichas, raças, conquistas e progresso de todos os perfis ativos.",
             )
         )
 

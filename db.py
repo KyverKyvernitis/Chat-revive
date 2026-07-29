@@ -902,6 +902,18 @@ class SettingsDB:
             upsert=True,
         )
 
+    async def clear_user_game_achievements(self, guild_id: int, user_id: int) -> None:
+        key = (int(guild_id), int(user_id))
+        cached = dict(self.user_cache.get(key, {}))
+        cached.pop("game_achievements", None)
+        if cached:
+            self.user_cache[key] = cached
+        await self.coll.update_one(
+            {"type": "user", "guild_id": int(guild_id), "user_id": int(user_id)},
+            {"$unset": {"game_achievements": ""}},
+            upsert=False,
+        )
+
     def get_user_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
         u = self.user_cache.get((guild_id, user_id), {})
         tts = u.get("tts", {}) or {}
@@ -2066,7 +2078,10 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
             "race_robbery_uses": 0,
             "race_mendigar_window_started_at": 0.0,
             "race_mendigar_uses": 0,
-        }
+        },
+        "$unset": {
+            "game_achievements": "",
+        },
     }
     await self.coll.update_many({"type": "user", "guild_id": guild_id}, update_payload)
     affected = 0
@@ -2097,6 +2112,7 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         updated["race_robbery_uses"] = 0
         updated["race_mendigar_window_started_at"] = 0.0
         updated["race_mendigar_uses"] = 0
+        updated.pop("game_achievements", None)
         self.user_cache[key] = updated
         affected += 1
     return affected

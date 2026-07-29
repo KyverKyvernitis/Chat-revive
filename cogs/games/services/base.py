@@ -1854,6 +1854,19 @@ class GincanaBase:
             if note not in target:
                 target.append(note)
 
+    @staticmethod
+    def _identify_public_race_notice(user_id: int, note: str) -> str:
+        text = str(note or "").strip()
+        if not text:
+            return ""
+        mention = f"<@{int(user_id)}>"
+        if mention in text:
+            return text
+        emoji, separator, detail = text.partition(" ")
+        if separator and detail:
+            return f"{emoji} {mention} — {detail}"
+        return f"{mention} — {text}"
+
     def _take_private_race_notices(self, guild_id: int, user_id: int) -> list[str]:
         return list(self._race_private_notices.pop((int(guild_id), int(user_id)), []))
 
@@ -1976,7 +1989,8 @@ class GincanaBase:
         if not clean:
             return True
         if int(owner_id or 0) > 0 and int(user_id) == int(owner_id):
-            self._append_public_race_notices(public_notes, clean)
+            identified = [self._identify_public_race_notice(user_id, note) for note in clean]
+            self._append_public_race_notices(public_notes, identified)
             return True
         return await self._deliver_or_queue_private_race_notices(
             interaction,

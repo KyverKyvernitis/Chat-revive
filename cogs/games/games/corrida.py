@@ -31,29 +31,29 @@ _RACE_PLANS = {
     "equilibrado": {
         "name": "Equilibrado",
         "emoji": "⚖️",
-        "description": "Mantém um ritmo constante, sem vantagens nem riscos extras.",
+        "description": "Mantém um ritmo constante, sem vantagens ou penalidades.",
         "trip": 0.0,
         "speed": 0.0,
     },
     "forcar_ritmo": {
-        "name": "Forçar o ritmo",
+        "name": "Ritmaníaco",
         "emoji": "⚡",
-        "description": "Avança mais a cada rodada, mas tropeça com maior frequência.",
+        "description": "Corre mais rápido, mas tropeça com mais frequência.",
         "trip": 0.04,
         "speed": 0.10,
     },
     "conducao_tecnica": {
-        "name": "Condução técnica",
+        "name": "Condução",
         "emoji": "🛡️",
-        "description": "Reduz tropeços e suaviza quedas, em troca de um ritmo menor.",
+        "description": "Tropeça menos e perde menos ritmo quando isso acontece.",
         "trip": -0.02,
         "speed": -0.06,
         "trip_move": 0.24,
     },
     "guardar_folego": {
-        "name": "Guardar fôlego",
+        "name": "Charge",
         "emoji": "🔥",
-        "description": "Começa mais contido e acelera quando a corrida entra na reta final.",
+        "description": "Poupa força no começo e dispara na reta final.",
         "trip": 0.0,
         "speed": -0.12,
         "final_speed": 0.15,
@@ -545,8 +545,24 @@ class GincanaCorridaMixin:
     def _race_condition_is_wet(self, session: dict) -> bool:
         return str((session.get("condition") or {}).get("key") or "normal") == "wet"
 
-    def _roll_race_plan_key(self) -> str:
-        return random.choice(tuple(_RACE_PLANS))
+    def _draw_race_plan_key(self, session: dict) -> str:
+        """Entrega planos em ciclos embaralhados, sem repetição dentro de cada ciclo."""
+        deck = session.setdefault("_plan_deck", [])
+        if not deck:
+            deck.extend(_RACE_PLANS)
+            random.shuffle(deck)
+
+            last_plan_key = str(session.get("_last_plan_key") or "")
+            if last_plan_key and len(deck) > 1 and deck[0] == last_plan_key:
+                swap_index = next(
+                    (index for index, plan_key in enumerate(deck[1:], start=1) if plan_key != last_plan_key),
+                    1,
+                )
+                deck[0], deck[swap_index] = deck[swap_index], deck[0]
+
+        plan_key = str(deck.pop(0))
+        session["_last_plan_key"] = plan_key
+        return plan_key
 
     def _race_plan(self, session: dict, user_id: int) -> dict:
         plan_key = str((session.get("plans") or {}).get(int(user_id)) or "equilibrado")
@@ -555,6 +571,13 @@ class GincanaCorridaMixin:
     def _race_plan_label(self, session: dict, user_id: int) -> str:
         plan = self._race_plan(session, user_id)
         return f"{plan.get('emoji', '⚖️')} {plan.get('name', 'Equilibrado')}"
+
+    @staticmethod
+    def _race_plan_identity_text(plan: dict) -> str:
+        emoji = str(plan.get("emoji") or "⚖️")
+        name = str(plan.get("name") or "Equilibrado")
+        description = str(plan.get("description") or "Mantém um ritmo constante.")
+        return f"### {emoji} Você é ⋆{name}°\n*{description}*"
 
     def _race_pot_total(self, session: dict) -> int:
         participant_count = len(set(session.get("locked_participants", set()) or []))
@@ -746,8 +769,13 @@ class GincanaCorridaMixin:
 
         locked = session.setdefault("locked_participants", set())
         if user.id in locked:
-            plan_name = self._race_plan_label(session, user.id)
-            await self._send_component_feedback(interaction, f"Você já está participando desta corrida com o plano **{plan_name}**.")
+            plan = self._race_plan(session, user.id)
+            await self._send_race_lobby_feedback(
+                interaction,
+                guild.id,
+                user.id,
+                f"Você já está participando desta corrida.\n\n{self._race_plan_identity_text(plan)}",
+            )
             return
         if len(locked) >= CORRIDA_MAX_PARTICIPANTS:
             await self._send_component_feedback(interaction, "Essa corrida já atingiu o limite de 6 participantes.")
@@ -760,17 +788,13 @@ class GincanaCorridaMixin:
             interaction,
             guild_id=guild.id,
             expected_session_id=str(session.get("registry_session_id") or ""),
-            plan_key=self._roll_race_plan_key(),
         )
 
-    async def _complete_race_join(self, interaction: discord.Interaction, *, guild_id: int, expected_session_id: str, plan_key: str):
+    async def _complete_race_join(self, interaction: discord.Interaction, *, guild_id: int, expected_session_id: str):
         guild = interaction.guild
         user = interaction.user
         if guild is None or int(guild.id) != int(guild_id) or not isinstance(user, discord.Member):
             await self._send_component_feedback(interaction, "Servidor inválido.")
-            return
-        if plan_key not in _RACE_PLANS:
-            await self._send_component_feedback(interaction, "Plano de corrida inválido.")
             return
         await self._safe_defer_component_interaction(interaction)
 
@@ -797,7 +821,13 @@ class GincanaCorridaMixin:
 
             locked = session.setdefault("locked_participants", set())
             if user.id in locked:
-                await self._send_component_feedback(interaction, "Você já está participando desta corrida.")
+                plan = self._race_plan(session, user.id)
+                await self._send_race_lobby_feedback(
+                    interaction,
+                    guild.id,
+                    user.id,
+                    f"Você já está participando desta corrida.\n\n{self._race_plan_identity_text(plan)}",
+                )
                 return
             if len(locked) >= CORRIDA_MAX_PARTICIPANTS:
                 await self._send_component_feedback(interaction, "Essa corrida já atingiu o limite de 6 participantes.")
@@ -864,6 +894,7 @@ class GincanaCorridaMixin:
                 return
 
             locked.add(user.id)
+            plan_key = self._draw_race_plan_key(session)
             session.setdefault("entry_spend", {})[user.id] = entry_spend
             session.setdefault("race_interactions", {})[user.id] = interaction
             session.setdefault("progress", {})[user.id] = 0.0
@@ -873,7 +904,7 @@ class GincanaCorridaMixin:
 
         plan = _RACE_PLANS[plan_key]
         confirmation = chip_note or entry_text
-        confirmation += f"\n🎯 **Plano sorteado:** {plan['emoji']} {plan['name']}"
+        confirmation += f"\n\n{self._race_plan_identity_text(plan)}"
         await self._send_race_lobby_feedback(interaction, guild.id, user.id, confirmation)
         await self._refresh_race_message(guild.id)
 
@@ -1695,6 +1726,8 @@ class GincanaCorridaMixin:
             "locked_participants": set(),
             "entry_spend": {},
             "plans": {},
+            "_plan_deck": [],
+            "_last_plan_key": "",
             "progress": {},
             "state_map": {},
             "arrival_groups": [],
@@ -1829,7 +1862,7 @@ class GincanaCorridaMixin:
 
         session["locked_participants"].add(owner_id)
         session["entry_spend"][owner_id] = entry_spend
-        session["plans"][owner_id] = self._roll_race_plan_key()
+        session["plans"][owner_id] = self._draw_race_plan_key(session)
         session["progress"][owner_id] = 0.0
         session["state_map"][owner_id] = _HORSE_START
         self._touch_runtime_state(session, kind="corrida", guild_id=guild.id)

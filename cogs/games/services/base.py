@@ -3,6 +3,7 @@ import base64
 import random
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import discord
@@ -105,6 +106,12 @@ class GincanaBase:
     _CHIP_BONUS_EMOJI = "<:laranja:1487076933819830443>"
     _EFFECT_EMOJI = "<:star:1487936913431072780>"
     _MAX_CHIP_DEBT = 100
+    _ACHIEVEMENT_THUMBNAIL_FILENAME = "achievement-unlocked.gif"
+    _ACHIEVEMENT_THUMBNAIL_PATH = (
+        Path(__file__).resolve().parents[1]
+        / "assets"
+        / _ACHIEVEMENT_THUMBNAIL_FILENAME
+    )
 
     def __init__(self, bot: commands.Bot, db: SettingsDB):
         self.bot = bot
@@ -963,6 +970,7 @@ class GincanaBase:
         *,
         unlocked_count: int,
         total_count: int,
+        thumbnail_url: str | None = None,
     ) -> discord.ui.LayoutView | None:
         item = self._achievement_catalog().get(str(achievement_key or ""))
         if item is None:
@@ -975,9 +983,18 @@ class GincanaBase:
             f"{item['emoji']} **{item['name']}**\n"
             f"-# {description}"
         )
+        body = discord.ui.TextDisplay(content)
+        if thumbnail_url:
+            body = discord.ui.Section(
+                body,
+                accessory=discord.ui.Thumbnail(
+                    str(thumbnail_url),
+                    description="Conquista desbloqueada",
+                ),
+            )
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(
-            discord.ui.TextDisplay(content),
+            body,
             accent_color=discord.Color.gold(),
         ))
         return view
@@ -998,16 +1015,58 @@ class GincanaBase:
         if unlocked_count <= 0:
             return False
         mention = f"<@{int(user_id)}>"
+        thumbnail_path = self._ACHIEVEMENT_THUMBNAIL_PATH
+        use_thumbnail = thumbnail_path.is_file()
+        attachment_url = (
+            f"attachment://{self._ACHIEVEMENT_THUMBNAIL_FILENAME}"
+            if use_thumbnail
+            else None
+        )
         view = self._make_achievement_view(
             achievement_key,
             mention,
             unlocked_count=unlocked_count,
             total_count=total_count,
+            thumbnail_url=attachment_url,
         )
         if view is None:
             return False
+
+        if use_thumbnail:
+            image_file = None
+            try:
+                image_file = discord.File(
+                    str(thumbnail_path),
+                    filename=self._ACHIEVEMENT_THUMBNAIL_FILENAME,
+                )
+                await channel.send(
+                    view=view,
+                    file=image_file,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return True
+            except Exception:
+                pass
+            finally:
+                if image_file is not None:
+                    try:
+                        image_file.close()
+                    except Exception:
+                        pass
+
+        fallback_view = self._make_achievement_view(
+            achievement_key,
+            mention,
+            unlocked_count=unlocked_count,
+            total_count=total_count,
+        )
+        if fallback_view is None:
+            return False
         try:
-            await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+            await channel.send(
+                view=fallback_view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return True
         except Exception:
             return False

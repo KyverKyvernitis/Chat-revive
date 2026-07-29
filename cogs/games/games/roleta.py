@@ -2039,6 +2039,10 @@ class GincanaRoletaMixin:
                 return False
             key, lock = self._game_user_round_lock(guild.id, message.author.id)
             if lock.locked():
+                # A rodada anterior ainda está finalizando (inclusive suas conquistas).
+                # Remover o novo trigger impede que ele apareça entre o resultado e
+                # as notificações e evita iniciar uma segunda rodada fora de ordem.
+                await self._delete_game_message(message)
                 return True
             try:
                 async with lock:
@@ -2055,6 +2059,10 @@ class GincanaRoletaMixin:
                 return False
             key, lock = self._game_user_round_lock(guild.id, message.author.id)
             if lock.locked():
+                # A rodada anterior ainda está finalizando (inclusive suas conquistas).
+                # Remover o novo trigger impede que ele apareça entre o resultado e
+                # as notificações e evita iniciar uma segunda rodada fora de ordem.
+                await self._delete_game_message(message)
                 return True
             try:
                 async with lock:

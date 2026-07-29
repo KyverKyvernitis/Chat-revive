@@ -244,7 +244,7 @@ class GincanaRoletaMixin:
         def _pick_game_loss_title(self, kind: str) -> str:
             self._ensure_game_animation_runtime()
             options = {
-                "roleta": ("🎰 Nada neste giro", "🎰 Não foi dessa vez", "🎰 Sem prêmio", "🎰 A máquina ficou com essa"),
+                "roleta": ("🎰 Nada neste giro", "🎰 Não foi dessa vez", "🎰 Sem prêmio", "🎰 Você ganhou... Nada!"),
                 "cartas": ("🎴 Nada nesta mão", "🎴 As cartas não encaixaram", "🎴 Mão sem prêmio", "🎴 Passou em branco"),
             }.get(str(kind), ("Sem prêmio",))
             last = self._last_game_loss_titles.get(str(kind))
@@ -261,9 +261,11 @@ class GincanaRoletaMixin:
             first_stop_max_seconds: float = 2.30,
             last_stop_min_seconds: float = 3.45,
             last_stop_max_seconds: float = CARTA_ANIMATION_LAST_STOP_SECONDS,
+            randomize_order: bool = True,
         ) -> list[tuple[float, int]]:
             column_order = [0, 1, 2]
-            random.shuffle(column_order)
+            if randomize_order:
+                random.shuffle(column_order)
 
             first_stop = random.uniform(float(min_stop_seconds), float(first_stop_max_seconds))
             last_stop_floor = max(first_stop + 0.60, float(last_stop_min_seconds))
@@ -430,8 +432,6 @@ class GincanaRoletaMixin:
         ) -> discord.ui.LayoutView:
             details: list[str] = []
             if not compact_recovery:
-                if int(gross_payout) > 0:
-                    details.append(f"**Prêmio recebido:** {self._chip_text(gross_payout, kind='gain')}")
                 effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
                 details.append(f"**Resultado:** {self._format_game_result_value(effective_result)}")
             if int(current_jackpot) > ROLETA_DYNAMIC_JACKPOT_BASE:
@@ -990,6 +990,7 @@ class GincanaRoletaMixin:
                 first_stop_max_seconds=2.45,
                 last_stop_min_seconds=4.05,
                 last_stop_max_seconds=ROLETA_ANIMATION_LAST_STOP_SECONDS,
+                randomize_order=False,
             )
             stop_cursor = 0
             locked_columns: set[int] = set()
@@ -1271,8 +1272,6 @@ class GincanaRoletaMixin:
             result_delta: int | None = None,
         ) -> discord.ui.LayoutView:
             details: list[str] = []
-            if int(gross_payout) > 0:
-                details.append(f"**Prêmio recebido:** {self._chip_text(gross_payout, kind='gain')}")
             effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
             details.extend([
                 f"**Resultado:** {self._format_game_result_value(effective_result)}",

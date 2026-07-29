@@ -99,40 +99,27 @@ class _RaceLobbyView(discord.ui.LayoutView):
         participant_count = len(participants)
         is_closed = bool(self.session.get("starting") or self.session.get("started") or self.session.get("ended"))
         self.join_button.disabled = is_closed or participant_count >= CORRIDA_MAX_PARTICIPANTS
-        self.start_button.disabled = is_closed
+        self.start_button.disabled = is_closed or participant_count < 2
 
-        header_lines = ["# 🐎 Corrida de cavalos"]
+        lines = ["# 🐎 Corrida de cavalos"]
         if self.cog._race_condition_is_wet(self.session):
-            header_lines.extend([
-                "🌧️ **Pista molhada**",
-                "O piso escorregadio aumenta a chance de tropeço.",
+            lines.extend([
+                "🌧️ **Pista molhada** — maior chance de tropeço.",
                 "",
             ])
-        header_lines.extend([
+        lines.extend([
             f"**Entrada:** {self.cog._chip_amount(CORRIDA_STAKE)}",
             f"**Participantes:** {participant_count}/{CORRIDA_MAX_PARTICIPANTS}",
+            "",
+            *self.cog._race_lobby_prize_lines(self.session),
+            "",
+            "### Corredores",
+            " • ".join(member.mention for member in participants),
         ])
-
-        participants_lines = ["### Participantes"]
-        if participants:
-            participants_lines.extend(f"• {member.mention}" for member in participants)
-        else:
-            participants_lines.append("• Ninguém entrou ainda.")
-
-        info_lines = [
-            "Clique em **Entrar** para escolher seu plano de corrida e confirmar a participação.",
-            "O criador da corrida ou a staff pode usar **Iniciar** quando houver pelo menos 2 participantes.",
-        ]
 
         row = discord.ui.ActionRow(self.join_button, self.start_button)
         container = discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(header_lines)),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(self.cog._race_lobby_prize_lines(self.session))),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(participants_lines)),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(info_lines)),
+            discord.ui.TextDisplay("\n".join(lines)),
             row,
             accent_color=discord.Color.blurple(),
         )
@@ -150,69 +137,6 @@ class _RaceLobbyView(discord.ui.LayoutView):
         except Exception:
             pass
 
-
-class _RacePlanSelect(discord.ui.Select):
-    def __init__(self, panel: "_RacePlanView"):
-        self.panel = panel
-        options = [
-            discord.SelectOption(
-                label=str(plan["name"]),
-                description=str(plan["description"]),
-                value=plan_key,
-                emoji=str(plan["emoji"]),
-            )
-            for plan_key, plan in _RACE_PLANS.items()
-        ]
-        super().__init__(
-            placeholder="Escolha seu plano de corrida",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id=f"race_plan:{panel.session_id}:{panel.user_id}",
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        await self.panel.confirm_plan(interaction, self.values[0])
-
-
-class _RacePlanView(discord.ui.LayoutView):
-    def __init__(self, cog: "GincanaCorridaMixin", guild_id: int, session_id: str, user_id: int):
-        super().__init__(timeout=30.0)
-        self.cog = cog
-        self.guild_id = int(guild_id)
-        self.session_id = str(session_id)
-        self.user_id = int(user_id)
-        self.confirmed = False
-        self.plan_select = _RacePlanSelect(self)
-        plan_lines = [
-            "# 🎯 Plano de corrida",
-            "Escolha uma estratégia. A escolha é definitiva para esta corrida.",
-            "",
-        ]
-        for plan in _RACE_PLANS.values():
-            plan_lines.append(f"{plan['emoji']} **{plan['name']}** — {plan['description']}")
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay("\n".join(plan_lines)),
-                discord.ui.ActionRow(self.plan_select),
-                accent_color=discord.Color.blurple(),
-            )
-        )
-
-    async def confirm_plan(self, interaction: discord.Interaction, plan_key: str):
-        if int(getattr(interaction.user, "id", 0) or 0) != self.user_id:
-            await self.cog._send_component_feedback(interaction, "Esse seletor pertence a outra pessoa.")
-            return
-        if self.confirmed:
-            await self.cog._send_component_feedback(interaction, "Essa escolha já foi confirmada.")
-            return
-        self.confirmed = True
-        await self.cog._complete_race_join(
-            interaction,
-            guild_id=self.guild_id,
-            expected_session_id=self.session_id,
-            plan_key=str(plan_key),
-        )
 
 
 class _RaceLobbyClosedView(discord.ui.LayoutView):
@@ -621,6 +545,9 @@ class GincanaCorridaMixin:
     def _race_condition_is_wet(self, session: dict) -> bool:
         return str((session.get("condition") or {}).get("key") or "normal") == "wet"
 
+    def _roll_race_plan_key(self) -> str:
+        return random.choice(tuple(_RACE_PLANS))
+
     def _race_plan(self, session: dict, user_id: int) -> dict:
         plan_key = str((session.get("plans") or {}).get(int(user_id)) or "equilibrado")
         return dict(_RACE_PLANS.get(plan_key) or _RACE_PLANS["equilibrado"])
@@ -651,9 +578,11 @@ class GincanaCorridaMixin:
 
     def _race_lobby_prize_lines(self, session: dict) -> list[str]:
         participant_count = len(set(session.get("locked_participants", set()) or []))
-        lines = ["### Premiação atual"]
+        lines = ["### Premiação"]
         if participant_count < 2:
-            lines.append("A distribuição aparece quando houver pelo menos **2 participantes**.")
+            preview_pool = self._nominal_race_pools(2, 2 * CORRIDA_STAKE)
+            preview_amount = int(preview_pool[0]) if preview_pool else 2 * CORRIDA_STAKE
+            lines.append(f"🥇 {self._chip_amount(preview_amount)} com mais 1 participante.")
         else:
             normal_pools = self._nominal_race_pools(participant_count, participant_count * CORRIDA_STAKE)
             bonus_pool = self._race_rodada_cheia_pending_bonus(session)
@@ -664,13 +593,10 @@ class GincanaCorridaMixin:
                     parts.append(self._bonus_chip_amount(int(bonus_pools[index - 1])))
                 lines.append(f"{self._race_placement_emoji(index)} {' + '.join(parts)}")
 
-        if participant_count >= CORRIDA_RODADA_CHEIA_THRESHOLD:
-            bonus = self._race_rodada_cheia_pending_bonus(session)
-            lines.append(f"🎉 **Rodada Cheia:** {self._bonus_chip_amount(bonus)} distribuídas no pódio.")
-        else:
-            missing = CORRIDA_RODADA_CHEIA_THRESHOLD - participant_count
-            label = "participante" if missing == 1 else "participantes"
-            lines.append(f"Faltam **{missing} {label}** para ativar a Rodada Cheia.")
+        if participant_count == CORRIDA_RODADA_CHEIA_THRESHOLD - 1:
+            lines.append("Mais 1 participante ativa a **Rodada Cheia**.")
+        elif participant_count >= CORRIDA_RODADA_CHEIA_THRESHOLD:
+            lines.append("🎉 **Rodada Cheia ativa.**")
         return lines
 
     async def _refund_race_entry(self, guild_id: int, session: dict, user_id: int, *, reason: str):
@@ -790,7 +716,7 @@ class GincanaCorridaMixin:
         if not session.get("started"):
             embed.add_field(name="Entrada", value=self._chip_amount(CORRIDA_STAKE), inline=True)
             embed.add_field(name="Participantes", value=f"**{len(self._get_race_participants(guild, session))}/{CORRIDA_MAX_PARTICIPANTS}**", inline=True)
-            embed.set_footer(text="Clique em Entrar para escolher seu plano. O criador ou a staff pode iniciar com pelo menos 2 participantes.")
+            embed.set_footer(text="O criador ou a staff pode iniciar com pelo menos 2 participantes.")
         return embed
 
     async def _close_lobby_message(self, session: dict, guild: discord.Guild, *, title: str, detail: str):
@@ -830,16 +756,12 @@ class GincanaCorridaMixin:
             await self._send_component_feedback(interaction, "Você já está participando de outro jogo.")
             return
 
-        plan_view = _RacePlanView(
-            self,
-            guild.id,
-            str(session.get("registry_session_id") or ""),
-            user.id,
+        await self._complete_race_join(
+            interaction,
+            guild_id=guild.id,
+            expected_session_id=str(session.get("registry_session_id") or ""),
+            plan_key=self._roll_race_plan_key(),
         )
-        try:
-            await interaction.response.send_message(view=plan_view, ephemeral=True)
-        except Exception:
-            await self._send_component_feedback(interaction, "Não foi possível abrir a escolha de plano agora.")
 
     async def _complete_race_join(self, interaction: discord.Interaction, *, guild_id: int, expected_session_id: str, plan_key: str):
         guild = interaction.guild
@@ -951,7 +873,7 @@ class GincanaCorridaMixin:
 
         plan = _RACE_PLANS[plan_key]
         confirmation = chip_note or entry_text
-        confirmation += f"\n🎯 **Plano:** {plan['emoji']} {plan['name']}"
+        confirmation += f"\n🎯 **Plano sorteado:** {plan['emoji']} {plan['name']}"
         await self._send_race_lobby_feedback(interaction, guild.id, user.id, confirmation)
         await self._refresh_race_message(guild.id)
 
@@ -1762,11 +1684,12 @@ class GincanaCorridaMixin:
         voice_channel = getattr(getattr(message.author, "voice", None), "channel", None)
         condition = dict(_RACE_WET_CONDITION if random.random() < _RACE_WET_CHANCE else _RACE_NORMAL_CONDITION)
         registry_session_id = f"corrida:{guild.id}:{message.id}:{random.getrandbits(24):06x}"
+        owner_id = int(message.author.id)
 
         session = {
             "voice_channel_id": getattr(voice_channel, "id", 0),
             "text_channel_id": message.channel.id,
-            "owner_id": message.author.id,
+            "owner_id": owner_id,
             "registry_session_id": registry_session_id,
             "registry_created": False,
             "locked_participants": set(),
@@ -1802,16 +1725,134 @@ class GincanaCorridaMixin:
             "_pending_render_key": None,
             "_aux_tasks": set(),
         }
-        self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
+        self._touch_runtime_state(session, kind="corrida", guild_id=guild.id)
         self._race_sessions[guild.id] = session
+
+        try:
+            reservation = await self._game_sessions.create_pending(
+                session_id=registry_session_id,
+                game_type="corrida",
+                guild_id=guild.id,
+                owner_id=owner_id,
+                ttl=self._RACE_STALE_LOBBY_SECONDS,
+            )
+        except Exception:
+            reservation = None
+
+        if not reservation or not reservation.ok:
+            if self._race_sessions.get(guild.id) is session:
+                self._race_sessions.pop(guild.id, None)
+            code = str(getattr(reservation, "code", "") or "")
+            if code == "guild_full":
+                detail = "O servidor já atingiu o limite de 6 jogadores ativos."
+            elif code == "user_busy":
+                detail = "Você já está participando de outro jogo."
+            else:
+                detail = "Não foi possível abrir a corrida agora."
+            try:
+                await message.channel.send(embed=self._make_embed("🐎 Corrida indisponível", detail, ok=False))
+            except Exception:
+                pass
+            return True
+
+        session["registry_created"] = True
+        needs_negative_confirm = self._needs_negative_confirmation(guild.id, owner_id, CORRIDA_STAKE)
+        if needs_negative_confirm:
+            try:
+                confirmed = await self._confirm_negative_from_message(
+                    message,
+                    guild.id,
+                    owner_id,
+                    CORRIDA_STAKE,
+                    title="🐎 Confirmar entrada",
+                )
+            except Exception:
+                confirmed = False
+            if not confirmed:
+                await self._release_race_registry(session)
+                if self._race_sessions.get(guild.id) is session:
+                    self._race_sessions.pop(guild.id, None)
+                return True
+
+        entry_spend = self._entry_spend_parts(guild.id, owner_id, CORRIDA_STAKE)
+        paid, _balance, chip_note = await self._try_consume_chips(
+            guild.id,
+            owner_id,
+            CORRIDA_STAKE,
+            reason="Entrada na corrida",
+        )
+        if not paid:
+            await self._release_race_registry(session)
+            if self._race_sessions.get(guild.id) is session:
+                self._race_sessions.pop(guild.id, None)
+            try:
+                await message.channel.send(embed=self._make_embed(
+                    "🐎 Saldo insuficiente",
+                    chip_note or "Você não tem saldo suficiente para abrir essa corrida.",
+                    ok=False,
+                ))
+            except Exception:
+                pass
+            return True
+
+        try:
+            activation = await self._game_sessions.activate(
+                session_id=registry_session_id,
+                user_ids={owner_id},
+                ttl=self._RACE_STALE_LOBBY_SECONDS,
+            )
+        except Exception:
+            activation = None
+
+        if not activation or not activation.ok:
+            refund_session = {"entry_spend": {owner_id: entry_spend}}
+            try:
+                await self._refund_race_entry(
+                    guild.id,
+                    refund_session,
+                    owner_id,
+                    reason="Devolução da corrida (abertura recusada)",
+                )
+            finally:
+                await self._release_race_registry(session)
+                if self._race_sessions.get(guild.id) is session:
+                    self._race_sessions.pop(guild.id, None)
+            try:
+                await message.channel.send(embed=self._make_embed(
+                    "🐎 Corrida indisponível",
+                    "Não foi possível reservar sua vaga. A entrada foi devolvida.",
+                    ok=False,
+                ))
+            except Exception:
+                pass
+            return True
+
+        session["locked_participants"].add(owner_id)
+        session["entry_spend"][owner_id] = entry_spend
+        session["plans"][owner_id] = self._roll_race_plan_key()
+        session["progress"][owner_id] = 0.0
+        session["state_map"][owner_id] = _HORSE_START
+        self._touch_runtime_state(session, kind="corrida", guild_id=guild.id)
+
         view = _RaceLobbyView(self, guild.id, session, guild, timeout=_CORRIDA_LOBBY_SECONDS)
         session["view"] = view
         try:
             panel_message = await message.channel.send(view=view)
         except Exception:
-            self._race_sessions.pop(guild.id, None)
+            try:
+                await self._refund_race_entry(
+                    guild.id,
+                    session,
+                    owner_id,
+                    reason="Devolução da corrida (falha ao abrir)",
+                )
+            finally:
+                await self._release_race_registry(session)
+                if self._race_sessions.get(guild.id) is session:
+                    self._race_sessions.pop(guild.id, None)
             return True
 
         session["message"] = panel_message
         await self._react_with_emoji(message, "🐎", keep=True)
         return True
+

@@ -63,10 +63,9 @@ _RACE_PLANS = {
 _RACE_IMPULSE_WINDOWS_NORMAL = ((3, "Largada"), (7, "Sprint final"))
 _RACE_IMPULSE_INITIAL_DELAY = 0.0
 _RACE_IMPULSE_STEP_SECONDS = 1.0
-_RACE_IMPULSE_BUTTON_COUNT = 3
+_RACE_IMPULSE_BUTTON_COUNT = 5
 _RACE_IMPULSE_STAGE_COUNT = 3
 _RACE_IMPULSE_EMOJI = "⚡"
-_RACE_IMPULSE_DELETE_DELAY_SECONDS = 1.0
 
 
 def _shared_rank_map(arrival_groups: list[list[int]]) -> dict[int, int]:
@@ -77,6 +76,49 @@ def _shared_rank_map(arrival_groups: list[list[int]]) -> dict[int, int]:
             rank_map[int(user_id)] = next_rank
         next_rank += len(group)
     return rank_map
+
+
+def _make_race_state_container(
+    cog: "GincanaCorridaMixin",
+    guild: discord.Guild,
+    session: dict,
+    *,
+    finished: bool = False,
+    action_rows: tuple[discord.ui.ActionRow, ...] = (),
+) -> discord.ui.Container:
+    narration = str(session.get("narration") or ("🏁 Todos cruzaram a linha." if finished else ""))
+    lines = cog._build_race_lines(guild, session)
+
+    if finished:
+        title = "# 🏁 Resultado da corrida"
+    else:
+        title = "# 🔥 Reta final" if session.get("final_stretch") else "# 🐎 Corrida em andamento"
+
+    header_lines = [title]
+    if cog._race_condition_is_wet(session):
+        header_lines.append("🌧️ **Pista molhada**")
+    if session.get("rodada_cheia"):
+        header_lines.append("🎉 **Rodada cheia**")
+
+    track_lines = list(lines)
+    if narration:
+        track_lines += ["", narration]
+
+    items: list = [
+        discord.ui.TextDisplay("\n".join(header_lines)),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay("\n".join(track_lines)),
+    ]
+
+    result_lines = session.get("result_lines") or []
+    if finished and result_lines:
+        items.extend([
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(result_lines)),
+        ])
+
+    items.extend(action_rows)
+    return discord.ui.Container(*items, accent_color=cog._race_color(session, finished=finished))
 
 
 class _RaceLobbyView(discord.ui.LayoutView):
@@ -183,10 +225,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.participant_ids = tuple(sorted(int(user_id) for user_id in (self.session.get("locked_participants", set()) or [])))
         self.participant_id_set = set(self.participant_ids)
         self.results: dict[int, dict] = {}
-        self.edit_lock = asyncio.Lock()
-        self._last_render_signature = None
         self._results_applied = False
-        self._pending_render_signature = None
         self.activated_indices: set[int] = set()
         self.buttons = [_RaceImpulseButton(self, idx) for idx in range(_RACE_IMPULSE_BUTTON_COUNT)]
         self._rebuild()
@@ -199,65 +238,22 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             tuple((button.disabled, button.label, int(button.style)) for button in self.buttons),
         )
 
-    def _build_header_lines(self) -> list[str]:
-        if self.finished:
-            return [
-                "# ⚡ Evento de impulso encerrado",
-                f"**Fase:** {self.stage_name}",
-                "Impulsos calculados e aplicados.",
-            ]
-        if self.step_index < 0:
-            return [
-                "# ⚡ Evento de impulso",
-                f"**Fase:** {self.stage_name}",
-                "Prepare-se. O primeiro botão pode acender a qualquer momento.",
-            ]
-        return [
-            "# ⚡ Evento de impulso",
-            f"**Fase:** {self.stage_name}",
-            f"Aperte o botão cinza que acendeu. **Etapa {self.step_index + 1}/{_RACE_IMPULSE_STAGE_COUNT}**",
-        ]
-
     def _rebuild(self):
         self.clear_items()
-        row1 = discord.ui.ActionRow(self.buttons[0])
-        row2 = discord.ui.ActionRow(self.buttons[1])
-        row3 = discord.ui.ActionRow(self.buttons[2])
-        container = discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(self._build_header_lines())),
-            discord.ui.Separator(),
-            row1,
-            row2,
-            row3,
-            accent_color=discord.Color.dark_grey(),
+        rows = tuple(discord.ui.ActionRow(button) for button in self.buttons)
+        self.add_item(
+            _make_race_state_container(
+                self.cog,
+                self.guild,
+                self.session,
+                action_rows=rows,
+            )
         )
-        self.add_item(container)
 
     async def refresh_message(self):
         if self.message is None:
             return
-        signature = self._render_signature()
-        self._pending_render_signature = signature
-        if self.edit_lock.locked():
-            return
-        async with self.edit_lock:
-            while self.message is not None:
-                current_signature = self._pending_render_signature
-                if current_signature == self._last_render_signature:
-                    break
-                self._rebuild()
-                edit_state = await self.cog._safe_edit_message_view(self.message, self)
-                if edit_state == "ok":
-                    self._last_render_signature = current_signature
-                elif edit_state == "missing":
-                    self.message = None
-                    break
-                else:
-                    break
-                latest_signature = self._render_signature()
-                self._pending_render_signature = latest_signature
-                if latest_signature == self._last_render_signature:
-                    break
+        await self.cog._refresh_race_message(self.guild.id)
 
     def _make_result_entry(self) -> dict:
         return {"pressed": [False] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT}
@@ -440,42 +436,14 @@ class _RaceStateView(discord.ui.LayoutView):
         self.session = session
         self.finished = finished
 
-        narration = str(session.get("narration") or ("🏁 Todos cruzaram a linha." if finished else ""))
-        lines = cog._build_race_lines(guild, session)
-
-        if finished:
-            title = "# 🏁 Resultado da corrida"
-        else:
-            title = "# 🔥 Reta final" if session.get("final_stretch") else "# 🐎 Corrida em andamento"
-
-        header_lines = [title]
-        if cog._race_condition_is_wet(session):
-            header_lines.append("🌧️ **Pista molhada**")
-        if session.get("rodada_cheia"):
-            header_lines.append("🎉 **Rodada cheia**")
-
-        track_lines = list(lines)
-        if narration:
-            track_lines += ["", narration]
-        impulse_status = str(session.get("impulse_status") or "").strip()
-        if impulse_status:
-            track_lines.append(impulse_status)
-
-        items = [
-            discord.ui.TextDisplay("\n".join(header_lines)),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(track_lines)),
-        ]
-
-        result_lines = session.get("result_lines") or []
-        if finished and result_lines:
-            items.extend([
-                discord.ui.Separator(),
-                discord.ui.TextDisplay("\n".join(result_lines)),
-            ])
-
-        container = discord.ui.Container(*items, accent_color=cog._race_color(session, finished=finished))
-        self.add_item(container)
+        self.add_item(
+            _make_race_state_container(
+                cog,
+                guild,
+                session,
+                finished=finished,
+            )
+        )
 
 
 class GincanaCorridaMixin:
@@ -837,11 +805,9 @@ class GincanaCorridaMixin:
                 await self._send_component_feedback(interaction, "Você já está participando de outro jogo.")
                 return
 
-            entry_text = self._entry_consume_text(guild.id, user.id, CORRIDA_STAKE)
+            entry_text = self._chip_spend_breakdown_text(guild.id, user.id, CORRIDA_STAKE)
             entry_spend = self._entry_spend_parts(guild.id, user.id, CORRIDA_STAKE)
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE, reason="Entrada na corrida")
-            if needs_negative_confirm:
-                chip_note = None
             if not paid:
                 await self._send_component_feedback(interaction, chip_note or "Você não tem saldo suficiente para entrar nessa corrida.")
                 return
@@ -903,7 +869,7 @@ class GincanaCorridaMixin:
             self._touch_runtime_state(session, kind="corrida", guild_id=guild.id)
 
         plan = _RACE_PLANS[plan_key]
-        confirmation = chip_note or entry_text
+        confirmation = entry_text
         confirmation += f"\n\n{self._race_plan_identity_text(plan)}"
         await self._send_race_lobby_feedback(interaction, guild.id, user.id, confirmation)
         await self._refresh_race_message(guild.id)
@@ -950,7 +916,6 @@ class GincanaCorridaMixin:
                 fresh_session["started"] = False
                 fresh_session["impulse_status"] = ""
                 fresh_session["active_impulse_task"] = None
-                fresh_session["active_impulse_message"] = None
                 fresh_session["_last_render_key"] = None
                 try:
                     self._touch_runtime_state(fresh_session, kind='corrida', guild_id=guild.id)
@@ -960,12 +925,19 @@ class GincanaCorridaMixin:
             await self._send_component_feedback(interaction, "Não foi possível iniciar a corrida agora.")
 
     def _race_render_key(self, session: dict):
+        active_impulse_view = session.get("active_impulse_view")
+        impulse_signature = (
+            active_impulse_view._render_signature()
+            if isinstance(active_impulse_view, _RaceImpulseEventView)
+            else None
+        )
         return (
             bool(session.get("started")),
             bool(session.get("ended")),
             bool(session.get("final_stretch")),
             str(session.get("narration") or ""),
             str(session.get("impulse_status") or ""),
+            impulse_signature,
             tuple(sorted((int(k), round(float(v), 4)) for k, v in (session.get("progress") or {}).items())),
             tuple(sorted((int(k), str(v)) for k, v in (session.get("state_map") or {}).items())),
             tuple(sorted((int(k), str(v.get("kind") or ""), int(v.get("ticks_left") or 0), round(float(v.get("per_tick") or 0.0), 4)) for k, v in (session.get("active_impulses") or {}).items())),
@@ -1024,11 +996,6 @@ class GincanaCorridaMixin:
             return None
         return self._track_race_aux_task(session, asyncio.create_task(self._retire_race_view_later(session, view, delay=delay)))
 
-    def _schedule_impulse_message_delete(self, session: dict, message: discord.Message | None, *, immediate: bool = False):
-        if message is None:
-            return None
-        return self._track_race_aux_task(session, asyncio.create_task(self._delete_impulse_message(message, immediate=immediate)))
-
     async def _refresh_race_message(self, guild_id: int):
         session = self._get_race_session(guild_id)
         if session is not None:
@@ -1061,7 +1028,13 @@ class GincanaCorridaMixin:
                     if not session.get("started"):
                         view = _RaceLobbyView(self, guild_id, session, guild, timeout=_CORRIDA_LOBBY_SECONDS)
                     else:
-                        view = _RaceStateView(self, guild, session, finished=bool(session.get("ended")))
+                        active_impulse_view = session.get("active_impulse_view")
+                        if isinstance(active_impulse_view, _RaceImpulseEventView) and not session.get("ended"):
+                            active_impulse_view.message = message
+                            active_impulse_view._rebuild()
+                            view = active_impulse_view
+                        else:
+                            view = _RaceStateView(self, guild, session, finished=bool(session.get("ended")))
                     session["view"] = view
                     edit_state = await self._safe_edit_message_view(message, view)
                     if edit_state == "ok":
@@ -1170,23 +1143,11 @@ class GincanaCorridaMixin:
             groups.append([member])
         return groups
 
-    async def _delete_impulse_message(self, message: discord.Message | None, *, immediate: bool = False):
-        if message is None:
-            return
-        try:
-            if not immediate:
-                await asyncio.sleep(_RACE_IMPULSE_DELETE_DELAY_SECONDS)
-            await message.delete()
-        except discord.NotFound:
-            pass
-        except Exception:
-            pass
-
     async def _stop_active_impulse_event(self, session: dict, *, keep_status: bool = False):
         active_task = session.get("active_impulse_task")
         if active_task is not None:
             session["active_impulse_task"] = None
-            if not active_task.done():
+            if active_task is not asyncio.current_task() and not active_task.done():
                 active_task.cancel()
                 try:
                     await active_task
@@ -1194,81 +1155,72 @@ class GincanaCorridaMixin:
                     pass
                 except Exception:
                     pass
-        active_message = session.get("active_impulse_message")
-        if active_message is not None:
-            session["active_impulse_message"] = None
-            self._schedule_impulse_message_delete(session, active_message, immediate=True)
+
+        active_view = session.pop("active_impulse_view", None)
+        if isinstance(active_view, _RaceImpulseEventView):
+            active_view.finished = True
+            if active_view.active_index is not None:
+                active_view._close_current_step()
+            try:
+                active_view.stop()
+            except Exception:
+                pass
         if not keep_status:
             session["impulse_status"] = ""
 
     async def _run_race_impulse_event(self, guild: discord.Guild, session: dict, stage_name: str):
-        self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
+        self._touch_runtime_state(session, kind="corrida", guild_id=guild.id)
         if session.get("ended"):
             return []
-        channel = guild.get_channel(int(session.get("text_channel_id") or 0))
-        if channel is None or not hasattr(channel, "send"):
+        message = session.get("message")
+        if message is None:
             return []
 
         event_counter = int(session.get("_impulse_event_counter", 0) or 0) + 1
         session["_impulse_event_counter"] = event_counter
         event_token = f"{guild.id}:{event_counter}:{random.getrandbits(24):06x}"
         event_view = _RaceImpulseEventView(self, guild, session, stage_name, event_token=event_token)
-        session["impulse_status"] = f"⏸ Evento de impulso ({stage_name.lower()}) em andamento."
-        await self._refresh_race_message(guild.id)
-        event_message = None
+        event_view.message = message
+        session["active_impulse_view"] = event_view
+        session["active_impulse_task"] = asyncio.current_task()
+        session["impulse_status"] = ""
+
         try:
-            event_message = await channel.send(view=event_view)
-            session["active_impulse_message"] = event_message
-            event_view.message = event_message
-            event_view._last_render_signature = event_view._render_signature()
-            if event_view.message is None:
-                raise discord.NotFound(response=None, message="Impulse event message disappeared")
             if _RACE_IMPULSE_INITIAL_DELAY > 0:
                 await asyncio.sleep(_RACE_IMPULSE_INITIAL_DELAY)
-            completed_all_steps = True
             for step_index in range(_RACE_IMPULSE_STAGE_COUNT):
-                if session.get("ended") or event_view.message is None:
-                    completed_all_steps = False
+                if session.get("ended") or session.get("message") is None:
                     break
                 event_view._activate_step(step_index)
                 await event_view.refresh_message()
                 await asyncio.sleep(_RACE_IMPULSE_STEP_SECONDS)
                 event_view._close_current_step()
-                if step_index + 1 >= _RACE_IMPULSE_STAGE_COUNT:
-                    event_view.finished = True
-                    await event_view.refresh_message()
 
-            if not event_view.finished:
-                event_view.finished = True
-                event_view._close_current_step()
-                await event_view.refresh_message()
-            elif not completed_all_steps and event_view.active_index is not None:
-                event_view._close_current_step()
+            event_view.finished = True
             awards = list(event_view._apply_results() or [])
-            if session.get("active_impulse_message") is event_message:
-                session["impulse_status"] = ""
-                if not awards and not str(session.get("narration") or "").strip():
-                    session["narration"] = ""
-            self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
-            await self._refresh_race_message(guild.id)
+            self._touch_runtime_state(session, kind="corrida", guild_id=guild.id)
             return awards
         except asyncio.CancelledError:
             event_view.finished = True
             if event_view.active_index is not None:
                 event_view._close_current_step()
-            await event_view.refresh_message()
             raise
         except Exception:
             session["impulse_status"] = ""
-            self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
-            await self._refresh_race_message(guild.id)
+            self._touch_runtime_state(session, kind="corrida", guild_id=guild.id)
+            return []
         finally:
-            if session.get("active_impulse_message") is event_message:
-                session["active_impulse_message"] = None
+            if session.get("active_impulse_view") is event_view:
+                session.pop("active_impulse_view", None)
             if session.get("active_impulse_task") is asyncio.current_task():
                 session["active_impulse_task"] = None
-            if event_message is not None:
-                self._schedule_impulse_message_delete(session, event_message)
+            try:
+                event_view.stop()
+            except Exception:
+                pass
+            session["_last_render_key"] = None
+            session["_pending_render_key"] = None
+            await self._refresh_race_message(guild.id)
 
     async def _finish_race_lobby(self, guild_id: int, *, reason: str, source_view: discord.ui.LayoutView | None = None, allow_when_starting: bool = False) -> bool:
         session = self._get_race_session(guild_id)
@@ -1340,7 +1292,7 @@ class GincanaCorridaMixin:
         session["impulse_tasks"] = []
         session["impulse_ticks_fired"] = set()
         session["impulse_schedule"] = self._get_race_impulse_schedule(session)
-        session["active_impulse_message"] = None
+        session["active_impulse_view"] = None
         session["active_impulse_task"] = None
         session["_visible_before_progress"] = {member.id: float(progress.get(member.id, 0.0)) for member in participants}
         session["_last_render_key"] = None
@@ -1749,7 +1701,7 @@ class GincanaCorridaMixin:
             "impulse_status": "",
             "impulse_tasks": [],
             "impulse_ticks_fired": set(),
-            "active_impulse_message": None,
+            "active_impulse_view": None,
             "active_impulse_task": None,
             "_visible_before_progress": {},
             "_edit_lock": asyncio.Lock(),

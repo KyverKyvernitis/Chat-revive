@@ -54,6 +54,7 @@ ROLETA_ANIMATION_DURATION_SECONDS = 5.0
 ROLETA_ANIMATION_INTERVAL_WEIGHTS = (0.18, 0.21, 0.24, 0.28, 0.33, 0.39, 0.47, 0.58, 0.72, 0.90, 1.05)
 ROLETA_ANIMATION_MIN_STOP_SECONDS = 2.05
 ROLETA_ANIMATION_LAST_STOP_SECONDS = 4.80
+ROLETA_RESULT_REPEAT_WINDOW_SECONDS = 60.0
 
 
 class _GameDebtConfirmView(discord.ui.LayoutView):
@@ -257,6 +258,29 @@ class GincanaRoletaMixin:
             return f"**0 {self._CHIP_EMOJI}**"
 
 
+        def _format_game_bonus_result_value(self, result_delta: int) -> str:
+            result = int(result_delta)
+            sign = "+" if result > 0 else ""
+            return f"**{sign}{result} {self._CHIP_BONUS_EMOJI}**"
+
+
+        def _format_game_result_breakdown(self, normal_delta: int, bonus_delta: int) -> str:
+            normal = int(normal_delta)
+            bonus = int(bonus_delta)
+            parts: list[str] = []
+            if normal != 0 or bonus == 0:
+                parts.append(self._format_game_result_value(normal))
+            if bonus != 0:
+                parts.append(self._format_game_bonus_result_value(bonus))
+            return " • ".join(parts)
+
+
+        def _current_game_chip_balances(self, guild_id: int, user_id: int) -> tuple[int, int]:
+            normal = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
+            bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
+            return normal, bonus
+
+
         def _current_game_chip_total(self, guild_id: int, user_id: int) -> int:
             normal = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
             bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
@@ -274,6 +298,59 @@ class GincanaRoletaMixin:
             chosen = random.choice(available)
             self._last_game_loss_titles[str(kind)] = chosen
             return chosen
+
+
+        def _apply_roleta_repeat_title_suffix(
+            self,
+            guild_id: int,
+            user_id: int,
+            *,
+            result_key: str,
+            title: str,
+            eligible: bool,
+        ) -> str:
+            self._ensure_game_animation_runtime()
+            key = (int(guild_id), int(user_id))
+            now = time.monotonic()
+
+            # Remove lembranças vencidas para a memória temporária não crescer
+            # indefinidamente quando muitos usuários usam a roleta.
+            for stored_key, state in list(self._roleta_recent_results.items()):
+                try:
+                    expired = now - float(state.get("seen_at", 0.0) or 0.0) >= ROLETA_RESULT_REPEAT_WINDOW_SECONDS
+                except Exception:
+                    expired = True
+                if expired:
+                    self._roleta_recent_results.pop(stored_key, None)
+
+            if not eligible:
+                self._roleta_recent_results.pop(key, None)
+                return str(title)
+
+            previous = self._roleta_recent_results.get(key)
+            try:
+                previous_seen_at = float(previous.get("seen_at", 0.0) or 0.0) if previous else 0.0
+                previous_count = max(1, int(previous.get("count", 1) or 1)) if previous else 1
+            except Exception:
+                previous_seen_at = 0.0
+                previous_count = 1
+            same_recent_result = bool(
+                previous
+                and str(previous.get("result_key", "")) == str(result_key)
+                and now - previous_seen_at < ROLETA_RESULT_REPEAT_WINDOW_SECONDS
+            )
+            repeat_count = previous_count + 1 if same_recent_result else 1
+            self._roleta_recent_results[key] = {
+                "result_key": str(result_key),
+                "seen_at": now,
+                "count": repeat_count,
+            }
+
+            if repeat_count == 2:
+                return f"{title} (dnv)"
+            if repeat_count >= 3:
+                return f"{title} (mais uma vez...)"
+            return str(title)
 
 
         def _make_random_column_stop_plan(
@@ -454,10 +531,13 @@ class GincanaRoletaMixin:
             gross_payout: int = 0,
             current_jackpot: int = ROLETA_JACKPOT_CHIPS,
             result_delta: int | None = None,
+            bonus_result_delta: int = 0,
         ) -> discord.ui.LayoutView:
             details: list[str] = []
             effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
-            details.append(f"**Resultado:** {self._format_game_result_value(effective_result)}")
+            details.append(
+                f"**Resultado:** {self._format_game_result_breakdown(effective_result, bonus_result_delta)}"
+            )
             if int(current_jackpot) > ROLETA_DYNAMIC_JACKPOT_BASE:
                 details.append(f"**Jackpot:** {self._chip_text(current_jackpot, kind='gain')}")
             details.append(f"**Saldo atual:** {balance_text}")
@@ -643,6 +723,8 @@ class GincanaRoletaMixin:
                 self._roleta_cycle_bonus_locks: dict[tuple[int, int], asyncio.Lock] = {}
             if not hasattr(self, "_last_game_loss_titles"):
                 self._last_game_loss_titles: dict[str, str] = {}
+            if not hasattr(self, "_roleta_recent_results"):
+                self._roleta_recent_results: dict[tuple[int, int], dict[str, object]] = {}
             if not hasattr(self, "_game_user_round_locks"):
                 self._game_user_round_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
@@ -1521,7 +1603,15 @@ class GincanaRoletaMixin:
             forced_kind = str(outcome.get("forced_kind") or "")
             target_middle = list(outcome.get("target_middle") or [7, 7, 7])
             paid_entry = self._entry_paid_amount(entry_spend, entry_cost)
-            round_start_total = self._current_game_chip_total(guild.id, actor.id) + paid_entry
+            current_normal, current_bonus = self._current_game_chip_balances(guild.id, actor.id)
+            if isinstance(entry_spend, dict):
+                entry_normal = max(0, int(entry_spend.get("chips", 0) or 0))
+                entry_bonus = max(0, int(entry_spend.get("bonus", 0) or 0))
+            else:
+                entry_normal = paid_entry
+                entry_bonus = 0
+            round_start_normal = current_normal + entry_normal
+            round_start_bonus = current_bonus + entry_bonus
             is_apostador = self._race_is(guild.id, actor.id, "apostador")
 
             reserved_jackpot: int | None = None
@@ -1605,7 +1695,7 @@ class GincanaRoletaMixin:
                         effect_note = self._race_effect_message(guild.id, actor.id, "all_in" if result_kind == "jackpot_mega" else "jackpot")
                     if effect_note:
                         summary_lines.append(effect_note)
-                    title = "🎰 Jackpot 777!" if result_kind == "jackpot_mega" else ("🎰 Jackpot 999!" if is_apostador else "🎰 Jackpot!")
+                    title = "💥🎰 Jackpot 777!!" if result_kind == "jackpot_mega" else ("💥🎰 Jackpot 999!!" if is_apostador else "💥🎰 Jackpot!!")
                 elif result_kind == "joker_premium":
                     race_won = True
                     race_payout = gross_payout = int(result_amount)
@@ -1671,6 +1761,23 @@ class GincanaRoletaMixin:
                 if chip_note:
                     summary_lines.insert(0, chip_note)
 
+                final_normal, final_bonus = self._current_game_chip_balances(guild.id, actor.id)
+                normal_result_delta = final_normal - round_start_normal
+                bonus_result_delta = final_bonus - round_start_bonus
+                full_entry_loss = bool(
+                    result_kind == "loss"
+                    and paid_entry > 0
+                    and normal_result_delta == -entry_normal
+                    and bonus_result_delta == -entry_bonus
+                )
+                title = self._apply_roleta_repeat_title_suffix(
+                    guild.id,
+                    actor.id,
+                    result_key=result_kind,
+                    title=title,
+                    eligible=not full_entry_loss,
+                )
+
                 result_view = self._make_roleta_result_view(
                     title,
                     "\n".join(line for line in summary_lines if line),
@@ -1682,7 +1789,8 @@ class GincanaRoletaMixin:
                     paid_entry=paid_entry,
                     gross_payout=gross_payout,
                     current_jackpot=current_jackpot,
-                    result_delta=self._current_game_chip_total(guild.id, actor.id) - round_start_total,
+                    result_delta=normal_result_delta,
+                    bonus_result_delta=bonus_result_delta,
                 )
             except Exception:
                 logging.getLogger("gincana.roleta").exception(
@@ -1690,9 +1798,15 @@ class GincanaRoletaMixin:
                     guild.id,
                     actor.id,
                 )
-                fallback_title = "🎰 Jackpot!" if forced_kind in {"jackpot", "jackpot_mega"} else self._pick_game_loss_title("roleta")
+                if forced_kind == "jackpot_mega":
+                    fallback_title = "💥🎰 Jackpot 777!!"
+                elif forced_kind == "jackpot":
+                    fallback_title = "💥🎰 Jackpot 999!!" if is_apostador else "💥🎰 Jackpot!!"
+                else:
+                    fallback_title = self._pick_game_loss_title("roleta")
                 fallback_lines = [chip_note] if chip_note else []
                 fallback_lines.append("O resultado foi consolidado, mas parte dos detalhes não pôde ser exibida")
+                fallback_normal, fallback_bonus = self._current_game_chip_balances(guild.id, actor.id)
                 result_view = self._make_roleta_result_view(
                     fallback_title,
                     "\n".join(fallback_lines),
@@ -1703,7 +1817,8 @@ class GincanaRoletaMixin:
                     paid_entry=paid_entry,
                     gross_payout=gross_payout,
                     current_jackpot=self._current_roleta_dynamic_jackpot(guild.id),
-                    result_delta=self._current_game_chip_total(guild.id, actor.id) - round_start_total,
+                    result_delta=fallback_normal - round_start_normal,
+                    bonus_result_delta=fallback_bonus - round_start_bonus,
                 )
             first_game_unlocked = await self._unlock_achievement(guild.id, actor.id, "first_game")
             roulette_achievements = await self._record_roulette_achievement_result(

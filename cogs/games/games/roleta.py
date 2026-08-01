@@ -153,9 +153,31 @@ class GincanaRoletaMixin:
                 middle if middle is not None else self._random_roleta_digit(),
                 self._random_roleta_digit(),
             ]
-        def _spin_roleta_column(self, column: list[object]):
-            column.insert(0, self._random_roleta_digit())
+        def _spin_roleta_column(self, column: list[object], *, next_top: object | None = None):
+            # A coluna sempre avança de cima para baixo. ``next_top`` permite
+            # preparar o resultado na linha superior e, no frame seguinte,
+            # deixá-lo descer naturalmente até a linha central.
+            column.insert(0, self._random_roleta_digit() if next_top is None else next_top)
             del column[3:]
+        def _roleta_partial_result_copy(self, middle_digits: list[object]) -> tuple[str, str]:
+            values = list(middle_digits)
+            if len(values) == 3 and len(set(values)) == 1:
+                return (
+                    "🎰 3 números iguais??",
+                    "Incrível, mas você não vai ganhar nada especial por causa disso >:)",
+                )
+
+            seven_positions = {index for index, value in enumerate(values) if value == 7}
+            if seven_positions == {0, 1}:
+                return "🎰 Eeeeee... Nada!! haha", "Bem perto hein"
+            if seven_positions in ({0, 2}, {1, 2}):
+                return "🎰 Nossa foi quase hein", "Você acertou dois 7, parabains"
+
+            return (
+                "🎰 Números iguais",
+                "Tem dois números iguais então vou te devolver um pouco da entrada",
+            )
+
         def _format_roleta_row(self, row: list[object], *, compact: bool = False) -> str:
             cells = [str(cell) for cell in row]
             if compact:
@@ -385,7 +407,11 @@ class GincanaRoletaMixin:
                     return {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS}
                 if random.random() < 0.25:
                     return {"target_middle": [6, 6, 6], "forced_kind": "beast", "forced_amount": ROLETA_APOSTADOR_COST}
-                return {"target_middle": self._roll_roleta_target_middle(success=False), "forced_kind": None, "forced_amount": None}
+                return {
+                    "target_middle": self._roll_roleta_target_middle(success=False, excluded_special_triples={6, 9}),
+                    "forced_kind": None,
+                    "forced_amount": None,
+                }
             success = random.randint(1, 10) == 1
             return {
                 "target_middle": self._roll_roleta_target_middle(success=success),
@@ -550,7 +576,12 @@ class GincanaRoletaMixin:
             consumed = await self._consume_roleta_spin(guild_id, user_id)
             return True, consumed
 
-        def _roll_roleta_target_middle(self, *, success: bool) -> list[object]:
+        def _roll_roleta_target_middle(
+            self,
+            *,
+            success: bool,
+            excluded_special_triples: set[int] | None = None,
+        ) -> list[object]:
             if success:
                 return [7, 7, 7]
             roll = random.random()
@@ -562,6 +593,15 @@ class GincanaRoletaMixin:
             # Os antigos retornos de custo foram redistribuídos para combinações
             # parciais, preservando aproximadamente o retorno médio da roleta.
             if roll < 0.4626:
+                # Mantém a mesma chance e o mesmo pagamento de resultado
+                # parcial, mas permite a variação visual de três iguais. O 777
+                # segue reservado ao jackpot; para o Apostador, 666 e 999 também
+                # são excluídos aqui para não alterar as chances de seus efeitos.
+                if random.random() < 0.12:
+                    excluded = {7, *(excluded_special_triples or set())}
+                    triple_choices = [digit for digit in range(1, 10) if digit not in excluded]
+                    repeated = random.choice(triple_choices)
+                    return [repeated, repeated, repeated]
                 repeated = random.randint(1, 9)
                 other = self._random_roleta_digit(exclude={repeated})
                 middle = [repeated, repeated, other]
@@ -963,7 +1003,6 @@ class GincanaRoletaMixin:
                 while rolling_columns[idx][1] == target_middle[idx]:
                     rolling_columns[idx] = self._build_roleta_column()
 
-            final_columns = [self._build_roleta_column(target_middle[idx]) for idx in range(3)]
             opening_view = self._make_roleta_spin_view(
                 self._render_roleta_board(rolling_columns),
                 balance_text=balance_text,
@@ -982,12 +1021,38 @@ class GincanaRoletaMixin:
                 last_stop_max_seconds=ROLETA_ANIMATION_LAST_STOP_SECONDS,
                 randomize_order=False,
             )
-            stop_cursor = 0
-            locked_columns: set[int] = set()
-            started_at = time.monotonic()
-            display_columns = [list(column) for column in rolling_columns]
-
             intervals = self._roleta_animation_intervals()
+            cumulative_times: list[float] = []
+            accumulated = 0.0
+            for delay in intervals:
+                accumulated += float(delay)
+                cumulative_times.append(accumulated)
+
+            stop_frames: dict[int, int] = {}
+            for stop_time, column_index in stop_plan:
+                stop_frame = next(
+                    (index for index, elapsed in enumerate(cumulative_times) if elapsed >= float(stop_time)),
+                    len(intervals) - 1,
+                )
+                stop_frames[int(column_index)] = int(stop_frame)
+            arm_frames = {column_index: max(0, stop_frame - 1) for column_index, stop_frame in stop_frames.items()}
+
+            armed_columns: set[int] = set()
+            locked_columns: set[int] = set()
+
+            async def render_frame() -> None:
+                nonlocal spin_message
+                frame_view = self._make_roleta_spin_view(
+                    self._render_roleta_board([list(column) for column in rolling_columns]),
+                    balance_text=balance_text,
+                    footer_text=footer_text,
+                    paid_entry=paid_entry,
+                    jackpot=jackpot,
+                )
+                rendered = await self._render_or_replace_game_message(message, spin_message, view=frame_view, final=False)
+                if rendered is not None:
+                    spin_message = rendered
+
             for frame_index, delay in enumerate(intervals):
                 await asyncio.sleep(delay)
                 has_turn = False
@@ -997,35 +1062,27 @@ class GincanaRoletaMixin:
                         if not has_turn:
                             continue
 
-                    elapsed = time.monotonic() - started_at
                     for column_index, column in enumerate(rolling_columns):
-                        if column_index not in locked_columns:
+                        if column_index in locked_columns:
+                            continue
+
+                        stop_frame = stop_frames.get(column_index, len(intervals) - 1)
+                        arm_frame = arm_frames.get(column_index, max(0, stop_frame - 1))
+
+                        if column_index in armed_columns and frame_index >= stop_frame:
+                            # O valor preparado no topo desce para o meio e a
+                            # coluna inteira congela sem trocar os números ao redor.
+                            self._spin_roleta_column(column)
+                            locked_columns.add(column_index)
+                        elif column_index not in armed_columns and frame_index >= arm_frame:
+                            # Este frame mostra o resultado entrando pelo topo.
+                            # Somente no próximo frame ele chega à linha central.
+                            self._spin_roleta_column(column, next_top=target_middle[column_index])
+                            armed_columns.add(column_index)
+                        else:
                             self._spin_roleta_column(column)
 
-                    if frame_index >= len(intervals) - 1:
-                        locked_columns = {0, 1, 2}
-                        stop_cursor = len(stop_plan)
-                    else:
-                        while stop_cursor < len(stop_plan) and stop_plan[stop_cursor][0] <= elapsed:
-                            _, column_index = stop_plan[stop_cursor]
-                            locked_columns.add(column_index)
-                            stop_cursor += 1
-
-                    display_columns = self._compose_game_animation_columns(
-                        rolling_columns,
-                        final_columns,
-                        locked_columns,
-                    )
-                    frame_view = self._make_roleta_spin_view(
-                        self._render_roleta_board(display_columns),
-                        balance_text=balance_text,
-                        footer_text=footer_text,
-                        paid_entry=paid_entry,
-                        jackpot=jackpot,
-                    )
-                    rendered = await self._render_or_replace_game_message(message, spin_message, view=frame_view, final=False)
-                    if rendered is not None:
-                        spin_message = rendered
+                    await render_frame()
                 finally:
                     if has_turn and guild_id is not None and session_id is not None:
                         await self._advance_game_animation_turn(guild_id, session_id)
@@ -1033,6 +1090,21 @@ class GincanaRoletaMixin:
                 if len(locked_columns) >= 3:
                     break
 
+            # Em contenção de animações algum frame pode ser pulado. Finaliza
+            # apenas as colunas pendentes em dois passos visíveis, preservando a
+            # continuidade em vez de substituir a coluna por valores aleatórios.
+            for column_index in range(3):
+                if column_index in locked_columns:
+                    continue
+                if column_index not in armed_columns:
+                    self._spin_roleta_column(rolling_columns[column_index], next_top=target_middle[column_index])
+                    armed_columns.add(column_index)
+                    await render_frame()
+                self._spin_roleta_column(rolling_columns[column_index])
+                locked_columns.add(column_index)
+                await render_frame()
+
+            final_columns = [list(column) for column in rolling_columns]
             return spin_message, final_columns
         def _carta_window_total(self, bonus_spins: int = 0) -> int:
             return CARTA_SPIN_LIMIT + max(0, min(CARTA_DAILY_EXTRA_CAP, int(bonus_spins or 0)))
@@ -1550,8 +1622,8 @@ class GincanaRoletaMixin:
                     await self._record_game_played(guild.id, actor.id, weekly_points=4)
                     await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                     await self._grant_weekly_points(guild.id, actor.id, 6)
-                    summary_lines.append("Você acertou uma combinação parcial")
-                    title = "🎰 Giro parcial"
+                    title, partial_description = self._roleta_partial_result_copy(middle_digits)
+                    summary_lines.append(partial_description)
                 elif result_kind == "beast":
                     race_won = None
                     race_payout = gross_payout = int(result_amount)

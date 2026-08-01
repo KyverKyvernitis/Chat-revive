@@ -375,8 +375,11 @@ class _RacePanelView(discord.ui.LayoutView):
         self.cog._forget_race_panel_message(self.guild_id, self.user_id, message_id=getattr(self.message, "id", None))
         if self.message is None:
             return
+        for item in self.walk_children():
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
         try:
-            await self.message.delete()
+            await self.message.edit(view=self)
         except Exception:
             pass
 

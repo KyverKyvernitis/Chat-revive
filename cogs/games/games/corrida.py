@@ -63,7 +63,7 @@ _RACE_PLANS = {
 _RACE_IMPULSE_WINDOWS_NORMAL = ((3, "Largada"), (7, "Sprint final"))
 _RACE_IMPULSE_INITIAL_DELAY = 0.0
 _RACE_IMPULSE_STEP_SECONDS = 1.0
-_RACE_IMPULSE_BUTTON_COUNT = 5
+_RACE_IMPULSE_BUTTON_COUNT = 3
 _RACE_IMPULSE_STAGE_COUNT = 3
 _RACE_IMPULSE_EMOJI = "⚡"
 
@@ -227,6 +227,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.results: dict[int, dict] = {}
         self._results_applied = False
         self.activated_indices: set[int] = set()
+        self._press_lock = asyncio.Lock()
         self.buttons = [_RaceImpulseButton(self, idx) for idx in range(_RACE_IMPULSE_BUTTON_COUNT)]
         self._rebuild()
 
@@ -259,49 +260,55 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         return {"pressed": [False] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT}
 
     async def handle_press(self, interaction: discord.Interaction, button_index: int):
-        ack_needed = not interaction.response.is_done()
+        # O Discord exige uma confirmação rápida da interação. Confirme antes de
+        # qualquer lock, validação ou atualização da mensagem para não exibir
+        # "Falha na interação" em cliques válidos, atrasados ou duplicados.
+        if not await self.cog._safe_defer_component_interaction(interaction):
+            return
+
         try:
-            user = interaction.user
-            current_step = int(self.step_index)
-            active_index = self.active_index
-            finished = bool(self.finished)
+            async with self._press_lock:
+                user = interaction.user
+                current_step = int(self.step_index)
+                active_index = self.active_index
 
-            if finished or active_index is None or current_step < 0:
-                return
-            if interaction.guild is None or user is None:
-                return
+                if self.finished or active_index is None or current_step < 0:
+                    return
+                if interaction.guild is None or user is None:
+                    return
 
-            custom_id = str((getattr(interaction, "data", None) or {}).get("custom_id") or "")
-            custom_parts = custom_id.rsplit(":", 2)
-            if len(custom_parts) != 3 or int(custom_parts[-2]) != current_step:
-                return
+                custom_id = str((getattr(interaction, "data", None) or {}).get("custom_id") or "")
+                custom_parts = custom_id.rsplit(":", 2)
+                if len(custom_parts) != 3:
+                    return
+                try:
+                    interaction_step = int(custom_parts[-2])
+                    interaction_button = int(custom_parts[-1])
+                except (TypeError, ValueError):
+                    return
+                if interaction_step != current_step or interaction_button != int(button_index):
+                    return
 
-            user_id = int(getattr(user, "id", 0) or 0)
-            if user_id <= 0 or user_id not in self.participant_id_set:
-                return
-            if current_step >= _RACE_IMPULSE_STAGE_COUNT:
-                return
+                user_id = int(getattr(user, "id", 0) or 0)
+                if user_id <= 0 or user_id not in self.participant_id_set:
+                    return
+                if current_step >= _RACE_IMPULSE_STAGE_COUNT:
+                    return
 
-            entry = self.results.get(user_id)
-            if entry is None:
-                entry = self._make_result_entry()
-                self.results[user_id] = entry
+                entry = self.results.get(user_id)
+                if entry is None:
+                    entry = self._make_result_entry()
+                    self.results[user_id] = entry
 
-            pressed = entry["pressed"]
-            success = entry["success"]
-            if pressed[current_step]:
-                return
+                pressed = entry["pressed"]
+                success = entry["success"]
+                if pressed[current_step]:
+                    return
 
-            pressed[current_step] = True
-            success[current_step] = int(button_index) == int(active_index)
+                pressed[current_step] = True
+                success[current_step] = int(button_index) == int(active_index)
         except Exception:
             return
-        finally:
-            if ack_needed and not interaction.response.is_done():
-                try:
-                    await interaction.response.defer()
-                except Exception:
-                    pass
 
     def _activate_step(self, index: int):
         self.step_index = index

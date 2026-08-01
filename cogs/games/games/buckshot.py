@@ -107,7 +107,7 @@ class GincanaBuckshotMixin:
                     f"Entrada: {self._chip_amount(BUCKSHOT_STAKE)} por jogador\n"
                     f"Participantes: **{len(participants)}**\n"
                     f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(payout_total)}\n\n"
-                    "Entre na rodada e veja quem sai da call quando o disparo vier."
+                    "Entre na rodada e veja quem sai da call quando o disparo vier"
                 )
                 color = discord.Color.blurple()
             embed = discord.Embed(title=title, description=description, color=color)
@@ -136,7 +136,7 @@ class GincanaBuckshotMixin:
             guild = interaction.guild
             if guild is None:
                 try:
-                    await interaction.response.send_message("Use esse botão dentro de um servidor.", ephemeral=True)
+                    await interaction.response.send_message("Use esse botão dentro de um servidor", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -144,7 +144,7 @@ class GincanaBuckshotMixin:
             session = self._get_buckshot_session(guild.id)
             if session is None:
                 try:
-                    await interaction.response.send_message("Essa rodada já terminou.", ephemeral=True)
+                    await interaction.response.send_message("Essa rodada já terminou", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -152,7 +152,7 @@ class GincanaBuckshotMixin:
             voice_channel = self._get_buckshot_voice_channel(guild, session)
             if voice_channel is None:
                 try:
-                    await interaction.response.send_message("A rodada perdeu o canal de voz de referência.", ephemeral=True)
+                    await interaction.response.send_message("A rodada perdeu o canal de voz de referência", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -160,14 +160,14 @@ class GincanaBuckshotMixin:
             member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
             if not isinstance(member, discord.Member) or member.bot:
                 try:
-                    await interaction.response.send_message("Bots não podem participar dessa rodada.", ephemeral=True)
+                    await interaction.response.send_message("Bots não podem participar dessa rodada", ephemeral=True)
                 except Exception:
                     pass
                 return
 
             if getattr(member.voice, "channel", None) != voice_channel:
                 try:
-                    await interaction.response.send_message("Você precisa estar na mesma call da rodada para participar.", ephemeral=True)
+                    await interaction.response.send_message("Você precisa estar na mesma call da rodada para participar", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -175,7 +175,7 @@ class GincanaBuckshotMixin:
             locked_participants = set(session.get("locked_participants", set()) or set())
             if member.id in locked_participants:
                 try:
-                    await interaction.response.send_message("Você já entrou nessa rodada e sua vaga está travada.", ephemeral=True)
+                    await interaction.response.send_message("Você já entrou nessa rodada e sua vaga está travada", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -192,7 +192,7 @@ class GincanaBuckshotMixin:
                 note = None
             if not paid:
                 try:
-                    await interaction.response.send_message(note or "Você não tem saldo suficiente para entrar.", ephemeral=True)
+                    await interaction.response.send_message(note or "Você não tem saldo suficiente para entrar", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -268,7 +268,7 @@ class GincanaBuckshotMixin:
             payout_each = 0
             payout_remainder = 0
             if chosen is None:
-                final_text = "O disparo aconteceu... mas ninguém com entrada paga ficou elegível na rodada."
+                final_text = "O disparo aconteceu... mas ninguém com entrada paga ficou elegível na rodada"
             else:
                 if winners:
                     payout_each = payout_total // len(winners)
@@ -285,13 +285,13 @@ class GincanaBuckshotMixin:
                 chosen_text = chosen.mention if chosen is not None else "Alguém"
                 if winners:
                     final_text = (
-                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu. {chosen_text} foi eliminado.\n"
-                        f"Cada sobrevivente recebeu **{payout_each} {self._CHIP_BONUS_EMOJI}** de bônus."
+                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu\n{chosen_text} foi eliminado\n"
+                        f"Cada sobrevivente recebeu **{payout_each} {self._CHIP_BONUS_EMOJI}** de bônus"
                     )
                 else:
                     final_text = (
-                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi eliminado.\n"
-                        f"{self._CHIP_LOSS_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi perdido."
+                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi eliminado\n"
+                        f"{self._CHIP_LOSS_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi perdido"
                     )
 
             embed = self._make_buckshot_embed(guild, session, final_text=final_text)
@@ -413,10 +413,10 @@ class _BuckshotJoinView(discord.ui.LayoutView):
         if participants:
             plist.extend(f"• {m.mention}" for m in participants)
         else:
-            plist.append('• Ninguém entrou ainda.')
-        foot = ['Use o botão abaixo para entrar.', 'O criador da rodada ou a staff pode começar quando houver pelo menos 2 participantes.']
+            plist.append('• Ninguém entrou ainda')
+        foot = ['Use o botão abaixo para entrar', 'O criador da rodada ou a staff pode começar quando houver pelo menos 2 participantes']
         if countdown > 0:
-            foot.append('A contagem começou e ainda dá tempo de entrar.')
+            foot.append('A contagem começou e ainda dá tempo de entrar')
         row = discord.ui.ActionRow(self.join_button, self.start_button)
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(lines1)),
@@ -484,8 +484,8 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             if lobby_message is not None:
                 try:
                     await lobby_message.edit(view=_BuckshotLobbyClosedView(f'{self._EFFECT_EMOJI} Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
-                        'A rodada foi encerrada automaticamente porque ficou travada por tempo demais.',
-                        'Todas as entradas foram devolvidas.',
+                        'A rodada foi encerrada automaticamente porque ficou travada por tempo demais',
+                        'Todas as entradas foram devolvidas',
                     ], color=self._buckshot_color(session)))
                 except Exception:
                     pass
@@ -564,7 +564,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             reward_parts.append(normal_text)
         if bonus_text:
             reward_parts.append(bonus_text)
-        return f"🏆 **Prêmio:** {' + '.join(reward_parts)} para cada sobrevivente."
+        return f"🏆 **Prêmio:** {' + '.join(reward_parts)} para cada sobrevivente"
 
     def _buckshot_entry_spend(self, session: dict, user_id: int, stake: int) -> dict[str, object]:
         spend_map = session.get('entry_spend') or {}
@@ -616,28 +616,28 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
     async def _handle_buckshot_button(self, interaction: discord.Interaction, view: _BuckshotJoinView):
         guild = interaction.guild
         if guild is None:
-            try: await interaction.response.send_message('Use esse botão dentro de um servidor.', ephemeral=True)
+            try: await interaction.response.send_message('Use esse botão dentro de um servidor', ephemeral=True)
             except Exception: pass
             return
         session = self._get_buckshot_session(guild.id)
         if session is None or session.get('view') is not view:
-            try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+            try: await interaction.response.send_message('Essa rodada já terminou', ephemeral=True)
             except Exception: pass
             return
         member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
         if not isinstance(member, discord.Member) or member.bot:
-            try: await interaction.response.send_message('Bots não podem participar dessa rodada.', ephemeral=True)
+            try: await interaction.response.send_message('Bots não podem participar dessa rodada', ephemeral=True)
             except Exception: pass
             return
         async with self._runtime_lock(session):
             self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
             if session.get('ended') or session.get('view') is not view:
-                try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+                try: await interaction.response.send_message('Essa rodada já terminou', ephemeral=True)
                 except Exception: pass
                 return
             locked = set(session.get('locked_participants', set()) or set())
             if member.id in locked:
-                try: await interaction.response.send_message('Você já entrou nessa rodada e sua vaga está travada.', ephemeral=True)
+                try: await interaction.response.send_message('Você já entrou nessa rodada e sua vaga está travada', ephemeral=True)
                 except Exception: pass
                 return
             stake = self._buckshot_stake(session)
@@ -654,9 +654,9 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             if not paid:
                 try:
                     if interaction.response.is_done():
-                        await interaction.followup.send(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
+                        await interaction.followup.send(note or 'Você não tem saldo suficiente para entrar', ephemeral=True)
                     else:
-                        await interaction.response.send_message(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
+                        await interaction.response.send_message(note or 'Você não tem saldo suficiente para entrar', ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -675,28 +675,28 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         guild = interaction.guild
         user = interaction.user
         if guild is None or not isinstance(user, discord.Member):
-            try: await interaction.response.send_message('Servidor inválido.', ephemeral=True)
+            try: await interaction.response.send_message('Servidor inválido', ephemeral=True)
             except Exception: pass
             return
         session = self._get_buckshot_session(guild.id)
         if session is None or session.get('view') is not view or session.get('ended'):
-            try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+            try: await interaction.response.send_message('Essa rodada já terminou', ephemeral=True)
             except Exception: pass
             return
         async with self._runtime_lock(session):
             self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
             if session.get('starting'):
-                try: await interaction.response.send_message('A contagem já começou.', ephemeral=True)
+                try: await interaction.response.send_message('A contagem já começou', ephemeral=True)
                 except Exception: pass
                 return
             is_owner = int(session.get('owner_id') or 0) == user.id
             if not is_owner and not self._is_staff_member(user):
-                try: await interaction.response.send_message('Só o criador da rodada ou a staff pode começar.', ephemeral=True)
+                try: await interaction.response.send_message('Só o criador da rodada ou a staff pode começar', ephemeral=True)
                 except Exception: pass
                 return
             participants = self._get_buckshot_participants(guild, session)
             if len(participants) < 2:
-                try: await interaction.response.send_message('A rodada precisa de pelo menos 2 participantes.', ephemeral=True)
+                try: await interaction.response.send_message('A rodada precisa de pelo menos 2 participantes', ephemeral=True)
                 except Exception: pass
                 return
             session['starting'] = True
@@ -704,7 +704,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             await self._safe_cancel_task(session.get('countdown_task'))
             session['countdown_task'] = self.bot.loop.create_task(self._run_buckshot_start_countdown(guild.id, view))
             self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
-        try: await interaction.response.send_message('Contagem iniciada.', ephemeral=True)
+        try: await interaction.response.send_message('Contagem iniciada', ephemeral=True)
         except Exception: pass
         await self._refresh_buckshot_message(guild.id)
 
@@ -752,8 +752,8 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 if lobby_message is not None:
                     try:
                         await lobby_message.edit(view=_BuckshotLobbyClosedView(f'{self._EFFECT_EMOJI} Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
-                            'A rodada precisa de pelo menos **2 participantes**.',
-                            'Todas as entradas foram devolvidas.',
+                            'A rodada precisa de pelo menos **2 participantes**',
+                            'Todas as entradas foram devolvidas',
                         ], color=self._buckshot_color(session)))
                     except Exception:
                         pass
@@ -794,7 +794,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             owner_id = int(session.get('owner_id') or 0)
             race_payouts: dict[int, int] = {}
             if chosen is None:
-                lines.append(('<a:uzi:1487936659692458054>' if is_golden else '<:gunforward:1484655577836683434>') + ' O disparo aconteceu. Ninguém foi eliminado.')
+                lines.append(('<a:uzi:1487936659692458054>' if is_golden else '<:gunforward:1484655577836683434>') + ' O disparo aconteceu\nNinguém foi eliminado')
             else:
                 base_each = 0
                 base_remainder = 0
@@ -832,13 +832,13 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                     await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_golden_eliminations', 1)
                 await self._record_game_played(guild.id, chosen.id, weekly_points=3)
                 refund = await self._maybe_apply_coringa_lobby_refund(guild.id, chosen.id, stake)
-                lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} **Eliminado:** {chosen.mention}.")
+                lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} **Eliminado:** {chosen.mention}")
                 if refund > 0:
                     effect_note = self._race_effect_message(
                         guild.id,
                         chosen.id,
                         'as',
-                        f"recuperou {self._chip_text(refund, kind='gain')} da entrada.",
+                        f"recuperou {self._chip_text(refund, kind='gain')} da entrada",
                     )
                     await self._route_lobby_race_notices(
                         (session.get('race_interactions') or {}).get(chosen.id),
@@ -861,7 +861,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                         )
                     )
                 else:
-                    lines.append(f"Ninguém sobreviveu para receber a entrada de **{eliminated_entry_total} {self._CHIP_LOSS_EMOJI}**.")
+                    lines.append(f"Ninguém sobreviveu para receber a entrada de **{eliminated_entry_total} {self._CHIP_LOSS_EMOJI}**")
 
             eligible_ids = [member.id for member in eligible]
             for member in eligible:
@@ -928,7 +928,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         cooldown_remaining = max(0.0, (last_used + 6.0) - time.time())
         if cooldown_remaining > 0:
             try:
-                await message.channel.send(embed=self._make_embed('💥 Aguarde um pouco', f'Espere **{int(cooldown_remaining) + 1}s** para abrir outra rodada de buckshot.', ok=False))
+                await message.channel.send(embed=self._make_embed('💥 Aguarde um pouco', f'Espere **{int(cooldown_remaining) + 1}s** para abrir outra rodada de buckshot', ok=False))
             except Exception:
                 pass
             return True
@@ -946,7 +946,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         if needs_negative_confirm:
             note = None
         if not paid:
-            try: await message.channel.send(embed=self._make_embed('💥 Saldo insuficiente', note or 'Você não tem saldo suficiente para entrar.', ok=False))
+            try: await message.channel.send(embed=self._make_embed('💥 Saldo insuficiente', note or 'Você não tem saldo suficiente para entrar', ok=False))
             except Exception: pass
             return True
         session = {

@@ -186,7 +186,7 @@ class PokerSelectionView(discord.ui.View):
                 if self.game.finished:
                     return
                 if self.game.phase == "invite":
-                    await self.cog._cancel_poker_game(self.game, reason="timeout", notice="A partida de poker expirou porque o convite não foi aceito a tempo.")
+                    await self.cog._cancel_poker_game(self.game, reason="timeout", notice="A partida de poker expirou porque o convite não foi aceito a tempo")
                     return
                 await self.cog._award_fold_win(
                     self.game,
@@ -223,7 +223,7 @@ class GincanaPokerMixin:
         invite_idle_limit = 90.0
         if str(getattr(game, 'phase', '') or '') == 'invite' and self._poker_game_idle_for(game) > invite_idle_limit:
             game._stale_cleanup_started = True
-            asyncio.create_task(self._cancel_poker_game(game, reason='stale_invite', notice='A partida anterior de poker expirou por inatividade e foi encerrada automaticamente.'))
+            asyncio.create_task(self._cancel_poker_game(game, reason='stale_invite', notice='A partida anterior de poker expirou por inatividade e foi encerrada automaticamente'))
 
     def _poker_project_stack_after_buy_in(self, guild_id: int, user_id: int, buy_in: int) -> tuple[int, int, int]:
         chips = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
@@ -294,8 +294,8 @@ class GincanaPokerMixin:
         total = chips + bonus
         if total < int(buy_in):
             return (
-                f"O poker precisa de {self._chip_amount(buy_in)} disponíveis sem aumentar dívida. "
-                f"Seu saldo atual é {self._format_compact_chip_balance(guild_id, user_id)}."
+                f"O poker precisa de {self._chip_amount(buy_in)} disponíveis sem aumentar dívida\n"
+                f"Seu saldo atual é {self._format_compact_chip_balance(guild_id, user_id)}"
             )
         return None
     def _create_poker_deck(self) -> list[Card]:
@@ -420,7 +420,7 @@ class GincanaPokerMixin:
 
     def _make_poker_dm_embed(self, member: discord.Member, game: PokerGame, selected: set[int], confirmed: bool) -> discord.Embed:
         hand = game.hands[member.id]
-        selected_text = "Nenhuma carta marcada." if not selected else "Selecionadas: " + ", ".join(str(i + 1) for i in sorted(selected))
+        selected_text = "Nenhuma carta marcada" if not selected else "Selecionadas: " + ", ".join(str(i + 1) for i in sorted(selected))
         phase_names = {
             "invite": "Convite",
             "pre_draw_bet": "Apostas antes da troca",
@@ -432,19 +432,19 @@ class GincanaPokerMixin:
         current_bet = max(game.round_bets.values(), default=0)
         own_bet = game.round_bets.get(member.id, 0)
         to_call = max(0, current_bet - own_bet)
-        turn_text = "É a sua vez." if game.turn_id == member.id else "Aguarde a jogada do adversário."
+        turn_text = "É a sua vez" if game.turn_id == member.id else "Aguarde a jogada do adversário"
 
         if game.phase == "invite":
-            status_text = "Aceite o duelo para iniciar a rodada."
+            status_text = "Aceite o duelo para iniciar a rodada"
         elif game.phase == "draw_select":
-            status_text = "Marque até 3 cartas e confirme a troca." if not confirmed else "Troca confirmada. Aguardando o adversário."
+            status_text = "Marque até 3 cartas e confirme a troca" if not confirmed else "Troca confirmada\nAguardando o adversário"
         elif game.phase in {"pre_draw_bet", "post_draw_bet"}:
             if to_call > 0:
-                status_text = f"Você precisa pagar {self._chip_amount(to_call)}, aumentar ou desistir. {turn_text}"
+                status_text = f"Você precisa pagar {self._chip_amount(to_call)}, aumentar ou desistir\n{turn_text}"
             else:
-                status_text = f"Você pode dar check, apostar {self._chip_amount(_BET_SIZE)} ou desistir. {turn_text}"
+                status_text = f"Você pode dar check, apostar {self._chip_amount(_BET_SIZE)} ou desistir\n{turn_text}"
         else:
-            status_text = "Rodada encerrada."
+            status_text = "Rodada encerrada"
 
         embed = discord.Embed(
             title="🃏 Sua mão no Poker",
@@ -499,7 +499,7 @@ class GincanaPokerMixin:
             description = f"**Vencedor:** {player_b.mention}\n**Pote:** {self._chip_text(game.pot, kind='gain')}\n**Adversário:** {player_a.mention}"
         else:
             title = "🤝 Empate no Poker"
-            description = f"{player_a.mention} e {player_b.mention} dividiram o pote.\n**Pote total:** {self._chip_amount(game.pot)}"
+            description = f"{player_a.mention} e {player_b.mention} dividiram o pote\n**Pote total:** {self._chip_amount(game.pot)}"
 
         embed = self._make_embed(title, description, ok=True)
         embed.add_field(name=f"{player_a.display_name} — {self._poker_hand_display(hand_a)}", value=self._format_hand(hand_a), inline=False)
@@ -566,7 +566,7 @@ class GincanaPokerMixin:
             game.phase = "draw_select"
             game.selected = {pid: set() for pid in game.players}
             game.confirmed = {pid: False for pid in game.players}
-            game.action_log.append("As apostas iniciais terminaram. Hora de trocar cartas em segredo.")
+            game.action_log.append("As apostas iniciais terminaram\nHora de trocar cartas em segredo")
             await self._update_poker_status(game)
             await self._update_all_poker_dms(game)
             return
@@ -611,7 +611,7 @@ class GincanaPokerMixin:
                 await game.status_message.edit(
                     embed=self._make_poker_status_embed(
                         "🃏 Vitória por abandono" if reason == "abandono" else "🃏 Vitória por desistência",
-                        (f"{loser.mention} ficou inativo e perdeu a rodada. {winner.mention} levou o pote de {self._chip_amount(game.pot)}." if reason == "abandono" else f"{loser.mention} desistiu. {winner.mention} levou o pote de {self._chip_amount(game.pot)}."),
+                        (f"{loser.mention} ficou inativo e perdeu a rodada\n{winner.mention} levou o pote de {self._chip_amount(game.pot)}" if reason == "abandono" else f"{loser.mention} desistiu\n{winner.mention} levou o pote de {self._chip_amount(game.pot)}"),
                         ok=True,
                     ),
                     view=None,
@@ -619,7 +619,7 @@ class GincanaPokerMixin:
             except Exception:
                 pass
         for player_id, dm_message in list(game.dm_messages.items()):
-            result = ("Você venceu porque o rival abandonou a rodada." if reason == "abandono" else "Você venceu por desistência do rival.") if player_id == winner_id else ("Você ficou inativo e perdeu a rodada." if reason == "abandono" else "Você desistiu da rodada.")
+            result = ("Você venceu porque o rival abandonou a rodada" if reason == "abandono" else "Você venceu por desistência do rival") if player_id == winner_id else ("Você ficou inativo e perdeu a rodada" if reason == "abandono" else "Você desistiu da rodada")
             try:
                 await dm_message.edit(
                     embed=self._make_poker_status_embed(
@@ -734,13 +734,13 @@ class GincanaPokerMixin:
             self._queue_private_race_notices(game.guild_id, game.host_id, public_race_notices)
 
         if outcome > 0:
-            text_a = "Você venceu a rodada."
-            text_b = "Você perdeu a rodada."
+            text_a = "Você venceu a rodada"
+            text_b = "Você perdeu a rodada"
         elif outcome < 0:
-            text_a = "Você perdeu a rodada."
-            text_b = "Você venceu a rodada."
+            text_a = "Você perdeu a rodada"
+            text_b = "Você venceu a rodada"
         else:
-            text_a = text_b = "A rodada terminou empatada."
+            text_a = text_b = "A rodada terminou empatada"
 
         player_map = {player_a.id: player_a, player_b.id: player_b}
         result_texts = {player_a.id: text_a, player_b.id: text_b}
@@ -799,15 +799,15 @@ class GincanaPokerMixin:
             accepted_host = "✅" if game.accepted.get(game.host_id, False) else "⌛"
             accepted_opponent = "✅" if game.accepted.get(game.opponent_id, False) else "⌛"
             description = (
-                f"Duelo entre {host.mention} e {opponent.mention}.\n"
+                f"Duelo entre {host.mention} e {opponent.mention}\n"
                 f"Aceites: {host.display_name} {accepted_host} | {opponent.display_name} {accepted_opponent}\n\n"
-                "As DMs foram enviadas. Quando os dois aceitarem, a rodada começa."
+                "As DMs foram enviadas\nQuando os dois aceitarem, a rodada começa"
             )
         elif game.phase in {"pre_draw_bet", "post_draw_bet"}:
             current = guild.get_member(game.turn_id) if game.turn_id else None
             stage_name = "Apostas antes da troca" if game.phase == "pre_draw_bet" else "Apostas finais"
             pending = current.mention if current else "Ninguém"
-            log_text = "\n".join(f"• {entry}" for entry in game.action_log[-5:]) or "Nenhuma ação ainda."
+            log_text = "\n".join(f"• {entry}" for entry in game.action_log[-5:]) or "Nenhuma ação ainda"
             description = (
                 f"{stage_name}\n"
                 f"Pote: {self._chip_amount(game.pot)}\n"
@@ -820,14 +820,14 @@ class GincanaPokerMixin:
             host_status = "✅ pronto" if game.confirmed.get(game.host_id, False) else "⌛ escolhendo"
             opp_status = "✅ pronto" if game.confirmed.get(game.opponent_id, False) else "⌛ escolhendo"
             description = (
-                f"Troca de cartas em segredo.\n"
+                f"Troca de cartas em segredo\n"
                 f"Pote: {self._chip_amount(game.pot)}\n"
                 f"{host.display_name}: {host_status}\n"
                 f"{opponent.display_name}: {opp_status}\n\n"
-                "As mãos continuam privadas. A quantidade trocada por cada jogador será mostrada no resultado final."
+                "As mãos continuam privadas\nA quantidade trocada por cada jogador será mostrada no resultado final"
             )
         else:
-            description = "Rodada encerrada."
+            description = "Rodada encerrada"
         try:
             await game.status_message.edit(embed=self._make_poker_status_embed("🃏 Poker em andamento", description, ok=True), view=None)
         except Exception:
@@ -836,7 +836,7 @@ class GincanaPokerMixin:
     async def _handle_poker_toggle(self, interaction: discord.Interaction, game: PokerGame, player_id: int, index: int):
         self._touch_poker_game(game)
         if interaction.user.id != player_id:
-            await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
+            await interaction.response.send_message("Essa mão não é sua", ephemeral=True)
             return
         if game.finished or game.phase != "draw_select" or game.confirmed.get(player_id, False):
             await interaction.response.defer()
@@ -846,7 +846,7 @@ class GincanaPokerMixin:
             selected.remove(index)
         else:
             if len(selected) >= _MAX_SWAP:
-                await interaction.response.send_message(f"Você pode trocar no máximo {_MAX_SWAP} cartas.", ephemeral=True)
+                await interaction.response.send_message(f"Você pode trocar no máximo {_MAX_SWAP} cartas", ephemeral=True)
                 return
             selected.add(index)
         await self._update_poker_dm(game, player_id)
@@ -855,7 +855,7 @@ class GincanaPokerMixin:
     async def _handle_poker_clear(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
         self._touch_poker_game(game)
         if interaction.user.id != player_id:
-            await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
+            await interaction.response.send_message("Essa mão não é sua", ephemeral=True)
             return
         if game.finished or game.phase != "draw_select" or game.confirmed.get(player_id, False):
             await interaction.response.defer()
@@ -867,7 +867,7 @@ class GincanaPokerMixin:
     async def _handle_poker_confirm(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
         self._touch_poker_game(game)
         if interaction.user.id != player_id:
-            await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
+            await interaction.response.send_message("Essa mão não é sua", ephemeral=True)
             return
         if game.finished or game.phase != "draw_select" or game.confirmed.get(player_id, False):
             await interaction.response.defer()
@@ -886,8 +886,8 @@ class GincanaPokerMixin:
                     hand[idx] = game.deck.pop()
             game.phase = "post_draw_bet"
             game.action_log.append(
-                f"Trocas concluídas. {game.exchange_counts.get(game.host_id, 0)} carta(s) para {self.bot.get_guild(game.guild_id).get_member(game.host_id).display_name if self.bot.get_guild(game.guild_id) and self.bot.get_guild(game.guild_id).get_member(game.host_id) else 'Jogador 1'}, "
-                f"{game.exchange_counts.get(game.opponent_id, 0)} para {self.bot.get_guild(game.guild_id).get_member(game.opponent_id).display_name if self.bot.get_guild(game.guild_id) and self.bot.get_guild(game.guild_id).get_member(game.opponent_id) else 'Jogador 2'}."
+                f"Trocas concluídas\n{game.exchange_counts.get(game.host_id, 0)} carta(s) para {self.bot.get_guild(game.guild_id).get_member(game.host_id).display_name if self.bot.get_guild(game.guild_id) and self.bot.get_guild(game.guild_id).get_member(game.host_id) else 'Jogador 1'}, "
+                f"{game.exchange_counts.get(game.opponent_id, 0)} para {self.bot.get_guild(game.guild_id).get_member(game.opponent_id).display_name if self.bot.get_guild(game.guild_id) and self.bot.get_guild(game.guild_id).get_member(game.opponent_id) else 'Jogador 2'}"
             )
             self._reset_betting_round(game, turn_id=game.opponent_id)
             await self._update_poker_status(game)
@@ -896,7 +896,7 @@ class GincanaPokerMixin:
     async def _handle_poker_accept(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
         self._touch_poker_game(game)
         if interaction.user.id != player_id:
-            await interaction.response.send_message("Esse convite não é seu.", ephemeral=True)
+            await interaction.response.send_message("Esse convite não é seu", ephemeral=True)
             return
         if game.finished or game.phase != "invite" or game.accepted.get(player_id, False):
             await interaction.response.defer()
@@ -905,24 +905,24 @@ class GincanaPokerMixin:
         game.race_interactions[player_id] = interaction
         await self._update_poker_dm(game, player_id)
         await self._update_poker_status(game)
-        await self._send_race_lobby_feedback(interaction, game.guild_id, player_id, "Duelo aceito.")
+        await self._send_race_lobby_feedback(interaction, game.guild_id, player_id, "Duelo aceito")
         if all(game.accepted.get(pid, False) for pid in game.players):
             game.phase = "pre_draw_bet"
             self._reset_betting_round(game, turn_id=game.host_id)
-            game.action_log.append(f"Os dois jogadores aceitaram. Pot inicial de {game.pot} {self._CHIP_EMOJI}.")
+            game.action_log.append(f"Os dois jogadores aceitaram\nPot inicial de {game.pot} {self._CHIP_EMOJI}")
             await self._update_poker_status(game)
             await self._update_all_poker_dms(game)
 
     async def _handle_poker_check_call(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
         self._touch_poker_game(game)
         if interaction.user.id != player_id:
-            await interaction.response.send_message("Essa ação não é sua.", ephemeral=True)
+            await interaction.response.send_message("Essa ação não é sua", ephemeral=True)
             return
         if game.finished or game.phase not in {"pre_draw_bet", "post_draw_bet"}:
             await interaction.response.defer()
             return
         if game.turn_id != player_id:
-            await interaction.response.send_message("Ainda não é a sua vez.", ephemeral=True)
+            await interaction.response.send_message("Ainda não é a sua vez", ephemeral=True)
             return
         current_bet = max(game.round_bets.values(), default=0)
         own_bet = game.round_bets.get(player_id, 0)
@@ -931,15 +931,15 @@ class GincanaPokerMixin:
         member = guild.get_member(player_id) if guild else None
         name = member.display_name if member else "Jogador"
         if to_call > self._poker_total_stack(game, player_id):
-            await interaction.response.send_message("Você não tem fichas suficientes para pagar.", ephemeral=True)
+            await interaction.response.send_message("Você não tem fichas suficientes para pagar", ephemeral=True)
             return
         if to_call > 0:
             self._consume_poker_stack(game, player_id, to_call)
             game.round_bets[player_id] = current_bet
             game.pot += to_call
-            game.action_log.append(f"{name} pagou {to_call} {self._CHIP_EMOJI}.")
+            game.action_log.append(f"{name} pagou {to_call} {self._CHIP_EMOJI}")
         else:
-            game.action_log.append(f"{name} deu check.")
+            game.action_log.append(f"{name} deu check")
         game.round_acted.add(player_id)
         game.turn_id = game.other_player(player_id)
         await self._update_poker_status(game)
@@ -950,20 +950,20 @@ class GincanaPokerMixin:
     async def _handle_poker_bet_raise(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
         self._touch_poker_game(game)
         if interaction.user.id != player_id:
-            await interaction.response.send_message("Essa ação não é sua.", ephemeral=True)
+            await interaction.response.send_message("Essa ação não é sua", ephemeral=True)
             return
         if game.finished or game.phase not in {"pre_draw_bet", "post_draw_bet"}:
             await interaction.response.defer()
             return
         if game.turn_id != player_id:
-            await interaction.response.send_message("Ainda não é a sua vez.", ephemeral=True)
+            await interaction.response.send_message("Ainda não é a sua vez", ephemeral=True)
             return
         current_bet = max(game.round_bets.values(), default=0)
         own_bet = game.round_bets.get(player_id, 0)
         target_bet = current_bet + _BET_SIZE if current_bet > own_bet else own_bet + _BET_SIZE
         extra = target_bet - own_bet
         if extra > self._poker_total_stack(game, player_id):
-            await interaction.response.send_message("Você não tem fichas suficientes para essa aposta.", ephemeral=True)
+            await interaction.response.send_message("Você não tem fichas suficientes para essa aposta", ephemeral=True)
             return
         self._consume_poker_stack(game, player_id, extra)
         game.round_bets[player_id] = target_bet
@@ -972,7 +972,7 @@ class GincanaPokerMixin:
         member = guild.get_member(player_id) if guild else None
         name = member.display_name if member else "Jogador"
         action_name = "apostou" if current_bet == own_bet else "aumentou"
-        game.action_log.append(f"{name} {action_name} para {target_bet} {self._CHIP_EMOJI}.")
+        game.action_log.append(f"{name} {action_name} para {target_bet} {self._CHIP_EMOJI}")
         game.round_acted = {player_id}
         game.turn_id = game.other_player(player_id)
         await self._update_poker_status(game)
@@ -982,13 +982,13 @@ class GincanaPokerMixin:
     async def _handle_poker_fold(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
         self._touch_poker_game(game)
         if interaction.user.id != player_id:
-            await interaction.response.send_message("Essa ação não é sua.", ephemeral=True)
+            await interaction.response.send_message("Essa ação não é sua", ephemeral=True)
             return
         if game.finished or game.phase not in {"pre_draw_bet", "post_draw_bet"}:
             await interaction.response.defer()
             return
         if game.turn_id != player_id:
-            await interaction.response.send_message("Ainda não é a sua vez.", ephemeral=True)
+            await interaction.response.send_message("Ainda não é a sua vez", ephemeral=True)
             return
         await interaction.response.defer()
         await self._award_fold_win(game, game.other_player(player_id), player_id)
@@ -1012,7 +1012,7 @@ class GincanaPokerMixin:
         if opponent is None:
             embed = self._make_poker_status_embed(
                 "🃏 Duelo inválido",
-                "Use a trigger como **poker @usuário** para iniciar uma partida interativa.",
+                "Use a trigger como **poker @usuário** para iniciar uma partida interativa",
                 ok=False,
             )
             try:
@@ -1024,7 +1024,7 @@ class GincanaPokerMixin:
         if guild.id in self._poker_games:
             embed = self._make_poker_status_embed(
                 "🃏 Partida em andamento",
-                "Já existe uma partida de poker ativa neste servidor. Espere ela terminar para iniciar outra.",
+                "Já existe uma partida de poker ativa neste servidor\nEspere ela terminar para iniciar outra",
                 ok=False,
             )
             try:
@@ -1054,13 +1054,13 @@ class GincanaPokerMixin:
         opp_ok, _opp_balance, opp_note = await self._ensure_action_chips(guild.id, opponent.id, POKER_BUY_IN)
         if not host_ok:
             try:
-                await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_note or "Você não tem fichas suficientes para jogar.", ok=False))
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_note or "Você não tem fichas suficientes para jogar", ok=False))
             except Exception:
                 pass
             return True
         if not opp_ok:
             try:
-                await message.channel.send(embed=self._make_poker_status_embed("🃏 Rival sem fichas", opp_note or f"{opponent.mention} não tem fichas suficientes para jogar.", ok=False))
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Rival sem fichas", opp_note or f"{opponent.mention} não tem fichas suficientes para jogar", ok=False))
             except Exception:
                 pass
             return True
@@ -1072,7 +1072,7 @@ class GincanaPokerMixin:
             confirmed = await self._confirm_negative_via_message(message.channel, user_id=opponent.id, title="🃏 Confirmar entrada", note=self._negative_transition_note(guild.id, opponent.id, POKER_BUY_IN) or "")
             if not confirmed:
                 try:
-                    await message.channel.send(embed=self._make_poker_status_embed("🃏 Convite cancelado", f"{opponent.mention} não confirmou a entrada no poker.", ok=False))
+                    await message.channel.send(embed=self._make_poker_status_embed("🃏 Convite cancelado", f"{opponent.mention} não confirmou a entrada no poker", ok=False))
                 except Exception:
                     pass
                 return True
@@ -1110,7 +1110,7 @@ class GincanaPokerMixin:
                 embed=self._make_poker_status_embed(
                     "🃏 Convite para o Poker",
                     (
-                        f"**Duelo:** {message.author.mention} × {opponent.mention}\nAs mãos privadas e o convite estão sendo enviados por DM."
+                        f"**Duelo:** {message.author.mention} × {opponent.mention}\nAs mãos privadas e o convite estão sendo enviados por DM"
                         + (f"\n{host_note}" if host_note else "")
                         + (f"\n{opponent.mention}: {opp_note}" if opp_note else "")
                     ),
@@ -1142,7 +1142,7 @@ class GincanaPokerMixin:
             await self._cancel_poker_game(
                 game,
                 reason="dm_failed",
-                notice=f"Não consegui enviar DM para: {failed_names}. Ativem as DMs do servidor e tentem de novo.",
+                notice=f"Não consegui enviar DM para: {failed_names}\nAtivem as DMs do servidor e tentem de novo",
             )
             return True
 

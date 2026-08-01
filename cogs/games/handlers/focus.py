@@ -23,7 +23,7 @@ class GincanaFocusMixin:
     def _format_focus_list(self, guild: discord.Guild) -> str:
         focus_map = self.db.get_gincana_focus_map(guild.id)
         if not focus_map:
-            return "Ninguém por enquanto."
+            return "Ninguém por enquanto"
 
         lines = []
         for uid in sorted(self._expand_gincana_focus_ids(guild.id, focus_map.keys())):
@@ -35,7 +35,7 @@ class GincanaFocusMixin:
             if self.bot.user is not None and int(uid) == int(self.bot.user.id):
                 continue
             lines.append(self._focus_mention(guild, int(uid)))
-        return "\n".join(lines) if lines else "Ninguém por enquanto."
+        return "\n".join(lines) if lines else "Ninguém por enquanto"
 
     def _format_focus_mentions(self, guild: discord.Guild, user_ids: list[int], *, compact_after: int = 5) -> str:
         cleaned: list[int] = []
@@ -71,7 +71,7 @@ class GincanaFocusMixin:
         view = discord.ui.LayoutView(timeout=None)
         items: list = [
             discord.ui.TextDisplay(f"# {_FOCUS_EMOJI} {title}"),
-            discord.ui.TextDisplay("\n".join(line for line in lines if line).strip() or "Nada mudou por enquanto."),
+            discord.ui.TextDisplay("\n".join(line for line in lines if line).strip() or "Nada mudou por enquanto"),
         ]
         if show_current:
             items.extend([
@@ -118,7 +118,7 @@ class GincanaFocusMixin:
             await self._send_focus_notice(
                 message,
                 title="Foco limpo",
-                lines=["A lista de foco foi esvaziada."],
+                lines=["A lista de foco foi esvaziada"],
                 ok=False,
                 show_current=False,
             )
@@ -128,19 +128,19 @@ class GincanaFocusMixin:
         if added_ids:
             mentions = self._format_focus_mentions(guild, added_ids)
             verb = "entrou" if len(added_ids) == 1 else "entraram"
-            lines.append(f"{mentions} {verb} no modo foco.")
+            lines.append(f"{mentions} {verb} no modo foco")
 
         if removed_ids:
             mentions = self._format_focus_mentions(guild, removed_ids)
             verb = "saiu" if len(removed_ids) == 1 else "saíram"
-            lines.append(f"{mentions} {verb} do modo foco.")
+            lines.append(f"{mentions} {verb} do modo foco")
 
         if errored_ids:
             mentions = self._format_focus_mentions(guild, errored_ids)
-            lines.append(f"Não posso colocar {mentions} na lista de foco.")
+            lines.append(f"Não posso colocar {mentions} na lista de foco")
 
         if not lines:
-            lines.append("Nada mudou por enquanto.")
+            lines.append("Nada mudou por enquanto")
 
         await self._send_focus_notice(
             message,
@@ -237,7 +237,7 @@ class GincanaFocusMixin:
             await self._send_focus_notice(
                 message,
                 title="Sincronização incompleta",
-                lines=["Mencione ou envie o ID de pelo menos **2 membros**."],
+                lines=["Mencione ou envie o ID de pelo menos **2 membros**"],
                 ok=False,
                 show_current=False,
             )
@@ -257,13 +257,13 @@ class GincanaFocusMixin:
 
         mention_text = self._format_focus_mentions(guild, merged_ids, compact_after=4)
         if len(merged_ids) == 2:
-            detail = f"{mention_text} agora compartilham os efeitos de foco."
+            detail = f"{mention_text} agora compartilham os efeitos de foco"
         else:
-            detail = f"**{len(merged_ids)}** membros agora compartilham os efeitos de foco."
+            detail = f"**{len(merged_ids)}** membros agora compartilham os efeitos de foco"
 
         lines = [detail]
         if sync_added:
-            lines.append("Quem já estava em foco puxou o grupo junto.")
+            lines.append("Quem já estava em foco puxou o grupo junto")
 
         await self._send_focus_notice(
             message,
@@ -291,7 +291,7 @@ class GincanaFocusMixin:
             await self._send_focus_notice(
                 message,
                 title="Ninguém para focar",
-                lines=["Não encontrei membros válidos na sua call."],
+                lines=["Não encontrei membros válidos na sua call"],
                 ok=False,
                 show_current=False,
             )
@@ -309,12 +309,12 @@ class GincanaFocusMixin:
             removed_total = len(removed_set)
             removed_synced = max(0, len(removed_set - call_set))
             if removed_total <= 0:
-                lines = ["Nada mudou por enquanto."]
+                lines = ["Nada mudou por enquanto"]
             else:
                 who = "membro saiu" if removed_total == 1 else "membros saíram"
-                lines = [f"**{removed_total}** {who} do modo foco."]
+                lines = [f"**{removed_total}** {who} do modo foco"]
                 if removed_synced:
-                    lines.append(f"**{removed_synced}** {('sincronizado saiu junto' if removed_synced == 1 else 'sincronizados saíram junto')}.")
+                    lines.append(f"**{removed_synced}** {('sincronizado saiu junto' if removed_synced == 1 else 'sincronizados saíram junto')}")
             await self._send_focus_notice(
                 message,
                 title="Foco removido",
@@ -331,11 +331,11 @@ class GincanaFocusMixin:
         lines: list[str] = []
         if added_call_count:
             who = "membro da call entrou" if added_call_count == 1 else "membros da call entraram"
-            lines.append(f"**{added_call_count}** {who} no modo foco.")
+            lines.append(f"**{added_call_count}** {who} no modo foco")
         if added_synced_count:
-            lines.append(f"**{added_synced_count}** {('sincronizado também foi incluído' if added_synced_count == 1 else 'sincronizados também foram incluídos')}.")
+            lines.append(f"**{added_synced_count}** {('sincronizado também foi incluído' if added_synced_count == 1 else 'sincronizados também foram incluídos')}")
         if not lines:
-            lines = ["Todo mundo válido dessa call já estava em foco."]
+            lines = ["Todo mundo válido dessa call já estava em foco"]
 
         await self._send_focus_notice(
             message,

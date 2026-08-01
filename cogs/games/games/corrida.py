@@ -31,21 +31,21 @@ _RACE_PLANS = {
     "equilibrado": {
         "name": "Equilibrado",
         "emoji": "⚖️",
-        "description": "Mantém um ritmo constante, sem vantagens ou penalidades.",
+        "description": "Mantém um ritmo constante, sem vantagens ou penalidades",
         "trip": 0.0,
         "speed": 0.0,
     },
     "forcar_ritmo": {
         "name": "Ritmaníaco",
         "emoji": "⚡",
-        "description": "Corre mais rápido, mas tropeça com mais frequência.",
+        "description": "Corre mais rápido, mas tropeça com mais frequência",
         "trip": 0.04,
         "speed": 0.10,
     },
     "conducao_tecnica": {
         "name": "Condução",
         "emoji": "🛡️",
-        "description": "Tropeça menos e perde menos ritmo quando isso acontece.",
+        "description": "Tropeça menos e perde menos ritmo quando isso acontece",
         "trip": -0.02,
         "speed": -0.06,
         "trip_move": 0.24,
@@ -53,7 +53,7 @@ _RACE_PLANS = {
     "guardar_folego": {
         "name": "Charge",
         "emoji": "🔥",
-        "description": "Poupa força no começo e dispara na reta final.",
+        "description": "Poupa força no começo e dispara na reta final",
         "trip": 0.0,
         "speed": -0.12,
         "final_speed": 0.15,
@@ -86,7 +86,7 @@ def _make_race_state_container(
     finished: bool = False,
     action_rows: tuple[discord.ui.ActionRow, ...] = (),
 ) -> discord.ui.Container:
-    narration = str(session.get("narration") or ("🏁 Todos cruzaram a linha." if finished else ""))
+    narration = str(session.get("narration") or ("🏁 Todos cruzaram a linha" if finished else ""))
     lines = cog._build_race_lines(guild, session)
 
     if finished:
@@ -146,7 +146,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
         lines = ["# 🐎 Corrida de cavalos"]
         if self.cog._race_condition_is_wet(self.session):
             lines.extend([
-                "🌧️ **Pista molhada** — maior chance de tropeço.",
+                "🌧️ **Pista molhada** — maior chance de tropeço",
                 "",
             ])
         lines.extend([
@@ -421,7 +421,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             for user_id, tier, _bonus, _hits in awarded[:3]:
                 member = self.guild.get_member(int(user_id))
                 if member is not None:
-                    mention_lines.append(f"{self._tier_emoji(tier)} {member.mention} recebeu {self._tier_label(tier)}.")
+                    mention_lines.append(f"{self._tier_emoji(tier)} {member.mention} recebeu {self._tier_label(tier)}")
             if mention_lines:
                 self.session["narration"] = "\n".join(mention_lines)
                 self.session["narration_hold_ticks"] = 3
@@ -482,7 +482,7 @@ class GincanaCorridaMixin:
         guild = self.bot.get_guild(guild_id)
         if guild is not None:
             try:
-                await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="A corrida ficou inativa por tempo demais e foi encerrada automaticamente. Todas as entradas foram devolvidas.")
+                await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="A corrida ficou inativa por tempo demais e foi encerrada automaticamente\nTodas as entradas foram devolvidas")
             except Exception:
                 pass
         self._race_sessions.pop(guild_id, None)
@@ -551,7 +551,7 @@ class GincanaCorridaMixin:
     def _race_plan_identity_text(plan: dict) -> str:
         emoji = str(plan.get("emoji") or "⚖️")
         name = str(plan.get("name") or "Equilibrado")
-        description = str(plan.get("description") or "Mantém um ritmo constante.")
+        description = str(plan.get("description") or "Mantém um ritmo constante")
         return f"### {emoji} Você é ⋆{name}°\n*{description}*"
 
     def _race_pot_total(self, session: dict) -> int:
@@ -580,7 +580,7 @@ class GincanaCorridaMixin:
         if participant_count < 2:
             preview_pool = self._nominal_race_pools(2, 2 * CORRIDA_STAKE)
             preview_amount = int(preview_pool[0]) if preview_pool else 2 * CORRIDA_STAKE
-            lines.append(f"🥇 {self._chip_amount(preview_amount)} com mais 1 participante.")
+            lines.append(f"🥇 {self._chip_amount(preview_amount)} com mais 1 participante")
         else:
             normal_pools = self._nominal_race_pools(participant_count, participant_count * CORRIDA_STAKE)
             bonus_pool = self._race_rodada_cheia_pending_bonus(session)
@@ -592,9 +592,9 @@ class GincanaCorridaMixin:
                 lines.append(f"{self._race_placement_emoji(index)} {' + '.join(parts)}")
 
         if participant_count == CORRIDA_RODADA_CHEIA_THRESHOLD - 1:
-            lines.append("Mais 1 participante ativa a **Rodada Cheia**.")
+            lines.append("Mais 1 participante ativa a **Rodada Cheia**")
         elif participant_count >= CORRIDA_RODADA_CHEIA_THRESHOLD:
-            lines.append("🎉 **Rodada Cheia ativa.**")
+            lines.append("🎉 **Rodada Cheia ativa**")
         return lines
 
     async def _refund_race_entry(self, guild_id: int, session: dict, user_id: int, *, reason: str):
@@ -658,7 +658,7 @@ class GincanaCorridaMixin:
     def _build_race_lines(self, guild: discord.Guild, session: dict) -> list[str]:
         ordered_with_ranks = self._ordered_race_members(guild, session)
         if not ordered_with_ranks:
-            return ["🔘 Ninguém entrou ainda."]
+            return ["🔘 Ninguém entrou ainda"]
 
         progress_map = session.get("progress", {}) or {}
         state_map = session.get("state_map", {}) or {}
@@ -714,7 +714,7 @@ class GincanaCorridaMixin:
         if not session.get("started"):
             embed.add_field(name="Entrada", value=self._chip_amount(CORRIDA_STAKE), inline=True)
             embed.add_field(name="Participantes", value=f"**{len(self._get_race_participants(guild, session))}/{CORRIDA_MAX_PARTICIPANTS}**", inline=True)
-            embed.set_footer(text="O criador ou a staff pode iniciar com pelo menos 2 participantes.")
+            embed.set_footer(text="O criador ou a staff pode iniciar com pelo menos 2 participantes")
         return embed
 
     async def _close_lobby_message(self, session: dict, guild: discord.Guild, *, title: str, detail: str):
@@ -734,12 +734,12 @@ class GincanaCorridaMixin:
         guild = interaction.guild
         user = interaction.user
         if guild is None or not isinstance(user, discord.Member):
-            await self._send_component_feedback(interaction, "Servidor inválido.")
+            await self._send_component_feedback(interaction, "Servidor inválido")
             return
 
         session = self._get_race_session(guild.id)
         if session is None or session.get("ended") or session.get("started") or session.get("starting"):
-            await self._send_component_feedback(interaction, "Essa corrida não está mais aceitando entradas.")
+            await self._send_component_feedback(interaction, "Essa corrida não está mais aceitando entradas")
             return
 
         locked = session.setdefault("locked_participants", set())
@@ -749,14 +749,14 @@ class GincanaCorridaMixin:
                 interaction,
                 guild.id,
                 user.id,
-                f"Você já está participando desta corrida.\n\n{self._race_plan_identity_text(plan)}",
+                f"Você já está participando desta corrida\n\n{self._race_plan_identity_text(plan)}",
             )
             return
         if len(locked) >= CORRIDA_MAX_PARTICIPANTS:
-            await self._send_component_feedback(interaction, "Essa corrida já atingiu o limite de 6 participantes.")
+            await self._send_component_feedback(interaction, "Essa corrida já atingiu o limite de 6 participantes")
             return
         if await self._game_sessions.is_user_busy(user.id, except_session_id=str(session.get("registry_session_id") or "")):
-            await self._send_component_feedback(interaction, "Você já está participando de outro jogo.")
+            await self._send_component_feedback(interaction, "Você já está participando de outro jogo")
             return
 
         await self._complete_race_join(
@@ -769,13 +769,13 @@ class GincanaCorridaMixin:
         guild = interaction.guild
         user = interaction.user
         if guild is None or int(guild.id) != int(guild_id) or not isinstance(user, discord.Member):
-            await self._send_component_feedback(interaction, "Servidor inválido.")
+            await self._send_component_feedback(interaction, "Servidor inválido")
             return
         await self._safe_defer_component_interaction(interaction)
 
         session = self._get_race_session(guild.id)
         if session is None or str(session.get("registry_session_id") or "") != str(expected_session_id):
-            await self._send_component_feedback(interaction, "Essa corrida não está mais disponível.")
+            await self._send_component_feedback(interaction, "Essa corrida não está mais disponível")
             return
 
         needs_negative_confirm = self._needs_negative_confirmation(guild.id, user.id, CORRIDA_STAKE)
@@ -788,10 +788,10 @@ class GincanaCorridaMixin:
         async with join_lock:
             session = self._get_race_session(guild.id)
             if session is None or str(session.get("registry_session_id") or "") != str(expected_session_id):
-                await self._send_component_feedback(interaction, "Essa corrida não está mais disponível.")
+                await self._send_component_feedback(interaction, "Essa corrida não está mais disponível")
                 return
             if session.get("ended") or session.get("started") or session.get("starting"):
-                await self._send_component_feedback(interaction, "Essa corrida não está mais aceitando entradas.")
+                await self._send_component_feedback(interaction, "Essa corrida não está mais aceitando entradas")
                 return
 
             locked = session.setdefault("locked_participants", set())
@@ -801,22 +801,22 @@ class GincanaCorridaMixin:
                     interaction,
                     guild.id,
                     user.id,
-                    f"Você já está participando desta corrida.\n\n{self._race_plan_identity_text(plan)}",
+                    f"Você já está participando desta corrida\n\n{self._race_plan_identity_text(plan)}",
                 )
                 return
             if len(locked) >= CORRIDA_MAX_PARTICIPANTS:
-                await self._send_component_feedback(interaction, "Essa corrida já atingiu o limite de 6 participantes.")
+                await self._send_component_feedback(interaction, "Essa corrida já atingiu o limite de 6 participantes")
                 return
             registry_session_id = str(session.get("registry_session_id") or "")
             if await self._game_sessions.is_user_busy(user.id, except_session_id=registry_session_id):
-                await self._send_component_feedback(interaction, "Você já está participando de outro jogo.")
+                await self._send_component_feedback(interaction, "Você já está participando de outro jogo")
                 return
 
             entry_text = self._chip_spend_breakdown_text(guild.id, user.id, CORRIDA_STAKE)
             entry_spend = self._entry_spend_parts(guild.id, user.id, CORRIDA_STAKE)
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE, reason="Entrada na corrida")
             if not paid:
-                await self._send_component_feedback(interaction, chip_note or "Você não tem saldo suficiente para entrar nessa corrida.")
+                await self._send_component_feedback(interaction, chip_note or "Você não tem saldo suficiente para entrar nessa corrida")
                 return
 
             registry_created_here = False
@@ -858,11 +858,11 @@ class GincanaCorridaMixin:
                     await self._release_race_registry(session)
                 code = str(getattr(reservation, "code", "") or "")
                 if code == "guild_full":
-                    feedback = "O servidor já atingiu o limite de 6 jogadores ativos."
+                    feedback = "O servidor já atingiu o limite de 6 jogadores ativos"
                 elif code == "user_busy":
-                    feedback = "Você já está participando de outro jogo."
+                    feedback = "Você já está participando de outro jogo"
                 else:
-                    feedback = "Não foi possível reservar sua vaga nesta corrida. A entrada foi devolvida."
+                    feedback = "Não foi possível reservar sua vaga nesta corrida\nA entrada foi devolvida"
                 await self._send_component_feedback(interaction, feedback)
                 return
 
@@ -887,25 +887,25 @@ class GincanaCorridaMixin:
         if not await self._safe_defer_component_interaction(interaction):
             return
         if guild is None or not isinstance(user, discord.Member):
-            await self._send_component_feedback(interaction, "Servidor inválido.")
+            await self._send_component_feedback(interaction, "Servidor inválido")
             return
 
         session = self._get_race_session(guild.id)
         if session is None or session.get("ended") or session.get("started") or session.get("starting"):
-            await self._send_component_feedback(interaction, "Essa corrida já foi iniciada.")
+            await self._send_component_feedback(interaction, "Essa corrida já foi iniciada")
             return
 
         is_owner = int(session.get("owner_id") or 0) == user.id
         if not is_owner and not self._is_staff_member(user):
-            await self._send_component_feedback(interaction, "Só o criador da corrida ou a staff pode iniciar.")
+            await self._send_component_feedback(interaction, "Só o criador da corrida ou a staff pode iniciar")
             return
 
         participants = self._get_race_participants(guild, session)
         if is_owner and user.id not in set(session.get("locked_participants", set()) or []):
-            await self._send_component_feedback(interaction, "Você precisa entrar na corrida antes de iniciá-la.")
+            await self._send_component_feedback(interaction, "Você precisa entrar na corrida antes de iniciá-la")
             return
         if len(participants) < 2:
-            await self._send_component_feedback(interaction, "A corrida precisa de pelo menos 2 participantes para começar.")
+            await self._send_component_feedback(interaction, "A corrida precisa de pelo menos 2 participantes para começar")
             return
 
         try:
@@ -914,7 +914,7 @@ class GincanaCorridaMixin:
                 fresh_session = self._race_sessions.get(guild.id)
                 if fresh_session is not None and not fresh_session.get("ended"):
                     fresh_session["starting"] = False
-                await self._send_component_feedback(interaction, "Não foi possível iniciar a corrida agora.")
+                await self._send_component_feedback(interaction, "Não foi possível iniciar a corrida agora")
                 return
         except Exception:
             fresh_session = self._race_sessions.get(guild.id)
@@ -929,7 +929,7 @@ class GincanaCorridaMixin:
                     await self._refresh_race_message(guild.id)
                 except Exception:
                     pass
-            await self._send_component_feedback(interaction, "Não foi possível iniciar a corrida agora.")
+            await self._send_component_feedback(interaction, "Não foi possível iniciar a corrida agora")
 
     def _race_render_key(self, session: dict):
         active_impulse_view = session.get("active_impulse_view")
@@ -1107,19 +1107,19 @@ class GincanaCorridaMixin:
 
     def _pick_race_narration(self, guild: discord.Guild, session: dict, participants: list[discord.Member], tick_events: list[tuple[str, discord.Member]], *, tick: int, final_tick: bool = False) -> str:
         if final_tick:
-            return "🏁 Todos cruzaram a linha."
+            return "🏁 Todos cruzaram a linha"
         event_lines: list[str] = []
         for event_key, member in tick_events:
             if event_key == "boost_pequeno":
-                event_lines.append(f"{_HORSE_BOOST} {member.mention} recebeu impulso pequeno.")
+                event_lines.append(f"{_HORSE_BOOST} {member.mention} recebeu impulso pequeno")
             elif event_key == "boost_medio":
-                event_lines.append(f"{_HORSE_BOOST} {member.mention} recebeu impulso médio.")
+                event_lines.append(f"{_HORSE_BOOST} {member.mention} recebeu impulso médio")
             elif event_key == "boost_grande":
-                event_lines.append(f"{_HORSE_DASH} {member.mention} disparou com impulso grande.")
+                event_lines.append(f"{_HORSE_DASH} {member.mention} disparou com impulso grande")
             elif event_key == "trip":
-                event_lines.append(f"💥 {member.mention} tropeçou.")
+                event_lines.append(f"💥 {member.mention} tropeçou")
             elif event_key == "lead":
-                event_lines.append(f"👑 {member.mention} assumiu a liderança.")
+                event_lines.append(f"👑 {member.mention} assumiu a liderança")
             if len(event_lines) >= 3:
                 break
         return "\n".join(event_lines[:3])
@@ -1259,7 +1259,7 @@ class GincanaCorridaMixin:
             session["starting"] = False
             session["ended"] = True
             await self._release_race_registry(session)
-            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="A corrida precisa de pelo menos **2 participantes**. A entrada foi devolvida.")
+            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="A corrida precisa de pelo menos **2 participantes**\nA entrada foi devolvida")
             self._race_sessions.pop(guild_id, None)
             return True
         if len(participants) < 2:
@@ -1268,7 +1268,7 @@ class GincanaCorridaMixin:
             session["starting"] = False
             session["ended"] = True
             await self._release_race_registry(session)
-            detail = "O lobby foi encerrado sem participantes." if not locked_ids else "Não restaram participantes suficientes. Todas as entradas foram devolvidas."
+            detail = "O lobby foi encerrado sem participantes" if not locked_ids else "Não restaram participantes suficientes\nTodas as entradas foram devolvidas"
             await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail=detail)
             self._race_sessions.pop(guild_id, None)
             return True
@@ -1482,7 +1482,7 @@ class GincanaCorridaMixin:
             elif finishers_this_tick:
                 ordered_finishers = [user_id for user_id, _score in sorted(finishers_this_tick, key=lambda item: (-item[1], item[0]))][:1]
                 finisher = guild.get_member(int(ordered_finishers[0])) if ordered_finishers else None
-                session["narration"] = f"🏁 {finisher.mention} cruzou a linha." if finisher else "🏁 Um corredor cruzou a linha."
+                session["narration"] = f"🏁 {finisher.mention} cruzou a linha" if finisher else "🏁 Um corredor cruzou a linha"
                 session["narration_hold_ticks"] = 0
             elif hold_ticks > 0 and str(session.get("narration") or "").strip():
                 session["narration_hold_ticks"] = hold_ticks - 1
@@ -1532,7 +1532,7 @@ class GincanaCorridaMixin:
                 reward_parts.append(self._bonus_chip_amount(bonus_amount))
             result_lines.append(f"{self._race_placement_emoji(rank_map.get(member.id, 9999))} {member.mention} — {' + '.join(reward_parts)}")
         if not rewarded_any:
-            result_lines.append("Nenhuma premiação foi distribuída.")
+            result_lines.append("Nenhuma premiação foi distribuída")
 
         finish_meta = session.get("finish_meta") or {}
         if len(final_order) >= 2:
@@ -1545,7 +1545,7 @@ class GincanaCorridaMixin:
                 if diff <= 0.18:
                     result_lines.append(f"📸 Chegada apertadíssima entre {leader.mention} e {runner_up.mention}!")
 
-        session["narration"] = "🏁 Todos cruzaram a linha."
+        session["narration"] = "🏁 Todos cruzaram a linha"
         session["impulse_status"] = ""
 
         rank_map = _shared_rank_map([[member.id for member in group] for group in final_groups])
@@ -1618,7 +1618,7 @@ class GincanaCorridaMixin:
                 guild.id,
                 user_id,
                 'as',
-                f"recuperou {self._chip_text(refund, kind='gain')} da entrada.",
+                f"recuperou {self._chip_text(refund, kind='gain')} da entrada",
             )
             await self._route_lobby_race_notices(
                 (session.get("race_interactions") or {}).get(user_id),
@@ -1736,11 +1736,11 @@ class GincanaCorridaMixin:
                 self._race_sessions.pop(guild.id, None)
             code = str(getattr(reservation, "code", "") or "")
             if code == "guild_full":
-                detail = "O servidor já atingiu o limite de 6 jogadores ativos."
+                detail = "O servidor já atingiu o limite de 6 jogadores ativos"
             elif code == "user_busy":
-                detail = "Você já está participando de outro jogo."
+                detail = "Você já está participando de outro jogo"
             else:
-                detail = "Não foi possível abrir a corrida agora."
+                detail = "Não foi possível abrir a corrida agora"
             try:
                 await message.channel.send(embed=self._make_embed("🐎 Corrida indisponível", detail, ok=False))
             except Exception:
@@ -1780,7 +1780,7 @@ class GincanaCorridaMixin:
             try:
                 await message.channel.send(embed=self._make_embed(
                     "🐎 Saldo insuficiente",
-                    chip_note or "Você não tem saldo suficiente para abrir essa corrida.",
+                    chip_note or "Você não tem saldo suficiente para abrir essa corrida",
                     ok=False,
                 ))
             except Exception:
@@ -1812,7 +1812,7 @@ class GincanaCorridaMixin:
             try:
                 await message.channel.send(embed=self._make_embed(
                     "🐎 Corrida indisponível",
-                    "Não foi possível reservar sua vaga. A entrada foi devolvida.",
+                    "Não foi possível reservar sua vaga\nA entrada foi devolvida",
                     ok=False,
                 ))
             except Exception:

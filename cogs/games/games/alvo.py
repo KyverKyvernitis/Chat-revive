@@ -68,40 +68,40 @@ class GincanaAlvoMixin:
                 return {
                     "key": "small",
                     "name": "Alvo pequeno",
-                    "description": "Centro mais raro, mas cada bullseye rende bônus extra.",
+                    "description": "Centro mais raro, mas cada bullseye rende bônus extra",
                     "bullseye_bonus": 4,
                 }
             if roll < 0.16:
                 return {
                     "key": "unstable",
                     "name": "Alvo instável",
-                    "description": "O alvo balança mais e aumenta a chance de erro.",
+                    "description": "O alvo balança mais e aumenta a chance de erro",
                 }
             if roll < 0.24:
                 return {
                     "key": "generous",
                     "name": "Alvo generoso",
-                    "description": "Fica mais fácil acertar os anéis internos.",
+                    "description": "Fica mais fácil acertar os anéis internos",
                 }
             if roll < 0.32:
                 return {
                     "key": "windy",
                     "name": "Vento forte",
-                    "description": "Rajadas atrapalham a precisão, mas o prêmio sobe.",
+                    "description": "Rajadas atrapalham a precisão, mas o prêmio sobe",
                     "pot_bonus": 6,
                 }
             if roll < 0.40:
                 return {
                     "key": "golden",
                     "name": "Alvo dourado",
-                    "description": "Bullseyes valem mais e a rodada fica brilhando.",
+                    "description": "Bullseyes valem mais e a rodada fica brilhando",
                     "pot_bonus": 8,
                     "bullseye_bonus": 6,
                 }
             return {
                 "key": "normal",
                 "name": "Alvo padrão",
-                "description": "Rodada normal.",
+                "description": "Rodada normal",
             }
         def _roll_target_score(self, modifier_key: str = "normal") -> int:
             roll = random.random()
@@ -212,7 +212,7 @@ class GincanaAlvoMixin:
             return "💨", "errou"
         def _format_target_participants(self, participants: list[discord.Member]) -> str:
             if not participants:
-                return "Ninguém entrou ainda."
+                return "Ninguém entrou ainda"
             mentions = [member.mention for member in participants[:8]]
             text = ", ".join(mentions)
             if len(participants) > 8:
@@ -220,10 +220,10 @@ class GincanaAlvoMixin:
             return text
         def _target_opening_text(self, participants: list[discord.Member]) -> str:
             if len(participants) >= 3:
-                return "Os **2 melhores tiros** dividem a premiação."
+                return "Os **2 melhores tiros** dividem a premiação"
             if len(participants) == 2:
-                return "Com **2 participantes**, apenas o melhor tiro recebe o prêmio."
-            return "Entre pelo botão e use **🏁 Iniciar** para começar antes do tempo."
+                return "Com **2 participantes**, apenas o melhor tiro recebe o prêmio"
+            return "Entre pelo botão e use **🏁 Iniciar** para começar antes do tempo"
         def _target_bonus_for_participants(self, count: int) -> int:
             if count >= 7:
                 return 10
@@ -235,17 +235,17 @@ class GincanaAlvoMixin:
             bullseyes = [member for member in participants if scores.get(member.id, 0) == 3]
             misses = [member for member in participants if scores.get(member.id, 0) <= 0]
             if len(misses) == len(participants):
-                special.append("💨 Ninguém acertou o alvo. A rodada virou um desastre completo.")
+                special.append("💨 Ninguém acertou o alvo\nA rodada virou um desastre completo")
             if len(bullseyes) >= 2:
                 special.append(f"🎯 Chuva de bullseyes: {', '.join(member.mention for member in bullseyes)}!")
             elif len(bullseyes) == 1 and len(participants) >= 4:
-                special.append(f"🏅 {bullseyes[0].mention} dominou a rodada com um bullseye raro.")
+                special.append(f"🏅 {bullseyes[0].mention} dominou a rodada com um bullseye raro")
             if placements:
                 top_badge, top_members, _ = placements[0]
                 if len(top_members) > 1:
-                    special.append(f"🤝 O topo terminou empatado entre {', '.join(member.mention for member in top_members)}.")
+                    special.append(f"🤝 O topo terminou empatado entre {', '.join(member.mention for member in top_members)}")
                 elif top_members and scores.get(top_members[0].id, 0) >= 2 and all(scores.get(m.id, 0) < scores.get(top_members[0].id, 0) for m in participants if m.id != top_members[0].id):
-                    special.append(f"🔥 {top_members[0].mention} levou a melhor com folga.")
+                    special.append(f"🔥 {top_members[0].mention} levou a melhor com folga")
             return special
         def _make_target_embed(self, guild: discord.Guild, session: dict, *, final_text: str | None = None, aiming: bool = False) -> discord.Embed:
             participants = self._get_target_participants(guild, session)
@@ -253,7 +253,7 @@ class GincanaAlvoMixin:
             pot_total = len(locked_ids) * ALVO_STAKE
             owner_id = int(session.get("owner_id") or 0)
             owner = guild.get_member(owner_id) if owner_id else None
-            modifier = session.get("modifier") or {"key": "normal", "name": "Alvo padrão", "description": "Rodada normal."}
+            modifier = session.get("modifier") or {"key": "normal", "name": "Alvo padrão", "description": "Rodada normal"}
             bonus = int(session.get("bonus_chips") or 0)
 
             if final_text:
@@ -288,8 +288,8 @@ class GincanaAlvoMixin:
                     color=discord.Color.blurple(),
                 )
                 embed.add_field(name="🎯 Na mira", value=self._format_target_participants(participants), inline=False)
-                embed.add_field(name="🌪️ Condição da rodada", value=f"**{modifier.get('name','Alvo padrão')}**\n{modifier.get('description','Rodada normal.')}", inline=False)
-                embed.add_field(name="Como começa", value="Entre pelo botão verde. Depois clique em **🏁 Iniciar** ou espere o tempo acabar.", inline=False)
+                embed.add_field(name="🌪️ Condição da rodada", value=f"**{modifier.get('name','Alvo padrão')}**\n{modifier.get('description','Rodada normal')}", inline=False)
+                embed.add_field(name="Como começa", value="Entre pelo botão verde\nDepois clique em **🏁 Iniciar** ou espere o tempo acabar", inline=False)
                 embed.set_footer(text="Entrou, pagou e a entrada fica travada até o fim")
 
             if owner is not None:
@@ -318,7 +318,7 @@ class GincanaAlvoMixin:
             user = interaction.user
             if guild is None or not isinstance(user, discord.Member):
                 try:
-                    await interaction.response.send_message("Não foi possível entrar nessa rodada agora.", ephemeral=True)
+                    await interaction.response.send_message("Não foi possível entrar nessa rodada agora", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -326,7 +326,7 @@ class GincanaAlvoMixin:
             session = self._get_target_session(guild.id)
             if session is None or session.get("view") is not view or session.get("ended"):
                 try:
-                    await interaction.response.send_message("Essa rodada já terminou.", ephemeral=True)
+                    await interaction.response.send_message("Essa rodada já terminou", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -335,7 +335,7 @@ class GincanaAlvoMixin:
             locked = session.setdefault("locked_participants", set())
             if user.id in locked:
                 try:
-                    await interaction.response.send_message("Você já entrou nessa rodada e sua entrada ficou travada até o fim.", ephemeral=True)
+                    await interaction.response.send_message("Você já entrou nessa rodada e sua entrada ficou travada até o fim", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -344,7 +344,7 @@ class GincanaAlvoMixin:
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE, reason="Entrada no alvo")
             if not paid:
                 try:
-                    await interaction.response.send_message(chip_note or "Você não tem saldo suficiente para entrar nessa rodada.", ephemeral=True)
+                    await interaction.response.send_message(chip_note or "Você não tem saldo suficiente para entrar nessa rodada", ephemeral=True)
                 except Exception:
                     pass
                 return
@@ -384,15 +384,15 @@ class GincanaAlvoMixin:
                 only_id = next(iter(locked_ids))
                 await self._change_user_chips(guild.id, only_id, ALVO_STAKE, reason="Devolução do alvo")
                 only_member = guild.get_member(only_id)
-                final_text = f"A rodada foi cancelada porque só {only_member.mention if only_member else '1 participante'} entrou. A entrada foi reembolsada."
+                final_text = f"A rodada foi cancelada porque só {only_member.mention if only_member else '1 participante'} entrou\nA entrada foi reembolsada"
             elif len(participants) < 2:
                 for user_id in locked_ids:
                     await self._change_user_chips(guild.id, user_id, ALVO_STAKE, reason="Devolução do alvo")
-                final_text = "A rodada foi cancelada porque não ficaram participantes suficientes. As entradas foram reembolsadas."
+                final_text = "A rodada foi cancelada porque não ficaram participantes suficientes\nAs entradas foram reembolsadas"
             else:
                 pot_total = len(locked_ids) * ALVO_STAKE
                 bonus_chips = int(session.get("bonus_chips") or 0)
-                modifier = session.get("modifier") or {"key": "normal", "name": "Alvo padrão", "description": "Rodada normal."}
+                modifier = session.get("modifier") or {"key": "normal", "name": "Alvo padrão", "description": "Rodada normal"}
                 bonus_chips += int(modifier.get("pot_bonus", 0) or 0)
                 if message is not None:
                     try:
@@ -404,7 +404,7 @@ class GincanaAlvoMixin:
                 scores = {member.id: self._roll_target_score(str(modifier.get("key", "normal"))) for member in participants}
                 rewards, placements = self._allocate_target_rewards(participants, scores, pot_total)
                 bonus_rewards, _bonus_placements = self._allocate_target_rewards(participants, scores, bonus_chips) if bonus_chips > 0 else ({}, [])
-                result_lines = [f"💥 Os tiros foram disparados. {self._CHIP_GAIN_EMOJI} Pote base: {self._chip_amount(pot_total)}"]
+                result_lines = [f"💥 Os tiros foram disparados\n{self._CHIP_GAIN_EMOJI} Pote base: {self._chip_amount(pot_total)}"]
                 if bonus_chips > 0:
                     result_lines.append(f"{self._CHIP_BONUS_EMOJI} Bônus da rodada: {self._bonus_chip_amount(bonus_chips)}")
                 result_lines.append("")
@@ -416,7 +416,7 @@ class GincanaAlvoMixin:
                     await self._record_game_played(guild.id, member.id, weekly_points=4 + score)
                     if score > 0:
                         await self.db.add_user_game_stat(guild.id, member.id, "alvo_hits", 1)
-                    result_lines.append(f"{icon} {member.mention} acertou **{zone}**.")
+                    result_lines.append(f"{icon} {member.mention} acertou **{zone}**")
                     if score == 3:
                         bullseye_members.append(member)
                         await self.db.add_user_game_stat(guild.id, member.id, "alvo_bullseyes", 1)
@@ -430,7 +430,7 @@ class GincanaAlvoMixin:
                         for member in bullseye_members:
                             await self._change_user_bonus_chips(guild.id, member.id, bull_bonus, reason="Mosca no alvo")
                             await self._grant_weekly_points(guild.id, member.id, bull_bonus)
-                        result_lines.append(f"{self._EFFECT_EMOJI} **Bullseye bônus:** cada acerto perfeito recebeu {self._bonus_chip_amount(bull_bonus)}.")
+                        result_lines.append(f"{self._EFFECT_EMOJI} **Bullseye bônus:** cada acerto perfeito recebeu {self._bonus_chip_amount(bull_bonus)}")
 
                 if rewards:
                     result_lines.append("")
@@ -487,7 +487,7 @@ class GincanaAlvoMixin:
             cooldown_remaining = max(0.0, (last_used + 6.0) - time.time())
             if cooldown_remaining > 0:
                 try:
-                    await message.channel.send(embed=self._make_embed("🎯 Aguarde um pouco", f"Espere **{int(cooldown_remaining) + 1}s** para abrir outra rodada de alvo.", ok=False))
+                    await message.channel.send(embed=self._make_embed("🎯 Aguarde um pouco", f"Espere **{int(cooldown_remaining) + 1}s** para abrir outra rodada de alvo", ok=False))
                 except Exception:
                     pass
                 return True
@@ -495,7 +495,7 @@ class GincanaAlvoMixin:
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE, reason="Entrada no alvo")
             if not paid:
                 try:
-                    await message.channel.send(embed=self._make_embed("🎯 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False))
+                    await message.channel.send(embed=self._make_embed("🎯 Saldo insuficiente", chip_note or "Você não tem saldo suficiente", ok=False))
                 except Exception:
                     pass
                 return True
@@ -518,7 +518,7 @@ class GincanaAlvoMixin:
 
             embed = self._make_target_embed(guild, session)
             if chip_note:
-                embed.set_footer(text=f"{chip_note} Entrou, pagou e a entrada fica travada até o fim.")
+                embed.set_footer(text=f"{chip_note} Entrou, pagou e a entrada fica travada até o fim")
             try:
                 panel_message = await message.channel.send(embed=embed, view=view)
             except Exception:
@@ -552,7 +552,7 @@ class GincanaAlvoMixin:
             participants = self._get_target_participants(guild, session)
             if len(participants) < 2:
                 try:
-                    await message.channel.send(embed=self._make_embed("🎯 Ainda faltam jogadores", "O alvo precisa de pelo menos **2 participantes** na call para disparar.", ok=False))
+                    await message.channel.send(embed=self._make_embed("🎯 Ainda faltam jogadores", "O alvo precisa de pelo menos **2 participantes** na call para disparar", ok=False))
                 except Exception:
                     pass
                 return True
@@ -579,7 +579,7 @@ class _TargetJoinView(discord.ui.LayoutView):
     def _build_layout(self):
         self.clear_items()
         participants = self.cog._get_target_participants(self.guild, self.session)
-        modifier = self.session.get("modifier") or {"name": "Alvo padrão", "description": "Rodada normal."}
+        modifier = self.session.get("modifier") or {"name": "Alvo padrão", "description": "Rodada normal"}
         pot_total = len(self.session.get("locked_participants", set())) * ALVO_STAKE
         bonus_total = int(self.session.get("bonus_chips") or 0) + int(modifier.get("pot_bonus", 0) or 0)
         countdown = int(self.session.get("start_countdown") or 0)
@@ -605,10 +605,10 @@ class _TargetJoinView(discord.ui.LayoutView):
         if participants:
             plist.extend(f"• {m.mention}" for m in participants)
         else:
-            plist.append("• Ninguém entrou ainda.")
-        foot = ["Use o botão verde para entrar.", "O criador da rodada ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes."]
+            plist.append("• Ninguém entrou ainda")
+        foot = ["Use o botão verde para entrar", "O criador da rodada ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes"]
         if countdown > 0:
-            foot.append("A contagem começou e ainda dá tempo de entrar.")
+            foot.append("A contagem começou e ainda dá tempo de entrar")
         row = discord.ui.ActionRow(self.join_button, self.start_button)
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(header)),
@@ -656,7 +656,7 @@ class _TargetStateView(discord.ui.LayoutView):
         participants = cog._get_target_participants(guild, session)
         if finished:
             summary = session.get('summary_line') or f"<:boom:1485862099308804107> **Pote distribuído:** {cog._chip_amount(int(session.get('prize_total') or 0))}"
-            hits = session.get('hit_lines') or ['A rodada terminou.']
+            hits = session.get('hit_lines') or ['A rodada terminou']
             podium = session.get('podium_lines') or []
             closing = session.get('closing_line') or None
             items = [
@@ -677,7 +677,7 @@ class _TargetStateView(discord.ui.LayoutView):
                 f"**Condição:** {modifier.get('name','Alvo padrão')}",
                 f"**Participantes:** {len(participants)}",
                 '',
-                'Os participantes estão ajustando a mira.',
+                'Os participantes estão ajustando a mira',
             ]
             self.add_item(discord.ui.Container(discord.ui.TextDisplay('\n'.join(lines)), accent_color=discord.Color.blurple()))
 
@@ -713,7 +713,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         lobby_message = session.get('lobby_message') or session.get('message')
         if guild is not None and lobby_message is not None:
             try:
-                await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'A rodada foi encerrada automaticamente porque ficou travada por tempo demais. As entradas foram devolvidas.'))
+                await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'A rodada foi encerrada automaticamente porque ficou travada por tempo demais\nAs entradas foram devolvidas'))
             except Exception:
                 pass
         if self._target_sessions.get(guild_id) is session:
@@ -750,17 +750,17 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         guild = interaction.guild
         user = interaction.user
         if guild is None or not isinstance(user, discord.Member):
-            try: await interaction.response.send_message('Não foi possível entrar nessa rodada agora.', ephemeral=True)
+            try: await interaction.response.send_message('Não foi possível entrar nessa rodada agora', ephemeral=True)
             except Exception: pass
             return
         session = self._get_target_session(guild.id)
         if session is None or session.get('view') is not view or session.get('ended'):
-            try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+            try: await interaction.response.send_message('Essa rodada já terminou', ephemeral=True)
             except Exception: pass
             return
         locked = session.setdefault('locked_participants', set())
         if user.id in locked:
-            try: await interaction.response.send_message('Você já entrou nessa rodada e sua entrada ficou travada até o fim.', ephemeral=True)
+            try: await interaction.response.send_message('Você já entrou nessa rodada e sua entrada ficou travada até o fim', ephemeral=True)
             except Exception: pass
             return
         needs_negative_confirm = self._needs_negative_confirmation(guild.id, user.id, ALVO_STAKE)
@@ -776,9 +776,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         if not paid:
             try:
                 if interaction.response.is_done():
-                    await interaction.followup.send(chip_note or 'Você não tem saldo suficiente para entrar nessa rodada.', ephemeral=True)
+                    await interaction.followup.send(chip_note or 'Você não tem saldo suficiente para entrar nessa rodada', ephemeral=True)
                 else:
-                    await interaction.response.send_message(chip_note or 'Você não tem saldo suficiente para entrar nessa rodada.', ephemeral=True)
+                    await interaction.response.send_message(chip_note or 'Você não tem saldo suficiente para entrar nessa rodada', ephemeral=True)
             except Exception:
                 pass
             return
@@ -794,26 +794,26 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         guild = interaction.guild
         user = interaction.user
         if guild is None or not isinstance(user, discord.Member):
-            try: await interaction.response.send_message('Servidor inválido.', ephemeral=True)
+            try: await interaction.response.send_message('Servidor inválido', ephemeral=True)
             except Exception: pass
             return
         session = self._get_target_session(guild.id)
         if session is None or session.get('view') is not view or session.get('ended'):
-            try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+            try: await interaction.response.send_message('Essa rodada já terminou', ephemeral=True)
             except Exception: pass
             return
         if session.get('starting'):
-            try: await interaction.response.send_message('A contagem já começou.', ephemeral=True)
+            try: await interaction.response.send_message('A contagem já começou', ephemeral=True)
             except Exception: pass
             return
         is_owner = int(session.get('owner_id') or 0) == user.id
         if not is_owner and not self._is_staff_member(user):
-            try: await interaction.response.send_message('Só o criador da rodada ou a staff pode iniciar.', ephemeral=True)
+            try: await interaction.response.send_message('Só o criador da rodada ou a staff pode iniciar', ephemeral=True)
             except Exception: pass
             return
         participants = self._get_target_participants(guild, session)
         if len(participants) < 2:
-            try: await interaction.response.send_message('A rodada precisa de pelo menos 2 participantes.', ephemeral=True)
+            try: await interaction.response.send_message('A rodada precisa de pelo menos 2 participantes', ephemeral=True)
             except Exception: pass
             return
         session['starting'] = True
@@ -821,7 +821,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         await self._safe_cancel_task(session.get('countdown_task'))
         session['countdown_task'] = self.bot.loop.create_task(self._run_target_start_countdown(guild.id, view))
         self._touch_runtime_state(session, kind='alvo', guild_id=guild.id)
-        try: await interaction.response.send_message('Contagem iniciada.', ephemeral=True)
+        try: await interaction.response.send_message('Contagem iniciada', ephemeral=True)
         except Exception: pass
         await self._refresh_target_message(guild.id)
 
@@ -864,7 +864,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             await self._change_user_chips(guild.id, only_id, ALVO_STAKE, reason="Devolução do alvo")
             if lobby_message is not None:
                 try:
-                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'A rodada precisa de pelo menos **2 participantes**. A entrada foi devolvida.'))
+                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'A rodada precisa de pelo menos **2 participantes**\nA entrada foi devolvida'))
                 except Exception: pass
             self._target_sessions.pop(guild_id, None)
             return True
@@ -873,7 +873,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 await self._change_user_chips(guild.id, user_id, ALVO_STAKE, reason="Devolução do alvo")
             if lobby_message is not None:
                 try:
-                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Não restaram participantes suficientes. Todas as entradas foram devolvidas.'))
+                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Não restaram participantes suficientes\nTodas as entradas foram devolvidas'))
                 except Exception: pass
             self._target_sessions.pop(guild_id, None)
             return True
@@ -889,7 +889,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         # --- original resolution block with slight adjustments ---
         pot_total = len(locked_ids) * ALVO_STAKE
         bonus_chips = int(session.get('bonus_chips') or 0)
-        modifier = session.get('modifier') or {'key': 'normal', 'name': 'Alvo padrão', 'description': 'Rodada normal.'}
+        modifier = session.get('modifier') or {'key': 'normal', 'name': 'Alvo padrão', 'description': 'Rodada normal'}
         bonus_chips += int(modifier.get('pot_bonus', 0) or 0)
         if message is not None:
             try:
@@ -921,7 +921,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 for member in bullseye_members:
                     await self._change_user_bonus_chips(guild.id, member.id, bull_bonus, reason="Mosca no alvo")
                     await self._grant_weekly_points(guild.id, member.id, bull_bonus)
-                bonus_line = f"{self._EFFECT_EMOJI} **Bullseye bônus:** {self._bonus_chip_amount(bull_bonus)} para cada acerto perfeito."
+                bonus_line = f"{self._EFFECT_EMOJI} **Bullseye bônus:** {self._bonus_chip_amount(bull_bonus)} para cada acerto perfeito"
         podium_lines = []
         winner_mentions = []
         winning_reward = 0
@@ -982,7 +982,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 guild.id,
                 member.id,
                 'as',
-                f"recuperou {self._chip_text(refund, kind='gain')} da entrada.",
+                f"recuperou {self._chip_text(refund, kind='gain')} da entrada",
             )
             await self._route_lobby_race_notices(
                 (session.get('race_interactions') or {}).get(member.id),
@@ -995,7 +995,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
 
         closing_parts = []
         if winner_mentions and len(winner_mentions) > 1:
-            closing_parts.append(f"🔥 {', '.join(winner_mentions)} dividiram a ponta.")
+            closing_parts.append(f"🔥 {', '.join(winner_mentions)} dividiram a ponta")
         special_lines = self._build_target_special_lines(participants, scores, placements)
         if special_lines:
             for line in special_lines:
@@ -1076,7 +1076,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         if needs_negative_confirm:
             chip_note = None
         if not paid:
-            try: await message.channel.send(embed=self._make_embed('🎯 Saldo insuficiente', chip_note or 'Você não tem saldo suficiente.', ok=False))
+            try: await message.channel.send(embed=self._make_embed('🎯 Saldo insuficiente', chip_note or 'Você não tem saldo suficiente', ok=False))
             except Exception: pass
             return True
         session = {

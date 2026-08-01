@@ -93,7 +93,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
     def _build_header_lines(self) -> list[str]:
         return [
             "# 🥺 Esmola",
-            f"Este pobre usuário necessitado está pedindo uma esmola de {self.cog._chip_amount(self.amount)}.",
+            f"Este pobre usuário necessitado está pedindo uma esmola de {self.cog._chip_amount(self.amount)}",
         ]
 
     def _build_info_lines(self) -> list[str]:
@@ -101,23 +101,23 @@ class _MendigarRequestView(discord.ui.LayoutView):
         if self.target_mention:
             lines.append(f"**Convocado para ajudar:** {self.target_mention}")
         else:
-            lines.append("Qualquer alma bondosa com fichas normais suficientes pode ajudar no botão abaixo.")
+            lines.append("Qualquer alma bondosa com fichas normais suficientes pode ajudar no botão abaixo")
         marker = self.cog._race_effect_message(self.guild_id, self.author_id, "labia")
         if marker:
             lines.append(marker)
-        lines.append(f"A esmola expira em **{int(CHIPS_MENDIGAR_TIMEOUT_SECONDS // 60)} minutos**.")
+        lines.append(f"A esmola expira em **{int(CHIPS_MENDIGAR_TIMEOUT_SECONDS // 60)} minutos**")
         return lines
 
     async def _handle_donate(self, interaction: discord.Interaction):
         if self.fulfilled:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("💸 Esmola encerrada", ["Esse pedido já foi atendido."], ok=False),
+                view=self.cog._make_v2_notice("💸 Esmola encerrada", ["Esse pedido já foi atendido"], ok=False),
                 ephemeral=True,
             )
             return
         if interaction.guild is None or int(interaction.guild.id) != self.guild_id:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("💸 Esmola", ["Esse pedido só pode ser usado no servidor original."], ok=False),
+                view=self.cog._make_v2_notice("💸 Esmola", ["Esse pedido só pode ser usado no servidor original"], ok=False),
                 ephemeral=True,
             )
             return
@@ -125,25 +125,25 @@ class _MendigarRequestView(discord.ui.LayoutView):
         recipient = interaction.guild.get_member(self.author_id)
         if donor is None or recipient is None:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("💸 Esmola", ["Não consegui localizar todo mundo para concluir essa esmola."], ok=False),
+                view=self.cog._make_v2_notice("💸 Esmola", ["Não consegui localizar todo mundo para concluir essa esmola"], ok=False),
                 ephemeral=True,
             )
             return
         if donor.bot:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("💸 Esmola", ["Bots não podem dar esmola."], ok=False),
+                view=self.cog._make_v2_notice("💸 Esmola", ["Bots não podem dar esmola"], ok=False),
                 ephemeral=True,
             )
             return
         if donor.id == recipient.id:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("💸 Esmola", ["Você não pode dar esmola para si mesmo."], ok=False),
+                view=self.cog._make_v2_notice("💸 Esmola", ["Você não pode dar esmola para si mesmo"], ok=False),
                 ephemeral=True,
             )
             return
         if self.target_id and int(donor.id) != int(self.target_id):
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("💸 Esmola reservada", ["Essa esmola foi direcionada para outra pessoa decidir."], ok=False),
+                view=self.cog._make_v2_notice("💸 Esmola reservada", ["Essa esmola foi direcionada para outra pessoa decidir"], ok=False),
                 ephemeral=True,
             )
             return
@@ -156,7 +156,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
                     "💸 Esmola bloqueada",
-                    ["Você já ajudou alguém com esmola recentemente.", f"Tente novamente em **{self.cog._format_wait_compact(remaining)}**."],
+                    ["Você já ajudou alguém com esmola recentemente", f"Tente novamente em **{self.cog._format_wait_compact(remaining)}**"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -168,7 +168,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
                     "💸 Esmola bloqueada",
-                    [f"Você precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas normais** para dar esmola."],
+                    [f"Você precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas normais** para dar esmola"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -178,7 +178,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
                     "💸 Esmola bloqueada",
-                    ["Você precisa participar de pelo menos **1 jogo** antes de dar esmola."],
+                    ["Você precisa participar de pelo menos **1 jogo** antes de dar esmola"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -188,7 +188,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
                     "💸 Esmola bloqueada",
-                    ["Você não tem fichas normais suficientes para cobrir essa esmola.", "Fichas bônus não entram nessa conta."],
+                    ["Você não tem fichas normais suficientes para cobrir essa esmola", "Fichas bônus não entram nessa conta"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -198,7 +198,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
                     "💸 Esmola bloqueada",
-                    [f"{recipient.mention} passaria de **{CHIPS_PAY_RECEIVER_MAX_BALANCE} fichas normais** com essa esmola."],
+                    [f"{recipient.mention} passaria de **{CHIPS_PAY_RECEIVER_MAX_BALANCE} fichas normais** com essa esmola"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -218,7 +218,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
                     "💸 Esmola bloqueada",
-                    ["Esse pedido já ficou velho demais para valer uma nova esmola agora."],
+                    ["Esse pedido já ficou velho demais para valer uma nova esmola agora"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -242,7 +242,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
                     "\n".join(
                         [
                             "# 💸 Esmola entregue",
-                            f"{donor.mention} deu {self.cog._chip_amount(self.amount)} para {recipient.mention}.",
+                            f"{donor.mention} deu {self.cog._chip_amount(self.amount)} para {recipient.mention}",
                             f"Saldo de {recipient.mention}: {self.cog._format_compact_chip_balance(self.guild_id, recipient.id)}",
                         ]
                     )
@@ -259,7 +259,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
             await self.message.edit(
                 view=self.cog._make_v2_notice(
                     "💸 Esmola",
-                    ["Ninguém ajudou essa pobre alma, o pedido de esmola expirou."],
+                    ["Ninguém ajudou essa pobre alma, o pedido de esmola expirou"],
                     ok=False,
                     accent_color=discord.Color.red(),
                 )
@@ -318,7 +318,7 @@ class _RacePanelView(discord.ui.LayoutView):
 
     async def _ensure_owner(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None or int(interaction.guild.id) != self.guild_id or int(interaction.user.id) != self.user_id:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", ["Esse painel pertence a outra pessoa."], ok=False), ephemeral=True)
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", ["Esse painel pertence a outra pessoa"], ok=False), ephemeral=True)
             return False
         return True
 
@@ -332,7 +332,7 @@ class _RacePanelView(discord.ui.LayoutView):
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
                     "🍀 Saldo insuficiente",
-                    [f"Trocar de raça custa **{RACE_REROLL_COST}** {self.cog._CHIP_EMOJI}."],
+                    [f"Trocar de raça custa **{RACE_REROLL_COST}** {self.cog._CHIP_EMOJI}"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -340,7 +340,7 @@ class _RacePanelView(discord.ui.LayoutView):
             return
         await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True, reason="Troca de raça")
         await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
-        spinner_texts = ("Sorteando sua nova raça.", "Sorteando sua nova raça..", "Sorteando sua nova raça...", "Definindo sua nova raça...")
+        spinner_texts = ("Sorteando sua nova raça", "Sorteando sua nova raça..", "Sorteando sua nova raça...", "Definindo sua nova raça...")
         await interaction.response.edit_message(view=self.cog._make_race_spinner_view(spinner_texts[0]))
         target_message = interaction.message
         for text_line in spinner_texts[1:]:
@@ -363,7 +363,7 @@ class _RacePanelView(discord.ui.LayoutView):
             return
         race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
         if not race_key:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", ["Você ainda não tem uma raça definida."], ok=False), ephemeral=True)
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", ["Você ainda não tem uma raça definida"], ok=False), ephemeral=True)
             return
         now_active = self.cog._is_user_race_active(self.guild_id, self.user_id)
         await self.cog._set_user_race_active(self.guild_id, self.user_id, not now_active)
@@ -401,7 +401,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         info = self._get_race_info_by_key(race_key) or {}
         emoji = str(info.get("emoji") or "🍀")
         race_name = str(info.get("name") or "Sem raça")
-        lines = [f"# {emoji} Nova raça: {race_name}", "Sua raça foi definida.", "", "## Habilidades"]
+        lines = [f"# {emoji} Nova raça: {race_name}", "Sua raça foi definida", "", "## Habilidades"]
         for effect in self._get_race_effects(race_key):
             effect_emoji = str(effect.get("emoji") or emoji).strip()
             lines.extend([
@@ -429,14 +429,14 @@ class GamesCog(dcommands.Cog, GamesCore):
             return True
         await self._maybe_execute_due_chip_season_reset(guild.id)
         if amount <= 0:
-            await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Use um valor maior que zero."], ok=False))
+            await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Use um valor maior que zero"], ok=False))
             return True
         current_balance = int(self.db.get_user_chips(guild.id, message.author.id, default=CHIPS_INITIAL) or 0)
         if current_balance + amount > CHIPS_PAY_RECEIVER_MAX_BALANCE:
             await message.channel.send(
                 view=self._make_v2_notice(
                     "🥺 Esmola",
-                    [f"Esse pedido deixaria você acima de **{CHIPS_PAY_RECEIVER_MAX_BALANCE} fichas normais**. Ajuste o valor e tente de novo."],
+                    [f"Esse pedido deixaria você acima de **{CHIPS_PAY_RECEIVER_MAX_BALANCE} fichas normais**\nAjuste o valor e tente de novo"],
                     ok=False,
                 )
             )
@@ -449,7 +449,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             await message.channel.send(
                 view=self._make_v2_notice(
                     "🥺 Esmola",
-                    ["Você já pediu esmola demais por agora.", f"Tente novamente em **{self._format_wait_compact(remaining)}**."],
+                    ["Você já pediu esmola demais por agora", f"Tente novamente em **{self._format_wait_compact(remaining)}**"],
                     ok=False,
                 )
             )
@@ -457,10 +457,10 @@ class GamesCog(dcommands.Cog, GamesCore):
 
         if target is not None:
             if target.bot:
-                await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Bots não entram nesse esquema de esmola."], ok=False))
+                await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Bots não entram nesse esquema de esmola"], ok=False))
                 return True
             if target.id == message.author.id:
-                await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Pedir esmola para si mesmo já é sacanagem demais."], ok=False))
+                await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Pedir esmola para si mesmo já é sacanagem demais"], ok=False))
                 return True
 
         view = _MendigarRequestView(
@@ -491,8 +491,8 @@ class GamesCog(dcommands.Cog, GamesCore):
                 view=self._make_v2_notice(
                     "🥺 Esmola",
                     [
-                        "Use `mendigar 40` para pedir uma esmola geral.",
-                        "Use `mendigar 40 @usuário` para pedir esmola a alguém específico.",
+                        "Use `mendigar 40` para pedir uma esmola geral",
+                        "Use `mendigar 40 @usuário` para pedir esmola a alguém específico",
                     ],
                     ok=False,
                 )
@@ -509,10 +509,10 @@ class GamesCog(dcommands.Cog, GamesCore):
             if target is None:
                 target = message.guild.get_member(target_id)
             if target is None:
-                await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Não encontrei essa pessoa no servidor para pedir esmola."], ok=False))
+                await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Não encontrei essa pessoa no servidor para pedir esmola"], ok=False))
                 return True
         elif getattr(message, "mentions", None):
-            await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Use no formato `mendigar valor @usuário`."], ok=False))
+            await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Use no formato `mendigar valor @usuário`"], ok=False))
             return True
 
         return await self._start_mendigar_request(message, amount=amount, target=target)
@@ -530,7 +530,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         if not race_key:
             race_key = await self._roll_user_race(message.guild.id, message.author.id)
             reveal = self._make_race_reveal_view(message.guild.id, message.author.id, race_key)
-            spinner = await message.channel.send(view=self._make_race_spinner_view("Sorteando sua raça."))
+            spinner = await message.channel.send(view=self._make_race_spinner_view("Sorteando sua raça"))
             for text_line in ("Sorteando sua raça..", "Sorteando sua raça...", "Definindo sua raça..."):
                 await asyncio.sleep(0.35)
                 try:
@@ -565,7 +565,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         handler = getattr(self, handler_name, None)
         if not callable(handler):
             await ctx.reply(
-                view=self._make_v2_notice(failure_title, ["Esse comando não está disponível agora."], ok=False),
+                view=self._make_v2_notice(failure_title, ["Esse comando não está disponível agora"], ok=False),
                 mention_author=False,
             )
             return False
@@ -580,13 +580,13 @@ class GamesCog(dcommands.Cog, GamesCore):
                 getattr(ctx.author, "id", 0),
             )
             await ctx.reply(
-                view=self._make_v2_notice(failure_title, ["O comando falhou antes de concluir."], ok=False),
+                view=self._make_v2_notice(failure_title, ["O comando falhou antes de concluir"], ok=False),
                 mention_author=False,
             )
             return False
         if not handled:
             await ctx.reply(
-                view=self._make_v2_notice(failure_title, ["Não foi possível executar agora."], ok=False),
+                view=self._make_v2_notice(failure_title, ["Não foi possível executar agora"], ok=False),
                 mention_author=False,
             )
         return handled
@@ -663,7 +663,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             return
         if target is None or amount is None:
             await ctx.reply(
-                view=self._make_v2_notice("💸 Pagamento", [f"Use `{ctx.clean_prefix}pay @usuário valor`."], ok=False),
+                view=self._make_v2_notice("💸 Pagamento", [f"Use `{ctx.clean_prefix}pay @usuário valor`"], ok=False),
                 mention_author=False,
             )
             return
@@ -730,7 +730,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             if not await self._ensure_games_command_entry(ctx, trigger_hint="poker @usuário"):
                 return
             await ctx.reply(
-                view=self._make_v2_notice("🃏 Poker", [f"Use `{ctx.clean_prefix}poker @usuário`."], ok=False),
+                view=self._make_v2_notice("🃏 Poker", [f"Use `{ctx.clean_prefix}poker @usuário`"], ok=False),
                 mention_author=False,
             )
             return
@@ -749,7 +749,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             if not await self._ensure_games_command_entry(ctx, trigger_hint="truco @usuário"):
                 return
             await ctx.reply(
-                view=self._make_v2_notice("🃏 Truco", [f"Use `{ctx.clean_prefix}truco @usuário`."], ok=False),
+                view=self._make_v2_notice("🃏 Truco", [f"Use `{ctx.clean_prefix}truco @usuário`"], ok=False),
                 mention_author=False,
             )
             return
@@ -776,8 +776,8 @@ class GamesCog(dcommands.Cog, GamesCore):
                 view=self._make_v2_notice(
                     "🥺 Esmola",
                     [
-                        f"Use `{ctx.clean_prefix}mendigar 40`.",
-                        f"Ou `{ctx.clean_prefix}mendigar 40 @usuário`.",
+                        f"Use `{ctx.clean_prefix}mendigar 40`",
+                        f"Ou `{ctx.clean_prefix}mendigar 40 @usuário`",
                     ],
                     ok=False,
                 ),
@@ -845,13 +845,13 @@ class GamesCog(dcommands.Cog, GamesCore):
 
     async def _run_robbery(self, channel: discord.abc.Messageable, guild: discord.Guild, author: discord.Member, target: discord.Member):
         if target.bot:
-            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você tentou roubar um bot. Isso foi longe demais."], ok=False))
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você tentou roubar um bot\nIsso foi longe demais"], ok=False))
             return True
         if target.id == author.id:
-            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Tentar roubar a si mesmo já é demais."], ok=False))
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Tentar roubar a si mesmo já é demais"], ok=False))
             return True
         if int(self.db.get_user_chips(guild.id, author.id, default=CHIPS_INITIAL) or 0) < 0:
-            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já está devendo (coitado). Quite a dívida antes de tentar roubar alguém."], ok=False))
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já está devendo (coitado)\nQuite a dívida antes de tentar roubar alguém"], ok=False))
             return True
         adoc = self.db._get_user_doc(guild.id, author.id)
         now = time.time()
@@ -860,18 +860,18 @@ class GamesCog(dcommands.Cog, GamesCore):
         remaining = max(0, int(float(rob_state.get("remaining", 0.0) or 0.0)))
         if int(rob_state.get("available", 0) or 0) <= 0 and remaining > 0:
             wait = self._format_wait_compact(remaining)
-            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já aprontou demais por agora.", f"Tente de novo em **{wait}**."], ok=False))
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já aprontou demais por agora", f"Tente de novo em **{wait}**"], ok=False))
             return True
         target_chips = int(self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL) or 0)
         target_bonus = int(self.db.get_user_bonus_chips(guild.id, target.id) or 0)
         if target_chips < 0:
-            await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário já está devendo (coitado)."], ok=False))
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário já está devendo (coitado)"], ok=False))
             return True
         if target_chips < 20:
             if target_bonus > 0 and target_chips <= 0:
-                await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário só tem fichas bônus."], ok=False))
+                await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário só tem fichas bônus"], ok=False))
             else:
-                await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário é muito **pobre** pra ser roubado."], ok=False))
+                await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário é muito **pobre** pra ser roubado"], ok=False))
             return True
         consumed, consumed_state = await self._consume_limited_action(
             guild.id,
@@ -883,7 +883,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         )
         if not consumed:
             wait = self._format_wait_compact(max(1.0, float(rob_state.get("remaining", 0.0) or 1.0)))
-            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já aprontou demais por agora.", f"Tente de novo em **{wait}**."], ok=False))
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já aprontou demais por agora", f"Tente de novo em **{wait}**"], ok=False))
             return True
         success = random.random() < 0.40
         if success:
@@ -892,9 +892,9 @@ class GamesCog(dcommands.Cog, GamesCore):
             await self._change_user_chips(guild.id, target.id, -amount, mark_activity=True, reason=f"Roubado por {author.display_name}")
             await self._change_user_chips(guild.id, author.id, amount, mark_activity=True, reason=f"Roubo bem-sucedido em {target.display_name}")
             flavor = random.choice([
-                f"Você roubou {self._chip_text(amount, kind='gain')} de {target.mention}.",
-                f"O golpe encaixou. Você levou {self._chip_text(amount, kind='gain')} de {target.mention}.",
-                f"Você passou a mão em {self._chip_text(amount, kind='gain')} de {target.mention}."
+                f"Você roubou {self._chip_text(amount, kind='gain')} de {target.mention}",
+                f"O golpe encaixou\nVocê levou {self._chip_text(amount, kind='gain')} de {target.mention}",
+                f"Você passou a mão em {self._chip_text(amount, kind='gain')} de {target.mention}"
             ])
             effect_lines = []
             robbery_used_count = int(consumed_state.get("used", 0) or 0)
@@ -915,8 +915,8 @@ class GamesCog(dcommands.Cog, GamesCore):
         if penalty > 0:
             await self._change_user_chips(guild.id, author.id, -penalty, mark_activity=True, reason="Multa por roubo falho")
         lines = [
-            f"Você tentou roubar {target.mention}, mas foi pego no flagra.",
-            (f"Você perdeu {self._chip_text(penalty, kind='loss')}." if penalty > 0 else "Você não perdeu fichas.")
+            f"Você tentou roubar {target.mention}, mas foi pego no flagra",
+            (f"Você perdeu {self._chip_text(penalty, kind='loss')}" if penalty > 0 else "Você não perdeu fichas")
         ]
         marker = self._race_effect_message(guild.id, author.id, "mao_negra")
         if self._race_is(guild.id, author.id, "preto") and robbery_used_count > 1 and marker:
@@ -932,7 +932,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         if not await self._ensure_games_command_entry(ctx, trigger_hint="roubar @usuário"):
             return
         if target is None:
-            await ctx.reply(view=self._make_v2_notice("🕵️ Roubo", [f"Use `{ctx.clean_prefix}roubar @usuário` para tentar a sorte."], ok=False), mention_author=False)
+            await ctx.reply(view=self._make_v2_notice("🕵️ Roubo", [f"Use `{ctx.clean_prefix}roubar @usuário` para tentar a sorte"], ok=False), mention_author=False)
             return
         await self._run_robbery(ctx.channel, ctx.guild, ctx.author, target)
 

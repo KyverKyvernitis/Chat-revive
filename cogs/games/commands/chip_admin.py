@@ -55,9 +55,9 @@ class _AdminUserAdjustModal(discord.ui.Modal, title="Ajustar saldo"):
             max_length=16,
         )
 
-        self.add_item(_modal_label("Usuário", self.target_select, "Selecione quem terá o saldo alterado."))
-        self.add_item(_modal_label("Fichas normais", self.chips_input, "Aceita números negativos."))
-        self.add_item(_modal_label("Fichas bônus", self.bonus_input, "Deixe vazio para não alterar."))
+        self.add_item(_modal_label("Usuário", self.target_select, "Selecione quem terá o saldo alterado"))
+        self.add_item(_modal_label("Fichas normais", self.chips_input, "Aceita números negativos"))
+        self.add_item(_modal_label("Fichas bônus", self.bonus_input, "Deixe vazio para não alterar"))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._chip_admin_validate_interaction(
@@ -69,7 +69,7 @@ class _AdminUserAdjustModal(discord.ui.Modal, title="Ajustar saldo"):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor."], ok=False),
+                view=self.cog._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor"], ok=False),
                 ephemeral=True,
             )
             return
@@ -77,7 +77,7 @@ class _AdminUserAdjustModal(discord.ui.Modal, title="Ajustar saldo"):
         member = await self.cog._chip_admin_selected_member(guild, self.target_select)
         if member is None:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Usuário inválido", ["Selecione um membro deste servidor."], ok=False),
+                view=self.cog._make_v2_notice("Usuário inválido", ["Selecione um membro deste servidor"], ok=False),
                 ephemeral=True,
             )
             return
@@ -88,7 +88,7 @@ class _AdminUserAdjustModal(discord.ui.Modal, title="Ajustar saldo"):
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
                     "Nada para alterar",
-                    ["Preencha fichas normais, fichas bônus ou ambos."],
+                    ["Preencha fichas normais, fichas bônus ou ambos"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -99,7 +99,7 @@ class _AdminUserAdjustModal(discord.ui.Modal, title="Ajustar saldo"):
             bonus_val = int(bonus_raw) if bonus_raw else None
         except (TypeError, ValueError):
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Valor inválido", ["Use números inteiros nas fichas."], ok=False),
+                view=self.cog._make_v2_notice("Valor inválido", ["Use números inteiros nas fichas"], ok=False),
                 ephemeral=True,
             )
             return
@@ -139,12 +139,12 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
             custom_id="games_chip_admin_reset_user_confirm",
             default=False,
         )
-        self.add_item(_modal_label("Usuário", self.target_select, "Fichas, bônus, raça e conquistas serão reiniciados."))
+        self.add_item(_modal_label("Usuário", self.target_select, "Fichas, bônus, raça e conquistas serão reiniciados"))
         self.add_item(
             _modal_label(
                 "Confirmar reset",
                 self.confirm_checkbox,
-                "Restaura fichas, bônus, raça e conquistas do usuário.",
+                "Restaura fichas, bônus, raça e conquistas do usuário",
             )
         )
 
@@ -158,14 +158,14 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor."], ok=False),
+                view=self.cog._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor"], ok=False),
                 ephemeral=True,
             )
             return
 
         if not bool(self.confirm_checkbox.value):
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Nada alterado", ["Marque a confirmação para resetar o usuário."], ok=False),
+                view=self.cog._make_v2_notice("Nada alterado", ["Marque a confirmação para resetar o usuário"], ok=False),
                 ephemeral=True,
             )
             return
@@ -173,14 +173,14 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
         member = await self.cog._chip_admin_selected_member(guild, self.target_select)
         if member is None:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Usuário inválido", ["Selecione um membro deste servidor."], ok=False),
+                view=self.cog._make_v2_notice("Usuário inválido", ["Selecione um membro deste servidor"], ok=False),
                 ephemeral=True,
             )
             return
 
         await self.cog._force_reset_chips(guild.id, member.id)
         member_name = _safe_member_name(member)
-        lines = [f"{member_name} voltou para {self.cog._chip_amount(CHIPS_DEFAULT)}."]
+        lines = [f"{member_name} voltou para {self.cog._chip_amount(CHIPS_DEFAULT)}"]
         await interaction.response.send_message(
             view=self.cog._make_v2_notice("Usuário resetado", lines, ok=True),
             ephemeral=True,
@@ -215,11 +215,11 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
             self.race_select.add_option(
                 label=f"{emoji} {name}".strip(),
                 value=str(race_key),
-                description=f"{effects} habilidade{'s' if effects != 1 else ''}.",
+                description=f"{effects} habilidade{'s' if effects != 1 else ''}",
             )
 
-        self.add_item(_modal_label("Usuário", self.target_select, "Selecione quem receberá a raça."))
-        self.add_item(_modal_label("Raça", self.race_select, "A alteração não consome fichas."))
+        self.add_item(_modal_label("Usuário", self.target_select, "Selecione quem receberá a raça"))
+        self.add_item(_modal_label("Raça", self.race_select, "A alteração não consome fichas"))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._chip_admin_validate_interaction(
@@ -231,7 +231,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor."], ok=False),
+                view=self.cog._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor"], ok=False),
                 ephemeral=True,
             )
             return
@@ -239,7 +239,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
         member = await self.cog._chip_admin_selected_member(guild, self.target_select)
         if member is None or member.bot:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Usuário inválido", ["Selecione uma pessoa deste servidor."], ok=False),
+                view=self.cog._make_v2_notice("Usuário inválido", ["Selecione uma pessoa deste servidor"], ok=False),
                 ephemeral=True,
             )
             return
@@ -249,7 +249,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
         catalog = self.cog._race_catalog()
         if selected_race not in catalog:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Raça inválida", ["Selecione uma raça disponível."], ok=False),
+                view=self.cog._make_v2_notice("Raça inválida", ["Selecione uma raça disponível"], ok=False),
                 ephemeral=True,
             )
             return
@@ -273,7 +273,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
                 selected_race,
             )
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Falha ao alterar", ["A raça não foi alterada."], ok=False),
+                view=self.cog._make_v2_notice("Falha ao alterar", ["A raça não foi alterada"], ok=False),
                 ephemeral=True,
             )
             return
@@ -291,7 +291,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
         await interaction.response.send_message(
             view=self.cog._make_v2_notice(
                 "Raça atualizada",
-                [f"{member_name} agora é {new_label}."],
+                [f"{member_name} agora é {new_label}"],
                 ok=True,
             ),
             ephemeral=True,
@@ -312,7 +312,7 @@ class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
             _modal_label(
                 "Confirmar reset do servidor",
                 self.confirm_checkbox,
-                "Apaga fichas, raças, conquistas e progresso de todos os perfis ativos.",
+                "Apaga fichas, raças, conquistas e progresso de todos os perfis ativos",
             )
         )
 
@@ -326,13 +326,13 @@ class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor."], ok=False),
+                view=self.cog._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor"], ok=False),
                 ephemeral=True,
             )
             return
         if not bool(self.confirm_checkbox.value):
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Nada alterado", ["Marque a confirmação para resetar o servidor."], ok=False),
+                view=self.cog._make_v2_notice("Nada alterado", ["Marque a confirmação para resetar o servidor"], ok=False),
                 ephemeral=True,
             )
             return
@@ -340,7 +340,7 @@ class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
         user_ids = self.cog._iter_active_chip_user_ids(guild.id)
         if not user_ids:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Nada para resetar", ["Não há perfis com movimentação neste servidor."], ok=False),
+                view=self.cog._make_v2_notice("Nada para resetar", ["Não há perfis com movimentação neste servidor"], ok=False),
                 ephemeral=True,
             )
             return
@@ -434,7 +434,7 @@ class GincanaChipAdminMixin:
         if user is None or int(user.id) != int(opener_id):
             if send_response and not interaction.response.is_done():
                 await interaction.response.send_message(
-                    view=self._make_v2_notice("Sem permissão", ["Esse painel pertence a outra pessoa."], ok=False),
+                    view=self._make_v2_notice("Sem permissão", ["Esse painel pertence a outra pessoa"], ok=False),
                     ephemeral=True,
                 )
             return False
@@ -451,14 +451,14 @@ class GincanaChipAdminMixin:
         if not allowed:
             if send_response and not interaction.response.is_done():
                 await interaction.response.send_message(
-                    view=self._make_v2_notice("Sem permissão", ["Você não pode usar os controles administrativos."], ok=False),
+                    view=self._make_v2_notice("Sem permissão", ["Você não pode usar os controles administrativos"], ok=False),
                     ephemeral=True,
                 )
             return False
         if owner_only and not is_owner:
             if send_response and not interaction.response.is_done():
                 await interaction.response.send_message(
-                    view=self._make_v2_notice("Sem permissão", ["Você não pode usar esta ação."], ok=False),
+                    view=self._make_v2_notice("Sem permissão", ["Você não pode usar esta ação"], ok=False),
                     ephemeral=True,
                 )
             return False

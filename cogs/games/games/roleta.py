@@ -27,7 +27,7 @@ from ..constants import (
 )
 
 
-ROLETA_JOKERS = ("🃏", "⭐")
+ROLETA_JOKERS = ("🃏",)
 ROLETA_SPIN_LIMIT = 10
 ROLETA_WINDOW_SECONDS = 6 * 60 * 60
 ROLETA_DAILY_EXTRA_CAP = 1
@@ -90,7 +90,7 @@ class _GameDebtConfirmView(discord.ui.LayoutView):
     async def _reject_other_user(self, interaction: discord.Interaction):
         notice = self.cog._make_game_notice_view(
             "⚠️ Confirmação indisponível",
-            "Essa confirmação não é para você.",
+            "Essa confirmação não é para você",
             ok=False,
         )
         try:
@@ -109,7 +109,7 @@ class _GameDebtConfirmView(discord.ui.LayoutView):
         self._finished = True
         self.confirm_button.disabled = True
         self.cancel_button.disabled = True
-        self._rebuild("Entrada confirmada." if confirmed else "Entrada cancelada.")
+        self._rebuild("Entrada confirmada" if confirmed else "Entrada cancelada")
         try:
             await interaction.response.edit_message(view=self)
         except Exception:
@@ -129,7 +129,7 @@ class _GameDebtConfirmView(discord.ui.LayoutView):
         self._finished = True
         self.confirm_button.disabled = True
         self.cancel_button.disabled = True
-        self._rebuild("A confirmação expirou.")
+        self._rebuild("A confirmação expirou")
         try:
             if self.message is not None:
                 await self.message.edit(view=self)
@@ -206,7 +206,7 @@ class GincanaRoletaMixin:
         def _make_game_notice_view(self, title: str, description: str, *, ok: bool = True) -> discord.ui.LayoutView:
             return self._make_game_layout_view(
                 title,
-                summary=str(description or "").strip() or "Nada mudou.",
+                summary=str(description or "").strip() or "Nada mudou",
                 color=discord.Color.green() if ok else discord.Color(OFF_COLOR),
             )
 
@@ -371,7 +371,7 @@ class GincanaRoletaMixin:
                     )
                 except Exception:
                     pass
-                return f"🎁 **Ciclo concluído:** +{ROLETA_CYCLE_BONUS_CHIPS} {self._CHIP_BONUS_EMOJI}."
+                return f"🎁 **Ciclo concluído:** +{ROLETA_CYCLE_BONUS_CHIPS} {self._CHIP_BONUS_EMOJI}"
         def _roleta_jackpot_preview(self, guild_id: int, user_id: int) -> int:
             if self._race_is(guild_id, user_id, "apostador"):
                 return ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS
@@ -384,7 +384,7 @@ class GincanaRoletaMixin:
                 if roll < 0.20:
                     return {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS}
                 if random.random() < 0.25:
-                    return {"target_middle": [6, 6, 6], "forced_kind": "return", "forced_amount": ROLETA_APOSTADOR_COST}
+                    return {"target_middle": [6, 6, 6], "forced_kind": "beast", "forced_amount": ROLETA_APOSTADOR_COST}
                 return {"target_middle": self._roll_roleta_target_middle(success=False), "forced_kind": None, "forced_amount": None}
             success = random.randint(1, 10) == 1
             return {
@@ -428,12 +428,10 @@ class GincanaRoletaMixin:
             gross_payout: int = 0,
             current_jackpot: int = ROLETA_JACKPOT_CHIPS,
             result_delta: int | None = None,
-            compact_recovery: bool = False,
         ) -> discord.ui.LayoutView:
             details: list[str] = []
-            if not compact_recovery:
-                effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
-                details.append(f"**Resultado:** {self._format_game_result_value(effective_result)}")
+            effective_result = int(gross_payout) - int(paid_entry) if result_delta is None else int(result_delta)
+            details.append(f"**Resultado:** {self._format_game_result_value(effective_result)}")
             if int(current_jackpot) > ROLETA_DYNAMIC_JACKPOT_BASE:
                 details.append(f"**Jackpot:** {self._chip_text(current_jackpot, kind='gain')}")
             details.append(f"**Saldo atual:** {balance_text}")
@@ -534,7 +532,7 @@ class GincanaRoletaMixin:
         def _roleta_footer_text(self, *, state: dict[str, float | int], is_staff: bool) -> str:
             available = int(state.get("available", 0) or 0)
             if available <= 0 and is_staff:
-                return "Seus giros acabaram, mas como você é staff você ainda pode girar."
+                return "Seus giros acabaram, mas como você é staff você ainda pode girar"
             giro_text = "giro" if available == 1 else "giros"
             verb = "Resta" if available == 1 else "Restam"
             return f"{verb} {available} {giro_text} • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
@@ -542,7 +540,7 @@ class GincanaRoletaMixin:
         def _roleta_spin_message_text(self, state: dict[str, float | int]) -> tuple[str, str]:
             total = max(ROLETA_SPIN_LIMIT, int(state.get("total", ROLETA_SPIN_LIMIT) or ROLETA_SPIN_LIMIT))
             wait_text = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
-            return "🎰 Sem giros por agora", f"Seus {total} giros acabaram. Reset em **{wait_text}**."
+            return "🎰 Sem giros por agora", f"Seus {total} giros acabaram\nReset em **{wait_text}**"
 
         async def _reserve_roleta_spin_state(self, guild_id: int, user_id: int, *, is_staff: bool) -> tuple[bool, dict[str, float | int]]:
             state = await self._sync_roleta_spin_window(guild_id, user_id)
@@ -558,16 +556,12 @@ class GincanaRoletaMixin:
             roll = random.random()
             if roll < 0.05:
                 base = random.randint(1, 9)
-                joker = self._random_roleta_joker()
-                middle = [base, joker, base]
+                middle = [base, self._random_roleta_joker(), base]
                 random.shuffle(middle)
                 return middle
-            if roll < 0.13:
-                digits = random.sample(range(1, 10), 2)
-                middle = [digits[0], digits[1], self._random_roleta_joker()]
-                random.shuffle(middle)
-                return middle
-            if roll < 0.43:
+            # Os antigos retornos de custo foram redistribuídos para combinações
+            # parciais, preservando aproximadamente o retorno médio da roleta.
+            if roll < 0.4626:
                 repeated = random.randint(1, 9)
                 other = self._random_roleta_digit(exclude={repeated})
                 middle = [repeated, repeated, other]
@@ -586,19 +580,15 @@ class GincanaRoletaMixin:
                 if middle_digits == [9, 9, 9]:
                     return "jackpot", ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS
                 if middle_digits == [6, 6, 6]:
-                    return "return", entry_cost
+                    return "beast", entry_cost
             jokers = [value for value in middle_digits if isinstance(value, str) and value in ROLETA_JOKERS]
             normals = [value for value in middle_digits if not (isinstance(value, str) and value in ROLETA_JOKERS)]
             if middle_digits == [7, 7, 7]:
                 return "jackpot", ROLETA_JACKPOT_CHIPS
-            if jokers:
-                if len(set(normals)) == 1 and len(normals) == 2:
-                    return "joker_premium", 50
-                return "return", max(3, entry_cost // 2)
+            if jokers and len(set(normals)) == 1 and len(normals) == 2:
+                return "joker_premium", 50
             if max((middle_digits.count(v) for v in set(middle_digits)), default=0) >= 2:
                 return "partial", max(3, entry_cost // 2)
-            if random.random() < 0.08:
-                return "return", max(2, entry_cost // 3)
             return "loss", 0
         def _ensure_game_animation_runtime(self):
             if not hasattr(self, "_game_animation_states"):
@@ -920,7 +910,7 @@ class GincanaRoletaMixin:
                 await message.channel.send(
                     view=self._make_game_notice_view(
                         title,
-                        "Já existem **2** animações ativas neste servidor. Tente novamente em instantes.",
+                        "Já existem **2** animações ativas neste servidor\nTente novamente em instantes",
                         ok=False,
                     ),
                     allowed_mentions=discord.AllowedMentions.none(),
@@ -1120,7 +1110,7 @@ class GincanaRoletaMixin:
         def _carta_footer_text(self, *, state: dict[str, float | int], is_staff: bool) -> str:
             available = int(state.get("available", 0) or 0)
             if available <= 0 and is_staff:
-                return "Seus giros de cartas acabaram, mas como você é staff você ainda pode girar."
+                return "Seus giros de cartas acabaram, mas como você é staff você ainda pode girar"
             giro_text = "giro de cartas" if available == 1 else "giros de cartas"
             verb = "Resta" if available == 1 else "Restam"
             return f"{verb} {available} {giro_text} • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
@@ -1128,7 +1118,7 @@ class GincanaRoletaMixin:
         def _carta_spin_message_text(self, state: dict[str, float | int]) -> tuple[str, str]:
             total = max(CARTA_SPIN_LIMIT, int(state.get("total", CARTA_SPIN_LIMIT) or CARTA_SPIN_LIMIT))
             wait_text = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
-            return "🎴 Sem giros por agora", f"Seus {total} giros de cartas acabaram. Reset em **{wait_text}**."
+            return "🎴 Sem giros por agora", f"Seus {total} giros de cartas acabaram\nReset em **{wait_text}**"
 
         async def _reserve_carta_spin_state(self, guild_id: int, user_id: int, *, is_staff: bool) -> tuple[bool, dict[str, float | int]]:
             state = await self._sync_carta_spin_window(guild_id, user_id)
@@ -1141,46 +1131,41 @@ class GincanaRoletaMixin:
         def _pick_carta_result_flavor(self, result_kind: str, *, fallback: str = "") -> str:
             options = {
                 "loss": [
-                    "Essa mão não rendeu nada.",
-                    "As cartas não encaixaram.",
-                    "Dessa vez a mão passou em branco.",
-                ],
-                "return": [
-                    "O coringa salvou parte da aposta.",
-                    "O coringa evitou a perda completa.",
-                    "O coringa segurou parte da rodada.",
+                    "Essa mão não rendeu nada",
+                    "As cartas não encaixaram",
+                    "Dessa vez a mão passou em branco",
                 ],
                 "partial": [
-                    "Essa mão rendeu bem.",
-                    "As cartas encaixaram.",
-                    "Foi uma boa combinação.",
+                    "Essa mão rendeu bem",
+                    "As cartas encaixaram",
+                    "Foi uma boa combinação",
                 ],
                 "premium": [
-                    "O coringa completou a combinação.",
-                    "O coringa fechou a mão.",
-                    "O coringa puxou a melhor carta da rodada.",
+                    "O coringa completou a combinação",
+                    "O coringa fechou a mão",
+                    "O coringa puxou a melhor carta da rodada",
                 ],
                 "rare": [
-                    "Essa mão veio forte.",
-                    "As cartas bateram bonito.",
-                    "Foi uma combinação rara.",
+                    "Essa mão veio forte",
+                    "As cartas bateram bonito",
+                    "Foi uma combinação rara",
                 ],
                 "jackpot": [
-                    "A mão bateu o prêmio máximo.",
-                    "Você acertou a mão máxima.",
-                    "As cartas vieram perfeitas.",
+                    "A mão bateu o prêmio máximo",
+                    "Você acertou a mão máxima",
+                    "As cartas vieram perfeitas",
                 ],
             }
             picks = options.get(result_kind)
             if picks:
                 return random.choice(picks)
-            return fallback or "Resultado das cartas."
+            return fallback or "Resultado das cartas"
 
         def _pick_carta_hot_streak_text(self) -> str:
             return random.choice([
-                "Você entrou em boa fase.",
-                "Sua mão esquentou.",
-                "A sequência ficou forte.",
+                "Você entrou em boa fase",
+                "Sua mão esquentou",
+                "A sequência ficou forte",
             ])
 
         async def _advance_carta_hot_streak(self, guild_id: int, user_id: int, *, result_kind: str) -> tuple[int, str | None]:
@@ -1323,32 +1308,32 @@ class GincanaRoletaMixin:
             joker_count = counts.get("🃏", 0)
             star_count = counts.get("⭐", 0)
             if symbols == ["⭐", "⭐", "⭐"]:
-                return "jackpot", CARTA_JACKPOT_CHIPS, "A mão bateu o prêmio máximo."
+                return "jackpot", CARTA_JACKPOT_CHIPS, "A mão bateu o prêmio máximo"
             if counts.get("🃏", 0) == 3:
-                return "rare", 80, "Trinca de coringas na linha do meio."
+                return "rare", 80, "Trinca de coringas na linha do meio"
             if any(count == 3 for symbol, count in counts.items() if symbol != "🃏"):
                 triple_symbol = next(symbol for symbol, count in counts.items() if symbol != "🃏" and count == 3)
                 values = {"👑": 50, "💎": 35, "🍀": 25, "⭐": 65}
-                texts = {"👑": "Trinca de coroas.", "💎": "Trinca de diamantes.", "🍀": "Trinca de trevos.", "⭐": "Trinca rara de estrelas."}
-                return "rare", values.get(triple_symbol, 25), texts.get(triple_symbol, "Trinca premiada.")
+                texts = {"👑": "Trinca de coroas", "💎": "Trinca de diamantes", "🍀": "Trinca de trevos", "⭐": "Trinca rara de estrelas"}
+                return "rare", values.get(triple_symbol, 25), texts.get(triple_symbol, "Trinca premiada")
             pair_symbol = next((symbol for symbol, count in counts.items() if symbol != "🃏" and count == 2), None)
             if pair_symbol and joker_count == 1:
                 values = {"⭐": 70, "👑": 40, "💎": 30, "🍀": 22}
-                texts = {"⭐": "O coringa completou a mão máxima.", "👑": "O coringa completou a combinação.", "💎": "O coringa fechou a combinação.", "🍀": "O coringa ajudou a fechar a mão."}
-                return "premium", values.get(pair_symbol, 20), texts.get(pair_symbol, "O coringa completou a combinação.")
+                texts = {"⭐": "O coringa completou a mão máxima", "👑": "O coringa completou a combinação", "💎": "O coringa fechou a combinação", "🍀": "O coringa ajudou a fechar a mão"}
+                return "premium", values.get(pair_symbol, 20), texts.get(pair_symbol, "O coringa completou a combinação")
             if joker_count == 2 and len(counts) == 2:
                 other = next(symbol for symbol in counts if symbol != "🃏")
                 values = {"⭐": 55, "👑": 32, "💎": 24, "🍀": 18}
-                return "premium", values.get(other, 18), "Dois coringas puxaram a combinação."
+                return "premium", values.get(other, 18), "Dois coringas puxaram a combinação"
             if pair_symbol:
                 values = {"⭐": 20, "👑": 15, "💎": 12, "🍀": 10}
-                texts = {"⭐": "Par raro na linha do meio.", "👑": "Par de coroas.", "💎": "Par de diamantes.", "🍀": "Par de trevos."}
-                return "partial", values.get(pair_symbol, 10), texts.get(pair_symbol, "Par premiado.")
+                texts = {"⭐": "Par raro na linha do meio", "👑": "Par de coroas", "💎": "Par de diamantes", "🍀": "Par de trevos"}
+                return "partial", values.get(pair_symbol, 10), texts.get(pair_symbol, "Par premiado")
             if joker_count == 1 and len(counts) == 3:
-                return "return", 10, "O coringa salvou parte da aposta."
+                return "partial", 10, "O coringa formou uma combinação simples"
             if star_count == 2:
-                return "partial", 18, "Quase bateu a mão mais rara."
-            return "loss", 0, "Essa mão não rendeu nada."
+                return "partial", 18, "Quase bateu a mão mais rara"
+            return "loss", 0, "Essa mão não rendeu nada"
 
         async def _animate_carta_spin(
             self,
@@ -1520,7 +1505,6 @@ class GincanaRoletaMixin:
             success = False
             near = False
             current_jackpot = self._current_roleta_dynamic_jackpot(guild.id)
-            compact_recovery = False
 
             try:
                 if result_kind in {"jackpot", "jackpot_mega"}:
@@ -1557,12 +1541,8 @@ class GincanaRoletaMixin:
                     await self._record_game_played(guild.id, actor.id, weekly_points=6)
                     await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                     await self._grant_weekly_points(guild.id, actor.id, 8)
-                    if "⭐" in middle_digits:
-                        summary_lines.append("A estrela completou a combinação.")
-                        title = "🎰 Estrela premiada"
-                    else:
-                        summary_lines.append("O coringa completou a combinação.")
-                        title = "🎰 Coringa premiado"
+                    summary_lines.append("O coringa completou a combinação")
+                    title = "🎰 Coringa premiado"
                 elif result_kind == "partial":
                     race_won = True
                     race_payout = gross_payout = int(result_amount)
@@ -1570,21 +1550,18 @@ class GincanaRoletaMixin:
                     await self._record_game_played(guild.id, actor.id, weekly_points=4)
                     await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                     await self._grant_weekly_points(guild.id, actor.id, 6)
-                    summary_lines.append("Você acertou uma combinação parcial.")
+                    summary_lines.append("Você acertou uma combinação parcial")
                     title = "🎰 Giro parcial"
-                elif result_kind == "return":
+                elif result_kind == "beast":
                     race_won = None
                     race_payout = gross_payout = int(result_amount)
                     near = True
                     await self._record_game_played(guild.id, actor.id, weekly_points=3)
-                    await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
-                    effect_note = self._race_effect_message(guild.id, actor.id, "666") if is_apostador else ""
+                    await self._change_user_chips(guild.id, actor.id, result_amount, reason="Marca da Besta")
+                    effect_note = self._race_effect_message(guild.id, actor.id, "666")
                     if effect_note:
                         summary_lines.append(effect_note)
-                    compact_recovery = paid_entry > 0 and result_amount >= paid_entry
-                    if not compact_recovery:
-                        summary_lines.append("Parte do custo do giro foi recuperada.")
-                    title = "🎰 Custo recuperado"
+                    title = "🎰 Marca da Besta"
                 else:
                     race_won = False
                     race_payout = 0
@@ -1597,9 +1574,9 @@ class GincanaRoletaMixin:
                             guild.id,
                             actor.id,
                             "redencao",
-                            f"você recuperou {self._chip_text(refund, kind='gain')} do custo do giro.",
+                            f"você recuperou {self._chip_text(refund, kind='gain')} do custo do giro",
                         )
-                        summary_lines.append(effect_note or f"Você recuperou {self._chip_text(refund, kind='gain')}.")
+                        summary_lines.append(effect_note or f"Você recuperou {self._chip_text(refund, kind='gain')}")
                     title = self._pick_game_loss_title("roleta")
 
                 race_notes = await self._apply_new_race_result(
@@ -1634,7 +1611,6 @@ class GincanaRoletaMixin:
                     gross_payout=gross_payout,
                     current_jackpot=current_jackpot,
                     result_delta=self._current_game_chip_total(guild.id, actor.id) - round_start_total,
-                    compact_recovery=compact_recovery,
                 )
             except Exception:
                 logging.getLogger("gincana.roleta").exception(
@@ -1644,7 +1620,7 @@ class GincanaRoletaMixin:
                 )
                 fallback_title = "🎰 Jackpot!" if forced_kind in {"jackpot", "jackpot_mega"} else self._pick_game_loss_title("roleta")
                 fallback_lines = [chip_note] if chip_note else []
-                fallback_lines.append("O resultado foi consolidado, mas parte dos detalhes não pôde ser exibida.")
+                fallback_lines.append("O resultado foi consolidado, mas parte dos detalhes não pôde ser exibida")
                 result_view = self._make_roleta_result_view(
                     fallback_title,
                     "\n".join(fallback_lines),
@@ -1736,26 +1712,21 @@ class GincanaRoletaMixin:
                 await self._grant_weekly_points(guild.id, actor.id, 18)
                 summary_lines.append(flavor)
                 title = "🎴 Jackpot!"
-            elif result_kind in {"rare", "premium", "partial", "return"}:
-                race_won = None if result_kind == "return" else True
+            elif result_kind in {"rare", "premium", "partial"}:
+                race_won = True
                 race_payout = gross_payout = int(result_amount)
                 success = True
                 premium = result_kind in {"rare", "premium"}
-                weekly_map = {"rare": 8, "premium": 7, "partial": 4, "return": 2}
+                weekly_map = {"rare": 8, "premium": 7, "partial": 4}
                 await self._record_game_played(guild.id, actor.id, weekly_points=weekly_map.get(result_kind, 3))
                 await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio das cartas")
                 if result_kind in {"rare", "premium"}:
                     await self._grant_weekly_points(guild.id, actor.id, 6)
-                if result_kind == "return" and self._race_is(guild.id, actor.id, "apostador"):
-                    effect_note = self._race_effect_message(guild.id, actor.id, "666")
-                    if effect_note:
-                        summary_lines.append(effect_note)
                 summary_lines.append(flavor)
                 titles = {
                     "rare": "🎴 Mão rara",
                     "premium": "🎴 Coringa premiado",
                     "partial": "🎴 Mão premiada",
-                    "return": "🎴 Custo recuperado",
                 }
                 title = titles.get(result_kind, "🎴 Boa mão")
             else:
@@ -1769,14 +1740,14 @@ class GincanaRoletaMixin:
                         guild.id,
                         actor.id,
                         "redencao",
-                        f"você recuperou {self._chip_text(refund, kind='gain')} do custo da mão.",
+                        f"você recuperou {self._chip_text(refund, kind='gain')} do custo da mão",
                     )
-                    summary_lines.append(effect_note or f"Você recuperou {self._chip_text(refund, kind='gain')}.")
+                    summary_lines.append(effect_note or f"Você recuperou {self._chip_text(refund, kind='gain')}")
                 else:
                     summary_lines.append(flavor)
                 title = self._pick_game_loss_title("cartas")
 
-            if streak_line and result_kind != "return":
+            if streak_line:
                 summary_lines.append(f"*{streak_line}*")
             race_notes = await self._apply_new_race_result(
                 guild.id,
@@ -1788,7 +1759,7 @@ class GincanaRoletaMixin:
                 # Resultados parciais pagam normalmente, mas não acionam efeitos de raça.
                 valid=result_kind != "partial",
                 allow_hunt=False,
-                glitch_progress=result_kind != "return",
+                glitch_progress=True,
             )
             if race_notes:
                 summary_lines = [*race_notes, *summary_lines]
@@ -1890,7 +1861,7 @@ class GincanaRoletaMixin:
                 if not paid:
                     try:
                         await message.channel.send(
-                            view=self._make_game_notice_view("🎴 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False),
+                            view=self._make_game_notice_view("🎴 Saldo insuficiente", chip_note or "Você não tem saldo suficiente", ok=False),
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
                     except Exception:
@@ -1932,7 +1903,7 @@ class GincanaRoletaMixin:
                     await message.channel.send(
                         view=self._make_game_notice_view(
                             "🎰 Aguarde um pouco",
-                            f"Espere **{int(cooldown_remaining) + 1}s** para usar a roleta novamente.",
+                            f"Espere **{int(cooldown_remaining) + 1}s** para usar a roleta novamente",
                             ok=False,
                         ),
                         allowed_mentions=discord.AllowedMentions.none(),
@@ -2003,7 +1974,7 @@ class GincanaRoletaMixin:
                 if not paid:
                     try:
                         await message.channel.send(
-                            view=self._make_game_notice_view("🎰 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False),
+                            view=self._make_game_notice_view("🎰 Saldo insuficiente", chip_note or "Você não tem saldo suficiente", ok=False),
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
                     except Exception:

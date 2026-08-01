@@ -45,12 +45,12 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
             default=False,
         )
 
-        self.add_item(_label("Cargo", self.role_select, "Pode usar os controles administrativos."))
+        self.add_item(_label("Cargo", self.role_select, "Pode usar os controles administrativos"))
         self.add_item(
             _label(
                 "Remover cargo atual",
                 self.clear_checkbox,
-                "Sem cargo definido, o acesso fica restrito.",
+                "Sem cargo definido, o acesso fica restrito",
             )
         )
 
@@ -60,7 +60,7 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
         guild = interaction.guild
         if guild is None or int(guild.id) != self.guild_id:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente."], ok=False),
+                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente"], ok=False),
                 ephemeral=True,
             )
             return
@@ -69,7 +69,7 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
         clear = bool(self.clear_checkbox.value)
         if clear:
             await self.cog.db.set_gincana_staff_role_id(guild.id, 0)
-            notice = "Cargo da staff removido."
+            notice = "Cargo da staff removido"
         else:
             selected_role = selected[0] if selected else None
             role_id = int(getattr(selected_role, "id", 0) or 0)
@@ -78,7 +78,7 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
                 await interaction.response.send_message(
                     view=self.cog._make_v2_notice(
                         "Cargo não selecionado",
-                        ["Selecione um cargo ou marque a opção de remover."],
+                        ["Selecione um cargo ou marque a opção de remover"],
                         ok=False,
                     ),
                     ephemeral=True,
@@ -88,14 +88,14 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
                 await interaction.response.send_message(
                     view=self.cog._make_v2_notice(
                         "Cargo inválido",
-                        ["O cargo padrão do servidor não pode ser usado como staff."],
+                        ["O cargo padrão do servidor não pode ser usado como staff"],
                         ok=False,
                     ),
                     ephemeral=True,
                 )
                 return
             await self.cog.db.set_gincana_staff_role_id(guild.id, role.id)
-            notice = "Cargo da staff atualizado."
+            notice = "Cargo da staff atualizado"
 
         await interaction.response.edit_message(
             view=self.cog._make_economy_panel_view(guild, self.opener_id, notice=notice)
@@ -131,8 +131,8 @@ class _EconomyChannelModal(discord.ui.Modal, title="Canal dos jogos"):
             default=False,
         )
 
-        self.add_item(_label("Canal", self.channel_select, "Comandos e triggers começam somente aqui."))
-        self.add_item(_label("Usar todos os canais", self.clear_checkbox, "Remove o canal exclusivo."))
+        self.add_item(_label("Canal", self.channel_select, "Comandos e triggers começam somente aqui"))
+        self.add_item(_label("Usar todos os canais", self.clear_checkbox, "Remove o canal exclusivo"))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._economy_validate_interaction(interaction, opener_id=self.opener_id):
@@ -140,7 +140,7 @@ class _EconomyChannelModal(discord.ui.Modal, title="Canal dos jogos"):
         guild = interaction.guild
         if guild is None or int(guild.id) != self.guild_id:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente."], ok=False),
+                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente"], ok=False),
                 ephemeral=True,
             )
             return
@@ -149,7 +149,7 @@ class _EconomyChannelModal(discord.ui.Modal, title="Canal dos jogos"):
         clear = bool(self.clear_checkbox.value)
         if clear:
             await self.cog.db.set_gincana_channel_id(guild.id, 0)
-            notice = "Todos os canais foram liberados."
+            notice = "Todos os canais foram liberados"
         else:
             channel = selected[0] if selected else None
             channel_id = int(getattr(channel, "id", 0) or 0)
@@ -157,14 +157,14 @@ class _EconomyChannelModal(discord.ui.Modal, title="Canal dos jogos"):
                 await interaction.response.send_message(
                     view=self.cog._make_v2_notice(
                         "Canal não selecionado",
-                        ["Selecione um canal ou marque a opção de liberar todos."],
+                        ["Selecione um canal ou marque a opção de liberar todos"],
                         ok=False,
                     ),
                     ephemeral=True,
                 )
                 return
             await self.cog.db.set_gincana_channel_id(guild.id, channel_id)
-            notice = "Canal dos jogos atualizado."
+            notice = "Canal dos jogos atualizado"
 
         await interaction.response.edit_message(
             view=self.cog._make_economy_panel_view(guild, self.opener_id, notice=notice)
@@ -187,16 +187,16 @@ class _EconomyModeModal(discord.ui.Modal, title="Forma de uso"):
         self.mode_group.add_option(
             label="Triggers",
             value="triggers",
-            description="Use palavras como roleta, daily e race.",
+            description="Use palavras como roleta, daily e race",
             default=current == "triggers",
         )
         self.mode_group.add_option(
             label="Comandos",
             value="commands",
-            description=f"Use comandos como {prefix}roleta, {prefix}daily e {prefix}race.",
+            description=f"Use comandos como {prefix}roleta, {prefix}daily e {prefix}race",
             default=current == "commands",
         )
-        self.add_item(_label("Forma de uso", self.mode_group, "Apenas uma forma fica ativa por vez."))
+        self.add_item(_label("Forma de uso", self.mode_group, "Apenas uma forma fica ativa por vez"))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._economy_validate_interaction(interaction, opener_id=self.opener_id):
@@ -204,7 +204,7 @@ class _EconomyModeModal(discord.ui.Modal, title="Forma de uso"):
         guild = interaction.guild
         if guild is None or int(guild.id) != self.guild_id:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente."], ok=False),
+                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente"], ok=False),
                 ephemeral=True,
             )
             return
@@ -212,12 +212,12 @@ class _EconomyModeModal(discord.ui.Modal, title="Forma de uso"):
         mode = str(self.mode_group.value or "triggers").strip().casefold()
         if mode not in {"triggers", "commands"}:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Modo inválido", ["Selecione triggers ou comandos."], ok=False),
+                view=self.cog._make_v2_notice("Modo inválido", ["Selecione triggers ou comandos"], ok=False),
                 ephemeral=True,
             )
             return
         await self.cog.db.set_gincana_input_mode(guild.id, mode)
-        notice = "Agora o servidor usa comandos." if mode == "commands" else "Agora o servidor usa triggers."
+        notice = "Agora o servidor usa comandos" if mode == "commands" else "Agora o servidor usa triggers"
         await interaction.response.edit_message(
             view=self.cog._make_economy_panel_view(guild, self.opener_id, notice=notice)
         )
@@ -237,7 +237,7 @@ class _EconomyResetModal(discord.ui.Modal, title="Restaurar configurações"):
             _label(
                 "Confirmar restauração",
                 self.confirm_checkbox,
-                "Remove cargo e canal exclusivos e volta para triggers.",
+                "Remove cargo e canal exclusivos e volta para triggers",
             )
         )
 
@@ -247,7 +247,7 @@ class _EconomyResetModal(discord.ui.Modal, title="Restaurar configurações"):
         guild = interaction.guild
         if guild is None or int(guild.id) != self.guild_id:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente."], ok=False),
+                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente"], ok=False),
                 ephemeral=True,
             )
             return
@@ -255,7 +255,7 @@ class _EconomyResetModal(discord.ui.Modal, title="Restaurar configurações"):
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
                     "Nada alterado",
-                    ["Marque a confirmação para restaurar as configurações."],
+                    ["Marque a confirmação para restaurar as configurações"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -266,7 +266,7 @@ class _EconomyResetModal(discord.ui.Modal, title="Restaurar configurações"):
         await self.cog.db.set_gincana_channel_id(guild.id, 0)
         await self.cog.db.set_gincana_input_mode(guild.id, "triggers")
         await interaction.response.edit_message(
-            view=self.cog._make_economy_panel_view(guild, self.opener_id, notice="Configurações restauradas.")
+            view=self.cog._make_economy_panel_view(guild, self.opener_id, notice="Configurações restauradas")
         )
 
 
@@ -344,12 +344,12 @@ class _EconomyPanelView(discord.ui.LayoutView):
         )
         mode_text = "Comandos" if mode == "commands" else "Triggers"
         if mode == "commands":
-            mode_example = f"Use `{prefix}roleta`, `{prefix}daily` e `{prefix}race`."
+            mode_example = f"Use `{prefix}roleta`, `{prefix}daily` e `{prefix}race`"
         else:
-            mode_example = "Use palavras como `roleta`, `daily` e `race`."
+            mode_example = "Use palavras como `roleta`, `daily` e `race`"
 
         config_items: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("# ⚙️ Economia\nGerencie jogos, fichas e raças neste servidor."),
+            discord.ui.TextDisplay("# ⚙️ Economia\nGerencie jogos, fichas e raças neste servidor"),
         ]
         if notice:
             config_items.append(discord.ui.TextDisplay(f"{cog._EFFECT_EMOJI} {notice}"))
@@ -358,14 +358,14 @@ class _EconomyPanelView(discord.ui.LayoutView):
                 discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay(
-                        f"## Cargo da staff\n{staff_text}\nPode usar os controles administrativos."
+                        f"## Cargo da staff\n{staff_text}\nPode usar os controles administrativos"
                     ),
                     accessory=staff_button,
                 ),
                 discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
                 discord.ui.Section(
                     discord.ui.TextDisplay(
-                        f"## Canal dos jogos\n{channel_text}\nComandos e triggers começam neste canal."
+                        f"## Canal dos jogos\n{channel_text}\nComandos e triggers começam neste canal"
                     ),
                     accessory=channel_button,
                 ),
@@ -383,7 +383,7 @@ class _EconomyPanelView(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.TextDisplay(
-                    "## Fichas e raças\nAjuste saldos, raças e resets de usuários."
+                    "## Fichas e raças\nAjuste saldos, raças e resets de usuários"
                 ),
                 discord.ui.ActionRow(adjust_button, race_button),
                 discord.ui.ActionRow(reset_user_button, reset_server_button),
@@ -397,7 +397,7 @@ class _EconomyPanelView(discord.ui.LayoutView):
         guild = interaction.guild
         if guild is None or int(guild.id) != self.guild_id:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente."], ok=False),
+                view=self.cog._make_v2_notice("Servidor inválido", ["Abra o painel novamente"], ok=False),
                 ephemeral=True,
             )
             return None
@@ -478,14 +478,14 @@ class GincanaCommandMixin:
     async def _economy_validate_interaction(self, interaction: discord.Interaction, *, opener_id: int) -> bool:
         if int(getattr(interaction.user, "id", 0) or 0) != int(opener_id):
             await interaction.response.send_message(
-                view=self._make_v2_notice("Painel reservado", ["Abra seu próprio painel de economia."], ok=False),
+                view=self._make_v2_notice("Painel reservado", ["Abra seu próprio painel de economia"], ok=False),
                 ephemeral=True,
             )
             return False
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(
-                view=self._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor."], ok=False),
+                view=self._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor"], ok=False),
                 ephemeral=True,
             )
             return False
@@ -493,7 +493,7 @@ class GincanaCommandMixin:
             await interaction.response.send_message(
                 view=self._make_v2_notice(
                     "Sem permissão",
-                    ["Você não pode alterar a economia deste servidor."],
+                    ["Você não pode alterar a economia deste servidor"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -528,7 +528,7 @@ class GincanaCommandMixin:
             await interaction.response.send_message(
                 view=self._make_v2_notice(
                     "Servidor inválido",
-                    ["Use o comando dentro de um servidor."],
+                    ["Use o comando dentro de um servidor"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -538,7 +538,7 @@ class GincanaCommandMixin:
             await interaction.response.send_message(
                 view=self._make_v2_notice(
                     "Sem permissão",
-                    ["Você não pode alterar a economia deste servidor."],
+                    ["Você não pode alterar a economia deste servidor"],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -557,7 +557,7 @@ class GincanaCommandMixin:
             await ctx.reply(
                 view=self._make_v2_notice(
                     "Servidor inválido",
-                    ["Use o comando dentro de um servidor."],
+                    ["Use o comando dentro de um servidor"],
                     ok=False,
                 ),
                 mention_author=False,
@@ -568,7 +568,7 @@ class GincanaCommandMixin:
             await ctx.reply(
                 view=self._make_v2_notice(
                     "Sem permissão",
-                    ["Você não pode alterar a economia deste servidor."],
+                    ["Você não pode alterar a economia deste servidor"],
                     ok=False,
                 ),
                 mention_author=False,
@@ -585,7 +585,7 @@ class GincanaCommandMixin:
 
     async def _handle_gincana_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         log.error("games: erro no /economia: %r", error)
-        view = self._make_v2_notice("Erro na economia", ["Não foi possível abrir o painel."], ok=False)
+        view = self._make_v2_notice("Erro na economia", ["Não foi possível abrir o painel"], ok=False)
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(view=view, ephemeral=True)

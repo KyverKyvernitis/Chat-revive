@@ -257,15 +257,15 @@ class GincanaToggleMixin:
         lines: list[str] = []
         if applied:
             who = self._count_text(applied, "focado vai", "focados vão")
-            lines.append(f"**{applied}** {who} ser ignorado pelo TTS por **6 horas**.")
+            lines.append(f"**{applied}** {who} ser ignorado pelo TTS por **6 horas**")
         if removed:
             who = self._count_text(removed, "focado voltou", "focados voltaram")
-            lines.append(f"**{removed}** {who} a ser lido pelo TTS.")
+            lines.append(f"**{removed}** {who} a ser lido pelo TTS")
         if not lines:
             if skipped:
-                lines.append("Os focados já estavam ignorados pelo TTS.")
+                lines.append("Os focados já estavam ignorados pelo TTS")
             else:
-                lines.append("Nada mudou por enquanto.")
+                lines.append("Nada mudou por enquanto")
         await self._send_toggle_notice(message, "🔕 TTS ignorado", lines, ok=bool(applied or removed), color=discord.Color.dark_green() if applied or removed else discord.Color.red())
 
     async def _handle_role_toggle_trigger(self, message: discord.Message) -> bool:
@@ -294,7 +294,7 @@ class GincanaToggleMixin:
             await self._send_toggle_notice(
                 message,
                 "🔕 Cargo não configurado",
-                ["Configure o cargo de ignorar TTS antes de usar pica."],
+                ["Configure o cargo de ignorar TTS antes de usar pica"],
                 ok=False,
                 color=discord.Color.red(),
             )
@@ -305,7 +305,7 @@ class GincanaToggleMixin:
             await self._send_toggle_notice(
                 message,
                 "🔕 Ninguém em foco",
-                ["Não tem ninguém na lista de foco agora."],
+                ["Não tem ninguém na lista de foco agora"],
                 ok=False,
                 color=discord.Color.red(),
             )
@@ -451,18 +451,18 @@ class GincanaToggleMixin:
         affected = int(applied) + int(pending)
         if affected:
             who = self._count_text(affected, "membro vai", "membros vão")
-            lines.append(f"**{affected}** {who} ficar mutado por **6 horas**.")
+            lines.append(f"**{affected}** {who} ficar mutado por **6 horas**")
         if pending:
             who = self._count_text(pending, "entra", "entram")
-            lines.append(f"**{pending}** {who} no mute assim que chegar na call.")
+            lines.append(f"**{pending}** {who} no mute assim que chegar na call")
         if removed:
             who = self._count_text(removed, "membro foi", "membros foram")
-            lines.append(f"**{removed}** {who} desmutado.")
+            lines.append(f"**{removed}** {who} desmutado")
         if not lines:
             if skipped:
-                lines.append("Os alvos já estavam mutados por fora.")
+                lines.append("Os alvos já estavam mutados por fora")
             else:
-                lines.append("Não encontrei ninguém elegível nessa call.")
+                lines.append("Não encontrei ninguém elegível nessa call")
         title = "🔇 Rola atualizada" if affected and removed else ("🔇 Mute aplicado" if affected else ("🔊 Mute removido" if removed else "🔇 Nada mudou"))
         await self._send_toggle_notice(message, title, lines, ok=bool(affected or removed), color=discord.Color.dark_green() if affected or removed else discord.Color.red())
 
@@ -632,7 +632,7 @@ class GincanaToggleMixin:
         await self._send_toggle_notice(
             message,
             "🎛️ Efeitos bloqueados",
-            [f"**{affected_count}** {self._count_text(affected_count, 'membro ficou', 'membros ficaram')} sem efeitos sonoros por **6 horas**."],
+            [f"**{affected_count}** {self._count_text(affected_count, 'membro ficou', 'membros ficaram')} sem efeitos sonoros por **6 horas**"],
             ok=True,
             color=discord.Color.dark_green(),
         )
@@ -666,7 +666,7 @@ class GincanaToggleMixin:
             await self._send_toggle_notice(
                 message,
                 "🎛️ Nenhum alvo encontrado",
-                ["Só tinha staff ou ninguém elegível nessa call."],
+                ["Só tinha staff ou ninguém elegível nessa call"],
                 ok=False,
                 color=discord.Color.red(),
             )
@@ -710,7 +710,7 @@ class GincanaToggleMixin:
             await self._send_toggle_notice(
                 message,
                 "🎛️ Nada mudou",
-                ["Não consegui bloquear efeitos sonoros para ninguém."],
+                ["Não consegui bloquear efeitos sonoros para ninguém"],
                 ok=False,
                 color=discord.Color.red(),
             )

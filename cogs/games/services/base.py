@@ -1571,9 +1571,9 @@ class GincanaBase:
                 "emoji": "👁️⃤",
                 "effects": [
                     {"key": "desync", "emoji": "<a:eyeglitch:1531116300645175436>", "title": "Desync", "desc": "A cada partida paga, o sistema fica mais instável\nNa terceira, o estado **ERROR** é ativado"},
-                    {"key": "overflow", "emoji": "💠", "title": "Overflow", "desc": f"Vença durante o **ERROR** para receber entre **30 e 45** {self._CHIP_BONUS_EMOJI}"},
+                    {"key": "overflow", "emoji": "✴️", "title": "Overload", "desc": f"Vença durante o **ERROR** para receber entre **30 e 45** {self._CHIP_BONUS_EMOJI}"},
                     {"key": "rollback", "emoji": "👁️⃤", "title": "Rollback", "desc": "Perca durante o **ERROR** para recuperar **75% da entrada**, com limite de **20 fichas**"},
-                    {"key": "memory_leak", "emoji": "🔧", "title": "Memory Leak", "desc": "Às vezes, o próximo ciclo começa com **1 fragmento** preservado"},
+                    {"key": "memory_leak", "emoji": "🔧", "title": "Bugfix", "desc": "Às vezes, o próximo ciclo começa com **1 fragmento** preservado"},
                 ],
             },
         }
@@ -1619,7 +1619,7 @@ class GincanaBase:
             "rebirth": "❤️‍🔥",
             "second_dawn": "🐦‍🔥",
             "desync": "<a:eyeglitch:1531116300645175436>",
-            "overflow": "💠",
+            "overflow": "✴️",
             "memory_leak": "🔧",
             "rollback": "👁️⃤",
         }
@@ -2179,7 +2179,7 @@ class GincanaBase:
                                 net_profit = max(0, int(payout or 0) - entry_total)
                                 reward = min(45, max(30, 20 + int(net_profit * 0.5)))
                                 bonus_delta = reward
-                                bonus_reason = "Overflow do Glitch"
+                                bonus_reason = "Overload do Glitch"
                                 notes.append(self._race_effect_message(guild_id, user_id, "overflow", f"+{reward} {self._CHIP_BONUS_EMOJI}"))
                             else:
                                 refund_total = min(20, int(entry_total * 0.75))

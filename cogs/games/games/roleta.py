@@ -1315,27 +1315,6 @@ class GincanaRoletaMixin:
                 return random.choice(picks)
             return fallback or "Resultado das cartas"
 
-        def _pick_carta_hot_streak_text(self) -> str:
-            return random.choice([
-                "Você entrou em boa fase",
-                "Sua mão esquentou",
-                "A sequência ficou forte",
-            ])
-
-        async def _advance_carta_hot_streak(self, guild_id: int, user_id: int, *, result_kind: str) -> tuple[int, str | None]:
-            doc = self.db._get_user_doc(guild_id, user_id)
-            try:
-                current = max(0, int(doc.get("carta_hot_streak", 0) or 0))
-            except Exception:
-                current = 0
-            counts_for_streak = result_kind in {"partial", "premium", "rare", "jackpot"}
-            new_value = current + 1 if counts_for_streak else 0
-            doc["carta_hot_streak"] = int(new_value)
-            await self.db._save_user_doc(guild_id, user_id, doc)
-            if counts_for_streak and new_value >= 2:
-                return new_value, self._pick_carta_hot_streak_text()
-            return new_value, None
-
         def _format_carta_row(self, row: list[object], *, middle: bool = False) -> str:
             cells = [str(cell) for cell in row]
             row_text = f"{cells[0]}  {cells[1]}  {cells[2]}"
@@ -1887,7 +1866,6 @@ class GincanaRoletaMixin:
 
             await self.db.add_user_game_stat(guild.id, actor.id, "carta_spins", 1)
             flavor = self._pick_carta_result_flavor(result_kind, fallback=flavor)
-            _streak_value, streak_line = await self._advance_carta_hot_streak(guild.id, actor.id, result_kind=result_kind)
 
             if result_kind == "jackpot":
                 race_won = True
@@ -1934,8 +1912,6 @@ class GincanaRoletaMixin:
                     summary_lines.append(flavor)
                 title = self._pick_game_loss_title("cartas")
 
-            if streak_line:
-                summary_lines.append(f"*{streak_line}*")
             race_notes = await self._apply_new_race_result(
                 guild.id,
                 actor.id,

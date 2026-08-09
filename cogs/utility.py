@@ -148,6 +148,9 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         return permissions
 
     async def _help_music_available(self) -> bool:
+        if self.bot.get_cog("Music") is None:
+            return False
+
         now = asyncio.get_running_loop().time()
         cached = self._help_music_available_cache
         if cached is not None and now - cached[0] <= 5.0:
@@ -179,6 +182,27 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         self._help_music_available_cache = (now, available)
         return available
 
+    def _get_help_games_context(self, guild: discord.Guild | None) -> dict[str, str]:
+        if guild is None:
+            return {}
+        games_cog = self.bot.get_cog("GamesCog")
+        if games_cog is None:
+            return {}
+
+        context: dict[str, str] = {}
+        try:
+            context["mode"] = str(games_cog._gincana_input_mode(guild.id) or "triggers")
+        except Exception:
+            context["mode"] = "triggers"
+        try:
+            channel = games_cog._get_gincana_channel(guild)
+            mention = str(getattr(channel, "mention", "") or "").strip()
+            if mention:
+                context["channel_mention"] = mention
+        except Exception:
+            pass
+        return context
+
     async def _help_hidden_categories(self) -> frozenset[str]:
         hidden: set[str] = set()
         if not await self._help_music_available():
@@ -191,10 +215,12 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         prefixes = await self._get_help_prefix_data(interaction.guild)
         extra_permissions = await self._get_help_extra_permissions(interaction.guild, interaction.user)
         hidden_categories = await self._help_hidden_categories()
+        games_context = self._get_help_games_context(interaction.guild)
         return help_autocomplete_choices(
             current,
             user=interaction.user,
-            bot_prefix=prefixes["bot_prefix"],
+            prefixes=prefixes,
+            games_context=games_context,
             extra_permissions=extra_permissions,
             hidden_categories=hidden_categories,
         )
@@ -214,12 +240,15 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         root_ids = await self._fetch_root_command_ids_cached(guild)
         extra_permissions = await self._get_help_extra_permissions(guild, owner)
         hidden_categories = await self._help_hidden_categories()
+        games_context = self._get_help_games_context(guild)
         view = HelpCenterView(
             owner=owner,
             prefixes=prefixes,
             root_ids=root_ids,
+            games_context=games_context,
             extra_permissions=extra_permissions,
             hidden_categories=hidden_categories,
+            hidden_categories_provider=self._help_hidden_categories,
             subject=subject,
             timeout=HELP_TIMEOUT_SECONDS,
         )

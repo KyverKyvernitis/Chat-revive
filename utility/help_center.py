@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import difflib
 import re
 import unicodedata
+from collections.abc import Awaitable, Callable
 import discord
 from discord import app_commands
 
@@ -37,6 +38,7 @@ class HelpEntry:
     slash_path: str | None = None
     suffix: str = ""
     detail_note: str = ""
+    show_in_category: bool = True
 
 
 CATEGORIES: tuple[HelpCategory, ...] = (
@@ -96,11 +98,6 @@ ENTRIES: tuple[HelpEntry, ...] = (
         ("status tts", "meu tts"), slash_root="tts", slash_path="tts status",
     ),
     HelpEntry(
-        "tts_toggle", "voice", "Staff", "Liga ou desliga recursos do TTS.", "/toggle_menu",
-        ("toggle", "toggles", "toggle menu", "tts toggle"), permission="kick", slash_root="toggle_menu", slash_path="toggle_menu",
-        detail_note="Requer Expulsar membros.",
-    ),
-    HelpEntry(
         "panel", "voice", "Configurar", "Abre seu painel de TTS.", "{bot_prefix}panel",
         ("painel", "p", "painel usuario", "painel usuário"), aliases=("painel", "p"),
     ),
@@ -112,7 +109,7 @@ ENTRIES: tuple[HelpEntry, ...] = (
     HelpEntry("leave", "voice", "Call", "Sai da call.", "{bot_prefix}leave", ("sair call", "desconectar")),
     HelpEntry("clear", "voice", "Call", "Limpa a fila de fala.", "{bot_prefix}clear", ("limpar tts", "limpar fila")),
     HelpEntry(
-        "panel_other", "voice", "Staff", "Abre o painel de TTS de outro usuário.", "{bot_prefix}panel @usuário",
+        "panel_other", "voice", "Staff", "Abre o TTS de outro usuário.", "{bot_prefix}panel @usuário",
         ("tts usuario", "tts usuário", "painel outro", "editar tts usuario"), permission="kick",
         detail_note="Requer Expulsar membros.",
     ),
@@ -124,10 +121,10 @@ ENTRIES: tuple[HelpEntry, ...] = (
     HelpEntry(
         "panel_server", "voice", "Staff", "Abre o painel de TTS do servidor.", "{bot_prefix}panel_server",
         ("painel servidor", "server panel", "sp"), aliases=("sp",), permission="kick",
-        detail_note="Requer Expulsar membros.",
+        detail_note="Atalho do painel principal de TTS · Requer Expulsar membros.", show_in_category=False,
     ),
     HelpEntry(
-        "panel_toggle", "voice", "Staff", "Abre o painel de toggles do TTS.", "{bot_prefix}toggle_panel",
+        "panel_toggle", "voice", "Staff", "Abre os controles do TTS.", "{bot_prefix}toggle_panel",
         ("painel toggle", "painel toggles", "tp"), aliases=("tp",), permission="kick",
         detail_note="Requer Expulsar membros.",
     ),
@@ -164,13 +161,13 @@ ENTRIES: tuple[HelpEntry, ...] = (
     HelpEntry("rank", "games", "Fichas", "Mostra o ranking de fichas.", "rank", ("ranking", "leaderboard"), ("leaderboard",)),
     HelpEntry("pay", "games", "Fichas", "Envia fichas para alguém.", "pay @usuário <valor>", ("pagar", "enviar fichas")),
     HelpEntry("mendigar", "games", "Fichas", "Pede fichas.", "mendigar <valor>", ("pedir fichas",)),
-    HelpEntry("race", "games", "Fichas", "Abre a seleção de raça.", "race", ("raca", "raça"), ("raça",)),
+    HelpEntry("race", "games", "Perfil", "Abre a seleção de raça.", "race", ("raca", "raça"), ("raça",)),
     HelpEntry("roleta", "games", "Jogos", "Joga roleta.", "roleta", ("roulette",)),
     HelpEntry("carta", "games", "Jogos", "Joga uma rodada de cartas.", "carta", ("cartas",), ("cartas",)),
     HelpEntry("buckshot", "games", "Jogos", "Abre uma partida de sobrevivência.", "buckshot", ("buckshot roulette",)),
     HelpEntry("alvo", "games", "Jogos", "Abre uma disputa de mira.", "alvo", ("mira",)),
     HelpEntry("corrida", "games", "Jogos", "Abre uma corrida de cavalos.", "corrida", ("cavalos", "corrida cavalo")),
-    HelpEntry("poker", "games", "Jogos", "Abre uma mesa de poker.", "poker", ("pôquer",)),
+    HelpEntry("poker", "games", "Jogos", "Abre uma mesa de poker.", "poker @usuário", ("pôquer",)),
     HelpEntry("truco", "games", "Jogos", "Desafia alguém para truco.", "truco @usuário", ("truco 1v1",)),
     HelpEntry("roubar", "games", "Jogos", "Tenta roubar fichas de alguém.", "roubar @usuário", ("rob", "roubo"), ("rob",)),
     HelpEntry(
@@ -182,7 +179,7 @@ ENTRIES: tuple[HelpEntry, ...] = (
     # Chatbot e imagens
     HelpEntry("chat", "chatbot", "Conversar", "Conversa com o chatbot.", "@bot mensagem", ("conversar", "mencionar bot", "responder bot")),
     HelpEntry(
-        "imagem", "chatbot", "Criar", "Gera uma imagem pelo profile ativo.", "/imagem <prompt>",
+        "imagem", "chatbot", "Criar", "Gera uma imagem com o perfil ativo.", "/imagem <prompt>",
         ("gerar imagem", "imagem ia"), slash_root="imagem", slash_path="imagem", suffix=" `prompt`",
     ),
     HelpEntry(
@@ -190,7 +187,7 @@ ENTRIES: tuple[HelpEntry, ...] = (
         ("reset memoria", "limpar memoria", "esquecer"), slash_root="reset", slash_path="reset",
     ),
     HelpEntry(
-        "chatbot_profile", "chatbot", "Staff", "Gerencia profiles do chatbot.", "/chatbot profile",
+        "chatbot_profile", "chatbot", "Staff", "Gerencia perfis do chatbot.", "/chatbot profile",
         ("profile", "profiles", "perfil chatbot"), permission="manage_guild",
         slash_root="chatbot", slash_path="chatbot profile", detail_note="Requer Gerenciar servidor.",
     ),
@@ -222,8 +219,8 @@ ENTRIES: tuple[HelpEntry, ...] = (
     HelpEntry("form_config", "server", "Formulário", "Abre a configuração do formulário.", "c", ("config formulario", "configurar formulario", "customizar formulario"), permission="kick_or_manage_guild"),
     HelpEntry(
         "say", "server", "Outros", "Envia uma mensagem pelo bot.", "/say",
-        ("falar pelo bot", "mensagem webhook"), permission="manage_messages", slash_root="say", slash_path="say",
-        detail_note="Requer Gerenciar mensagens.",
+        ("falar pelo bot", "mensagem webhook"), permission="say_staff", slash_root="say", slash_path="say",
+        detail_note="Disponível para staff.",
     ),
     HelpEntry(
         "feedback", "server", "Outros", "Envia feedback para o dono do bot.", "/feedback",
@@ -301,6 +298,14 @@ def _permission_allowed(
         return bool(is_owner or is_admin or getattr(perms, "manage_guild", False))
     if permission == "manage_messages":
         return bool(is_owner or is_admin or getattr(perms, "manage_messages", False))
+    if permission == "say_staff":
+        return bool(
+            is_owner
+            or is_admin
+            or getattr(perms, "manage_guild", False)
+            or getattr(perms, "manage_messages", False)
+            or getattr(perms, "manage_webhooks", False)
+        )
     if permission == "manage_roles":
         return bool(is_owner or is_admin or getattr(perms, "manage_roles", False))
     if permission == "kick":
@@ -450,6 +455,8 @@ def suggest_help_targets(
     subject: str,
     *,
     bot_prefix: str,
+    user: discord.abc.User | None = None,
+    extra_permissions: set[str] | frozenset[str] = frozenset(),
     hidden_categories: set[str] | frozenset[str] = frozenset(),
     limit: int = 3,
 ) -> list[HelpEntry | HelpCategory]:
@@ -461,10 +468,14 @@ def suggest_help_targets(
     for category in CATEGORIES:
         if category.key in hidden_categories:
             continue
+        if user is not None and not _category_visible(category, user, extra_permissions, hidden_categories):
+            continue
         for token in _category_tokens(category):
             token_map.setdefault(_normalize(token), category)
     for entry in ENTRIES:
         if entry.category in hidden_categories:
+            continue
+        if user is not None and not _permission_allowed(user, entry.permission, extra_permissions):
             continue
         for token in _entry_tokens(entry):
             token_map.setdefault(_normalize(token), entry)
@@ -490,11 +501,13 @@ def help_autocomplete_choices(
     current: str,
     *,
     user: discord.abc.User,
-    bot_prefix: str,
+    prefixes: dict[str, str],
+    games_context: dict[str, str] | None = None,
     extra_permissions: set[str] | frozenset[str] = frozenset(),
     hidden_categories: set[str] | frozenset[str] = frozenset(),
     limit: int = 25,
 ) -> list[app_commands.Choice[str]]:
+    bot_prefix = prefixes.get("bot_prefix", "_")
     query = _normalize(_strip_command_prefix(current, bot_prefix))
     scored: list[tuple[int, str, str]] = []
 
@@ -515,6 +528,8 @@ def help_autocomplete_choices(
     for entry in ENTRIES:
         if entry.category in hidden_categories:
             continue
+        if not _permission_allowed(user, entry.permission, extra_permissions):
+            continue
         tokens = tuple(_normalize(token) for token in _entry_tokens(entry))
         if not query:
             # Sem texto, evita despejar dezenas de comandos: mostra só as categorias.
@@ -527,30 +542,60 @@ def help_autocomplete_choices(
             score = 2
         else:
             continue
-        name = f"{entry.key} — {_without_terminal_punctuation(entry.description)}"[:100]
+        if not entry.show_in_category and not any(token == query for token in tokens):
+            continue
+        public_name = _plain_usage(entry, prefixes, games_context)
+        name = f"{public_name} — {_without_terminal_punctuation(entry.description)}"[:100]
         scored.append((score, name, f"entry:{entry.key}"))
 
     scored.sort(key=lambda item: (item[0], item[1].casefold()))
     return [app_commands.Choice(name=name, value=value) for _, name, value in scored[:limit]]
 
 
-def _format_usage(entry: HelpEntry, prefixes: dict[str, str], root_ids: dict[str, int]) -> str:
-    if entry.slash_root and entry.slash_path:
-        return slash_mention(root_ids, root=entry.slash_root, path=entry.slash_path) + entry.suffix
-
+def _plain_usage(
+    entry: HelpEntry,
+    prefixes: dict[str, str],
+    games_context: dict[str, str] | None = None,
+) -> str:
     try:
         rendered = entry.usage.format(**prefixes)
     except Exception:
         rendered = entry.usage
-    return f"`{rendered}`"
+
+    if (
+        entry.category == "games"
+        and entry.slash_path is None
+        and (games_context or {}).get("mode") == "commands"
+    ):
+        bot_prefix = prefixes.get("bot_prefix", "_")
+        if bot_prefix and not rendered.startswith(bot_prefix):
+            rendered = f"{bot_prefix}{rendered}"
+    return rendered
 
 
-def _aliases_line(entry: HelpEntry, prefixes: dict[str, str]) -> str:
+def _format_usage(
+    entry: HelpEntry,
+    prefixes: dict[str, str],
+    root_ids: dict[str, int],
+    games_context: dict[str, str] | None = None,
+) -> str:
+    if entry.slash_root and entry.slash_path:
+        return slash_mention(root_ids, root=entry.slash_root, path=entry.slash_path) + entry.suffix
+    return f"`{_plain_usage(entry, prefixes, games_context)}`"
+
+
+def _aliases_line(
+    entry: HelpEntry,
+    prefixes: dict[str, str],
+    games_context: dict[str, str] | None = None,
+) -> str:
     if not entry.aliases:
         return ""
     bot_prefix = prefixes.get("bot_prefix", "_")
     values: list[str] = []
-    prefixed_aliases = "{bot_prefix}" in entry.usage
+    prefixed_aliases = "{bot_prefix}" in entry.usage or (
+        entry.category == "games" and (games_context or {}).get("mode") == "commands"
+    )
     for alias in entry.aliases:
         if prefixed_aliases:
             values.append(f"`{bot_prefix}{alias}`")
@@ -561,13 +606,11 @@ def _aliases_line(entry: HelpEntry, prefixes: dict[str, str]) -> str:
 
 def _render_home(prefixes: dict[str, str], root_ids: dict[str, int]) -> tuple[str, discord.Color]:
     help_mention = slash_mention(root_ids, root="help", path="help")
-    ping_mention = slash_mention(root_ids, root="ping", path="ping")
     bot_prefix = prefixes.get("bot_prefix", "_")
     body = (
         "# 📚 Ajuda\n"
         "Encontre comandos e recursos do bot\n\n"
-        f"Use o menu, {help_mention} `assunto` ou `{bot_prefix}help assunto`\n"
-        f"-# {ping_mention} mostra latência e estado do bot"
+        f"-# Busca direta: {help_mention} `assunto` · `{bot_prefix}help assunto`"
     )
     return body, discord.Color.blurple()
 
@@ -578,6 +621,7 @@ def _render_category(
     user: discord.abc.User,
     prefixes: dict[str, str],
     root_ids: dict[str, int],
+    games_context: dict[str, str] | None = None,
     extra_permissions: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, discord.Color]:
     lines = [f"# {category.emoji} {category.label}", _without_terminal_punctuation(category.description)]
@@ -585,6 +629,7 @@ def _render_category(
         entry
         for entry in ENTRIES
         if entry.category == category.key
+        and entry.show_in_category
         and _permission_allowed(user, entry.permission, extra_permissions)
     ]
 
@@ -593,23 +638,34 @@ def _render_category(
         if entry.group != last_group:
             lines.extend(["", f"**{entry.group}**"])
             last_group = entry.group
-        lines.append(f"{_format_usage(entry, prefixes, root_ids)} — {_without_terminal_punctuation(entry.description)}")
+        lines.append(
+            f"{_format_usage(entry, prefixes, root_ids, games_context)} — "
+            f"{_without_terminal_punctuation(entry.description)}"
+        )
 
     if category.key == "games":
-        lines.extend(["", "-# Jogos podem usar trigger ou prefixo, conforme a configuração do servidor"])
+        mode = (games_context or {}).get("mode")
+        if mode == "commands":
+            lines.extend(["", f"-# Neste servidor, jogos usam o prefixo `{prefixes.get('bot_prefix', '_')}`"])
+        elif mode == "triggers":
+            lines.extend(["", "-# Neste servidor, jogos são usados sem prefixo"])
+        channel_mention = str((games_context or {}).get("channel_mention") or "").strip()
+        if channel_mention:
+            lines.append(f"-# Canal de jogos: {channel_mention}")
     elif category.key == "server" and not entries:
         lines.extend(["", "Nenhuma configuração disponível para suas permissões"])
 
     return "\n".join(lines), category.accent
 
 
-def _entry_display_title(entry: HelpEntry, prefixes: dict[str, str]) -> str:
+def _entry_display_title(
+    entry: HelpEntry,
+    prefixes: dict[str, str],
+    games_context: dict[str, str] | None = None,
+) -> str:
     if entry.slash_path:
         return f"/{entry.slash_path}"
-    try:
-        plain = entry.usage.format(**prefixes)
-    except Exception:
-        plain = entry.usage
+    plain = _plain_usage(entry, prefixes, games_context)
     # Mantém prefixos de voz inteiros, mas corta argumentos de comandos.
     if entry.key in {"gtts", "edge"}:
         return plain
@@ -622,15 +678,16 @@ def _render_entry(
     user: discord.abc.User,
     prefixes: dict[str, str],
     root_ids: dict[str, int],
+    games_context: dict[str, str] | None = None,
     extra_permissions: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, discord.Color]:
-    usage = _format_usage(entry, prefixes, root_ids)
+    usage = _format_usage(entry, prefixes, root_ids, games_context)
     category = _CATEGORY_BY_KEY.get(entry.category or "")
     title_emoji = category.emoji if category else "🔎"
-    title = _entry_display_title(entry, prefixes)
+    title = _entry_display_title(entry, prefixes, games_context)
     lines = [f"# {title_emoji} `{title}`", _without_terminal_punctuation(entry.description), "", f"**Uso:** {usage}"]
 
-    aliases = _aliases_line(entry, prefixes)
+    aliases = _aliases_line(entry, prefixes, games_context)
     if aliases:
         lines.append(f"**Aliases:** {aliases}")
 
@@ -650,12 +707,17 @@ def _render_entry(
 def _render_not_found(
     subject: str,
     *,
+    user: discord.abc.User,
     prefixes: dict[str, str],
+    games_context: dict[str, str] | None = None,
+    extra_permissions: set[str] | frozenset[str] = frozenset(),
     hidden_categories: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, discord.Color]:
     suggestions = suggest_help_targets(
         subject,
         bot_prefix=prefixes.get("bot_prefix", "_"),
+        user=user,
+        extra_permissions=extra_permissions,
         hidden_categories=hidden_categories,
     )
     lines = ["# 🔎 Nada encontrado", f"Não achei `{str(subject)[:80]}`"]
@@ -665,7 +727,7 @@ def _render_not_found(
             if isinstance(target, HelpCategory):
                 labels.append(target.label)
             else:
-                labels.append(target.key)
+                labels.append(_plain_usage(target, prefixes, games_context))
         lines.extend(["", "Talvez: " + " · ".join(f"`{label}`" for label in labels)])
     return "\n".join(lines), discord.Color.dark_grey()
 
@@ -688,7 +750,7 @@ class _HelpNavigationSelect(discord.ui.Select):
                 )
             )
         super().__init__(
-            placeholder="Ir para…",
+            placeholder="Escolha uma área…" if owner_view.target_kind == "home" else "Trocar área…",
             min_values=1,
             max_values=1,
             options=options,
@@ -696,6 +758,11 @@ class _HelpNavigationSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         selected = str(self.values[0]) if self.values else "home"
+        await self.owner_view.refresh_dynamic_state()
+        if selected.startswith("category:"):
+            category_key = selected.split(":", 1)[1]
+            if category_key in self.owner_view.hidden_categories:
+                selected = "home"
         self.owner_view.set_target(selected)
         self.owner_view.rebuild()
         await interaction.response.edit_message(view=self.owner_view)
@@ -708,8 +775,10 @@ class HelpCenterView(discord.ui.LayoutView):
         owner: discord.abc.User,
         prefixes: dict[str, str],
         root_ids: dict[str, int],
+        games_context: dict[str, str] | None = None,
         extra_permissions: set[str] | frozenset[str] = frozenset(),
         hidden_categories: set[str] | frozenset[str] = frozenset(),
+        hidden_categories_provider: Callable[[], Awaitable[frozenset[str]]] | None = None,
         subject: str | None = None,
         timeout: float = HELP_TIMEOUT_SECONDS,
     ):
@@ -718,8 +787,10 @@ class HelpCenterView(discord.ui.LayoutView):
         self.owner_id = int(owner.id)
         self.prefixes = dict(prefixes)
         self.root_ids = dict(root_ids)
+        self.games_context = dict(games_context or {})
         self.extra_permissions = frozenset(extra_permissions)
         self.hidden_categories = frozenset(hidden_categories)
+        self.hidden_categories_provider = hidden_categories_provider
         self.message: discord.Message | None = None
         self.target_kind, self.target_key = resolve_help_target(
             subject,
@@ -727,6 +798,22 @@ class HelpCenterView(discord.ui.LayoutView):
             hidden_categories=self.hidden_categories,
         )
         self.rebuild()
+
+    async def refresh_dynamic_state(self) -> None:
+        provider = self.hidden_categories_provider
+        if provider is None:
+            return
+        try:
+            hidden = frozenset(await provider())
+        except Exception:
+            return
+        self.hidden_categories = hidden
+        if self.target_kind == "category" and self.target_key in hidden:
+            self.target_kind, self.target_key = ("home", None)
+        elif self.target_kind == "entry":
+            entry = _ENTRY_BY_KEY.get(str(self.target_key or ""))
+            if entry is not None and entry.category in hidden:
+                self.target_kind, self.target_key = ("home", None)
 
     def set_target(self, target: str) -> None:
         self.target_kind, self.target_key = resolve_help_target(
@@ -744,6 +831,7 @@ class HelpCenterView(discord.ui.LayoutView):
                 user=self.owner,
                 prefixes=self.prefixes,
                 root_ids=self.root_ids,
+                games_context=self.games_context,
                 extra_permissions=self.extra_permissions,
             )
         if self.target_kind == "entry" and self.target_key in _ENTRY_BY_KEY:
@@ -752,11 +840,15 @@ class HelpCenterView(discord.ui.LayoutView):
                 user=self.owner,
                 prefixes=self.prefixes,
                 root_ids=self.root_ids,
+                games_context=self.games_context,
                 extra_permissions=self.extra_permissions,
             )
         return _render_not_found(
             str(self.target_key or ""),
+            user=self.owner,
             prefixes=self.prefixes,
+            games_context=self.games_context,
+            extra_permissions=self.extra_permissions,
             hidden_categories=self.hidden_categories,
         )
 

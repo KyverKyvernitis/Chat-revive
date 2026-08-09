@@ -297,6 +297,7 @@ class BotLocal(commands.Bot):
         self.application_presence = ApplicationPresenceService(
             self,
             self._update_staging_root / "candidates" / "runtime-state.json",
+            self._repo_root / "data" / "application_presence.json",
         )
         self._update_notice_by_user: dict[int, float] = {}
         self._music_bitrate_reconciled = False

@@ -7,7 +7,7 @@ _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
     "help": {
         "aliases": ("help",),
         "display": ("help",),
-        "accepts_argument": False,
+        "accepts_argument": True,
     },
     "clear": {
         "aliases": ("clear",),

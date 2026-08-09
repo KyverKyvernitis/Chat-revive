@@ -23,6 +23,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
         self._help_prefix_cache: dict[int, tuple[float, dict[str, str]]] = {}
         self._help_permission_cache: dict[tuple[int, int], tuple[float, frozenset[str]]] = {}
+        self._help_music_available_cache: tuple[float, bool] | None = None
         self._core_worker_auto_wake_task: asyncio.Task | None = None
         self._core_worker_wake_lock = asyncio.Lock()
         self._start_core_worker_auto_wake_task()
@@ -146,16 +147,56 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         self._help_permission_cache[cache_key] = (now, frozenset(permissions))
         return permissions
 
+    async def _help_music_available(self) -> bool:
+        now = asyncio.get_running_loop().time()
+        cached = self._help_music_available_cache
+        if cached is not None and now - cached[0] <= 5.0:
+            return bool(cached[1])
+
+        def read_registry() -> bool:
+            try:
+                from utility.commands.workers_registry import get_core_workers_registry
+
+                snapshot = get_core_workers_registry().snapshot(lock_timeout_seconds=0.03)
+                workers = snapshot.get("workers") if isinstance(snapshot, dict) else []
+                for worker in workers or []:
+                    if not isinstance(worker, dict) or not bool(worker.get("online")):
+                        continue
+                    runtime_kind = str(worker.get("runtime_kind") or "").strip().lower()
+                    source = str(worker.get("source") or "").strip().lower()
+                    if runtime_kind == "apk" or source.startswith("core-worker-apk"):
+                        continue
+                    roles = {str(value or "").strip().lower() for value in (worker.get("roles") or [])}
+                    capabilities = {str(value or "").strip().lower() for value in (worker.get("capabilities") or [])}
+                    roles_caps = roles | capabilities
+                    if "phone-worker" in roles_caps and "music" in roles_caps:
+                        return True
+                return False
+            except Exception:
+                return False
+
+        available = bool(await asyncio.to_thread(read_registry))
+        self._help_music_available_cache = (now, available)
+        return available
+
+    async def _help_hidden_categories(self) -> frozenset[str]:
+        hidden: set[str] = set()
+        if not await self._help_music_available():
+            hidden.add("music")
+        return frozenset(hidden)
+
     async def _help_autocomplete_choices(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         prefixes = await self._get_help_prefix_data(interaction.guild)
         extra_permissions = await self._get_help_extra_permissions(interaction.guild, interaction.user)
+        hidden_categories = await self._help_hidden_categories()
         return help_autocomplete_choices(
             current,
             user=interaction.user,
             bot_prefix=prefixes["bot_prefix"],
             extra_permissions=extra_permissions,
+            hidden_categories=hidden_categories,
         )
 
     async def _send_help_response(
@@ -172,11 +213,13 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         prefixes = await self._get_help_prefix_data(guild)
         root_ids = await self._fetch_root_command_ids_cached(guild)
         extra_permissions = await self._get_help_extra_permissions(guild, owner)
+        hidden_categories = await self._help_hidden_categories()
         view = HelpCenterView(
             owner=owner,
             prefixes=prefixes,
             root_ids=root_ids,
             extra_permissions=extra_permissions,
+            hidden_categories=hidden_categories,
             subject=subject,
             timeout=HELP_TIMEOUT_SECONDS,
         )

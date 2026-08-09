@@ -85,8 +85,6 @@ CATEGORIES: tuple[HelpCategory, ...] = (
 
 ENTRIES: tuple[HelpEntry, ...] = (
     # Voz e TTS
-    HelpEntry("atts", "voice", "Falar", "Fala usando Android TTS.", "{atts_prefix}texto", ("android", "atts")),
-    HelpEntry("teto", "voice", "Falar", "Fala usando a voz da Kasane Teto.", "{teto_prefix}texto", ("kasane", "kasane teto", "teto")),
     HelpEntry("gtts", "voice", "Falar", "Fala usando gTTS.", "{gtts_prefix}texto", ("google tts", "gtts")),
     HelpEntry("edge", "voice", "Falar", "Fala usando Edge TTS.", "{edge_prefix}texto", ("edge", "edge tts")),
     HelpEntry(
@@ -268,6 +266,10 @@ def _normalize(value: str) -> str:
     return text.strip()
 
 
+def _without_terminal_punctuation(value: str) -> str:
+    return re.sub(r"[.!?…]+$", "", str(value or "").rstrip())
+
+
 def _strip_command_prefix(query: str, bot_prefix: str) -> str:
     raw = str(query or "").strip()
     if raw.startswith("/"):
@@ -329,7 +331,10 @@ def _category_visible(
     category: HelpCategory,
     user: discord.abc.User,
     extra_permissions: set[str] | frozenset[str] = frozenset(),
+    hidden_categories: set[str] | frozenset[str] = frozenset(),
 ) -> bool:
+    if category.key in hidden_categories:
+        return False
     if category.key != "server":
         return True
     return any(
@@ -364,7 +369,12 @@ def _prefix_entry_tokens(entry: HelpEntry) -> tuple[str, ...]:
     return tuple(token for token in (command, *entry.aliases) if token)
 
 
-def resolve_help_target(subject: str | None, *, bot_prefix: str) -> tuple[str, str | None]:
+def resolve_help_target(
+    subject: str | None,
+    *,
+    bot_prefix: str,
+    hidden_categories: set[str] | frozenset[str] = frozenset(),
+) -> tuple[str, str | None]:
     if subject is None or not str(subject).strip():
         return ("home", None)
 
@@ -374,11 +384,12 @@ def resolve_help_target(subject: str | None, *, bot_prefix: str) -> tuple[str, s
         return ("home", None)
     if normalized_special.startswith("category:"):
         key = normalized_special.split(":", 1)[1]
-        if key in _CATEGORY_BY_KEY:
+        if key in _CATEGORY_BY_KEY and key not in hidden_categories:
             return ("category", key)
     if normalized_special.startswith("entry:"):
         key = normalized_special.split(":", 1)[1]
-        if key in _ENTRY_BY_KEY:
+        entry = _ENTRY_BY_KEY.get(key)
+        if entry is not None and entry.category not in hidden_categories:
             return ("entry", key)
 
     is_slash_command = raw.startswith("/")
@@ -389,24 +400,34 @@ def resolve_help_target(subject: str | None, *, bot_prefix: str) -> tuple[str, s
     # Isso diferencia, por exemplo, `_reset` (TTS) de `/reset` (chatbot).
     if is_slash_command:
         for entry in ENTRIES:
+            if entry.category in hidden_categories:
+                continue
             if entry.slash_path and normalized == _normalize(entry.slash_path):
                 return ("entry", entry.key)
     elif is_prefix_command:
         for entry in ENTRIES:
+            if entry.category in hidden_categories:
+                continue
             if any(normalized == _normalize(token) for token in _prefix_entry_tokens(entry)):
                 return ("entry", entry.key)
 
     # Em texto natural, termos realmente genéricos abrem a categoria.
     for category in CATEGORIES:
+        if category.key in hidden_categories:
+            continue
         direct_terms = _CATEGORY_DIRECT_TERMS.get(category.key, ())
         if any(normalized == _normalize(token) for token in direct_terms):
             return ("category", category.key)
 
     for entry in ENTRIES:
+        if entry.category in hidden_categories:
+            continue
         if any(normalized == _normalize(token) for token in _entry_tokens(entry)):
             return ("entry", entry.key)
 
     for category in CATEGORIES:
+        if category.key in hidden_categories:
+            continue
         if any(normalized == _normalize(token) for token in _category_tokens(category)):
             return ("category", category.key)
 
@@ -415,6 +436,8 @@ def resolve_help_target(subject: str | None, *, bot_prefix: str) -> tuple[str, s
     if len(normalized) >= 3:
         entry_matches: list[HelpEntry] = []
         for entry in ENTRIES:
+            if entry.category in hidden_categories:
+                continue
             if any(_normalize(token).startswith(normalized) for token in _entry_tokens(entry)):
                 entry_matches.append(entry)
         if len(entry_matches) == 1:
@@ -423,16 +446,26 @@ def resolve_help_target(subject: str | None, *, bot_prefix: str) -> tuple[str, s
     return ("notfound", raw)
 
 
-def suggest_help_targets(subject: str, *, bot_prefix: str, limit: int = 3) -> list[HelpEntry | HelpCategory]:
+def suggest_help_targets(
+    subject: str,
+    *,
+    bot_prefix: str,
+    hidden_categories: set[str] | frozenset[str] = frozenset(),
+    limit: int = 3,
+) -> list[HelpEntry | HelpCategory]:
     normalized = _normalize(_strip_command_prefix(subject, bot_prefix))
     if not normalized:
         return []
 
     token_map: dict[str, HelpEntry | HelpCategory] = {}
     for category in CATEGORIES:
+        if category.key in hidden_categories:
+            continue
         for token in _category_tokens(category):
             token_map.setdefault(_normalize(token), category)
     for entry in ENTRIES:
+        if entry.category in hidden_categories:
+            continue
         for token in _entry_tokens(entry):
             token_map.setdefault(_normalize(token), entry)
 
@@ -459,13 +492,14 @@ def help_autocomplete_choices(
     user: discord.abc.User,
     bot_prefix: str,
     extra_permissions: set[str] | frozenset[str] = frozenset(),
+    hidden_categories: set[str] | frozenset[str] = frozenset(),
     limit: int = 25,
 ) -> list[app_commands.Choice[str]]:
     query = _normalize(_strip_command_prefix(current, bot_prefix))
     scored: list[tuple[int, str, str]] = []
 
     for category in CATEGORIES:
-        if not _category_visible(category, user, extra_permissions):
+        if not _category_visible(category, user, extra_permissions, hidden_categories):
             continue
         tokens = tuple(_normalize(token) for token in _category_tokens(category))
         if not query:
@@ -479,6 +513,8 @@ def help_autocomplete_choices(
         scored.append((score, f"{category.emoji} {category.label}", f"category:{category.key}"))
 
     for entry in ENTRIES:
+        if entry.category in hidden_categories:
+            continue
         tokens = tuple(_normalize(token) for token in _entry_tokens(entry))
         if not query:
             # Sem texto, evita despejar dezenas de comandos: mostra só as categorias.
@@ -491,7 +527,7 @@ def help_autocomplete_choices(
             score = 2
         else:
             continue
-        name = f"{entry.key} — {entry.description}"[:100]
+        name = f"{entry.key} — {_without_terminal_punctuation(entry.description)}"[:100]
         scored.append((score, name, f"entry:{entry.key}"))
 
     scored.sort(key=lambda item: (item[0], item[1].casefold()))
@@ -529,8 +565,8 @@ def _render_home(prefixes: dict[str, str], root_ids: dict[str, int]) -> tuple[st
     bot_prefix = prefixes.get("bot_prefix", "_")
     body = (
         "# 📚 Ajuda\n"
-        "Encontre comandos e recursos do bot.\n\n"
-        f"Use o menu, {help_mention} `assunto` ou `{bot_prefix}help assunto`.\n"
+        "Encontre comandos e recursos do bot\n\n"
+        f"Use o menu, {help_mention} `assunto` ou `{bot_prefix}help assunto`\n"
         f"-# {ping_mention} mostra latência e estado do bot"
     )
     return body, discord.Color.blurple()
@@ -544,7 +580,7 @@ def _render_category(
     root_ids: dict[str, int],
     extra_permissions: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, discord.Color]:
-    lines = [f"# {category.emoji} {category.label}", category.description]
+    lines = [f"# {category.emoji} {category.label}", _without_terminal_punctuation(category.description)]
     entries = [
         entry
         for entry in ENTRIES
@@ -557,12 +593,12 @@ def _render_category(
         if entry.group != last_group:
             lines.extend(["", f"**{entry.group}**"])
             last_group = entry.group
-        lines.append(f"{_format_usage(entry, prefixes, root_ids)} — {entry.description}")
+        lines.append(f"{_format_usage(entry, prefixes, root_ids)} — {_without_terminal_punctuation(entry.description)}")
 
     if category.key == "games":
         lines.extend(["", "-# Jogos podem usar trigger ou prefixo, conforme a configuração do servidor"])
     elif category.key == "server" and not entries:
-        lines.extend(["", "Nenhuma configuração disponível para suas permissões."])
+        lines.extend(["", "Nenhuma configuração disponível para suas permissões"])
 
     return "\n".join(lines), category.accent
 
@@ -575,7 +611,7 @@ def _entry_display_title(entry: HelpEntry, prefixes: dict[str, str]) -> str:
     except Exception:
         plain = entry.usage
     # Mantém prefixos de voz inteiros, mas corta argumentos de comandos.
-    if entry.key in {"atts", "teto", "gtts", "edge"}:
+    if entry.key in {"gtts", "edge"}:
         return plain
     return plain.split(" ", 1)[0]
 
@@ -592,14 +628,14 @@ def _render_entry(
     category = _CATEGORY_BY_KEY.get(entry.category or "")
     title_emoji = category.emoji if category else "🔎"
     title = _entry_display_title(entry, prefixes)
-    lines = [f"# {title_emoji} `{title}`", entry.description, "", f"**Uso:** {usage}"]
+    lines = [f"# {title_emoji} `{title}`", _without_terminal_punctuation(entry.description), "", f"**Uso:** {usage}"]
 
     aliases = _aliases_line(entry, prefixes)
     if aliases:
         lines.append(f"**Aliases:** {aliases}")
 
     if entry.detail_note:
-        lines.extend(["", f"-# {entry.detail_note}"])
+        lines.extend(["", f"-# {_without_terminal_punctuation(entry.detail_note)}"])
     elif not _permission_allowed(user, entry.permission, extra_permissions):
         lines.extend(["", "-# Você não tem a permissão necessária para usar este recurso"])
 
@@ -611,9 +647,18 @@ def _render_entry(
     return "\n".join(lines), accent
 
 
-def _render_not_found(subject: str, *, prefixes: dict[str, str]) -> tuple[str, discord.Color]:
-    suggestions = suggest_help_targets(subject, bot_prefix=prefixes.get("bot_prefix", "_"))
-    lines = ["# 🔎 Nada encontrado", f"Não achei `{str(subject)[:80]}`."]
+def _render_not_found(
+    subject: str,
+    *,
+    prefixes: dict[str, str],
+    hidden_categories: set[str] | frozenset[str] = frozenset(),
+) -> tuple[str, discord.Color]:
+    suggestions = suggest_help_targets(
+        subject,
+        bot_prefix=prefixes.get("bot_prefix", "_"),
+        hidden_categories=hidden_categories,
+    )
+    lines = ["# 🔎 Nada encontrado", f"Não achei `{str(subject)[:80]}`"]
     if suggestions:
         labels: list[str] = []
         for target in suggestions:
@@ -629,17 +674,17 @@ class _HelpNavigationSelect(discord.ui.Select):
     def __init__(self, owner_view: "HelpCenterView"):
         self.owner_view = owner_view
         options: list[discord.SelectOption] = [
-            discord.SelectOption(label="Início", value="home", emoji="📚", description="Volta para a central de ajuda.")
+            discord.SelectOption(label="Início", value="home", emoji="📚", description="Volta para a central de ajuda")
         ]
         for category in CATEGORIES:
-            if not _category_visible(category, owner_view.owner, owner_view.extra_permissions):
+            if not _category_visible(category, owner_view.owner, owner_view.extra_permissions, owner_view.hidden_categories):
                 continue
             options.append(
                 discord.SelectOption(
                     label=category.label,
                     value=f"category:{category.key}",
                     emoji=category.emoji,
-                    description=category.description[:100],
+                    description=_without_terminal_punctuation(category.description)[:100],
                 )
             )
         super().__init__(
@@ -664,6 +709,7 @@ class HelpCenterView(discord.ui.LayoutView):
         prefixes: dict[str, str],
         root_ids: dict[str, int],
         extra_permissions: set[str] | frozenset[str] = frozenset(),
+        hidden_categories: set[str] | frozenset[str] = frozenset(),
         subject: str | None = None,
         timeout: float = HELP_TIMEOUT_SECONDS,
     ):
@@ -673,10 +719,12 @@ class HelpCenterView(discord.ui.LayoutView):
         self.prefixes = dict(prefixes)
         self.root_ids = dict(root_ids)
         self.extra_permissions = frozenset(extra_permissions)
+        self.hidden_categories = frozenset(hidden_categories)
         self.message: discord.Message | None = None
         self.target_kind, self.target_key = resolve_help_target(
             subject,
             bot_prefix=self.prefixes.get("bot_prefix", "_"),
+            hidden_categories=self.hidden_categories,
         )
         self.rebuild()
 
@@ -684,6 +732,7 @@ class HelpCenterView(discord.ui.LayoutView):
         self.target_kind, self.target_key = resolve_help_target(
             target,
             bot_prefix=self.prefixes.get("bot_prefix", "_"),
+            hidden_categories=self.hidden_categories,
         )
 
     def _render_current(self) -> tuple[str, discord.Color]:
@@ -705,7 +754,11 @@ class HelpCenterView(discord.ui.LayoutView):
                 root_ids=self.root_ids,
                 extra_permissions=self.extra_permissions,
             )
-        return _render_not_found(str(self.target_key or ""), prefixes=self.prefixes)
+        return _render_not_found(
+            str(self.target_key or ""),
+            prefixes=self.prefixes,
+            hidden_categories=self.hidden_categories,
+        )
 
     def rebuild(self) -> None:
         for child in list(self.children):
@@ -725,7 +778,7 @@ class HelpCenterView(discord.ui.LayoutView):
             return True
         try:
             await interaction.response.send_message(
-                "Abra sua própria central com `/help`.",
+                "Abra sua própria central com `/help`",
                 ephemeral=True,
             )
         except Exception:
@@ -738,7 +791,7 @@ class HelpCenterView(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.TextDisplay(
-                    "# 📚 Ajuda\nEsta central expirou. Use `/help` novamente."
+                    "# 📚 Ajuda\nEsta central expirou\nUse `/help` novamente"
                 ),
                 accent_color=discord.Color.dark_grey(),
             )

@@ -50,6 +50,7 @@ export function AccountMenu({
   onLogout,
 }: AccountMenuProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const sheetRef = useRef<HTMLElement>(null);
   const closeTimerRef = useRef<number | null>(null);
   const openFrameOneRef = useRef<number | null>(null);
   const openFrameTwoRef = useRef<number | null>(null);
@@ -99,6 +100,7 @@ export function AccountMenu({
       setMounted(false);
       closeTimerRef.current = null;
     }, CLOSE_MS + 40);
+    window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
   }, [clearOpenFrames]);
 
   const toggle = () => {
@@ -115,11 +117,45 @@ export function AccountMenu({
     const lockScroll = window.matchMedia("(max-width: 720px)").matches;
     const previousOverflow = document.body.style.overflow;
     if (lockScroll) document.body.style.overflow = "hidden";
+    const focusTimer = window.setTimeout(() => {
+      sheetRef.current?.querySelector<HTMLElement>("[role='menuitem']:not([disabled])")?.focus();
+    }, 60);
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         close();
         triggerRef.current?.focus();
+        return;
+      }
+      const items = Array.from(sheetRef.current?.querySelectorAll<HTMLElement>("[role='menuitem']:not([disabled])") ?? []);
+      if (!items.length) return;
+      const current = items.indexOf(document.activeElement as HTMLElement);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        const next = current < 0
+          ? (direction === 1 ? 0 : items.length - 1)
+          : (current + direction + items.length) % items.length;
+        items[next]?.focus();
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        items[0]?.focus();
+      } else if (event.key === "End") {
+        event.preventDefault();
+        items[items.length - 1]?.focus();
+      } else if (event.key === "Tab" && lockScroll && sheetRef.current) {
+        const focusable = Array.from(sheetRef.current.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), a[href], [tabindex]:not([tabindex='-1'])",
+        ));
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (first && last && event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (first && last && !event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       }
     };
     const onViewportChange = () => measure();
@@ -127,6 +163,7 @@ export function AccountMenu({
     window.addEventListener("resize", onViewportChange);
     window.addEventListener("scroll", onViewportChange, true);
     return () => {
+      window.clearTimeout(focusTimer);
       if (lockScroll) document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", onViewportChange);
@@ -174,6 +211,7 @@ export function AccountMenu({
       <div className="osk-account-layer" data-visible={visible || undefined}>
         <button type="button" className="osk-account-backdrop" onClick={close} aria-label="Fechar menu da conta" />
         <section
+          ref={sheetRef}
           className="osk-account-sheet"
           style={{ "--osk-account-top": `${position.top}px`, "--osk-account-right": `${position.right}px` } as CSSProperties}
           role="menu"

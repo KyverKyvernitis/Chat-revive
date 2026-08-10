@@ -1943,12 +1943,6 @@
   white-space: nowrap;
 }
 
-/* A visão geral deixa de exibir estado como decoração. */
-.osk-function-card::before,
-.osk-function-state {
-  display: none !important;
-}
-
 .osk-function-card {
   grid-template-columns: 42px minmax(0, 1fr) 30px;
   border-color: var(--osk-line);

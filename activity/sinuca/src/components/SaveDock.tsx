@@ -17,7 +17,7 @@ export function SaveDock({ changedCount, sectionLabel, saving, onDiscard, onSave
     </div>
     <div className="osk-save-dock-actions">
       <button className="osk-secondary-button osk-secondary-button--small" onClick={onDiscard} disabled={saving}><RotateCcw size={14} />Desfazer</button>
-      <button className="osk-primary-button osk-primary-button--small" onClick={onSave} disabled={saving}><Save size={14} />{saving ? "Salvando..." : "Salvar"}</button>
+      <button className="osk-primary-button osk-primary-button--small" onClick={onSave} disabled={saving}><Save size={14} />{saving ? "Salvando..." : "Salvar no servidor"}</button>
     </div>
   </div>;
 }

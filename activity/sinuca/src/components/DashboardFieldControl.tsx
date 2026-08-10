@@ -34,7 +34,7 @@ interface DashboardFieldControlProps {
   onColorSlotSelect?(slotNumber: number): void;
 }
 
-const TEXT_LIKE_CHANNEL_TYPES = new Set([0, 5]);
+const TEXT_LIKE_CHANNEL_TYPES = new Set([0, 5, 15, 16]);
 const VOICE_CHANNEL_TYPES = new Set([2, 13]);
 const CATEGORY_CHANNEL_TYPE = 4;
 
@@ -45,7 +45,7 @@ function channelKindForField(field: DashboardFieldDefinition): "category" | "voi
   return "text";
 }
 
-function channelOptionsForField(field: DashboardFieldDefinition, channels: DashboardChannelOption[]): SmartSelectOption[] {
+export function channelOptionsForField(field: DashboardFieldDefinition, channels: DashboardChannelOption[]): SmartSelectOption[] {
   const kind = channelKindForField(field);
   return channels.filter((channel) => {
     if (kind === "category") return channel.type === CATEGORY_CHANNEL_TYPE;
@@ -83,7 +83,7 @@ function channelOptionsForField(field: DashboardFieldDefinition, channels: Dashb
 export function stringifyDashboardValue(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") return Number.isFinite(value) && value > 0 ? String(value) : "";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
   return String(value);
 }
 
@@ -146,17 +146,17 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange, on
     : null;
 
   if (field.type === "boolean") {
-    return <label className="osk-switch"><input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} /><span className="osk-switch-track" /><span className="osk-switch-state">{Boolean(value) ? "Ativado" : "Desativado"}</span></label>;
+    return <label className="osk-switch"><input type="checkbox" aria-label={field.label} checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} /><span className="osk-switch-track" /><span className="osk-switch-state">{Boolean(value) ? "Ativado" : "Desativado"}</span></label>;
   }
 
   if (field.id === "tts.rate") {
     const numeric = Math.max(-100, Math.min(100, Number.parseInt(currentValue, 10) || 0));
-    return <div className="osk-range-control"><input type="range" min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}%`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}%</output></div>;
+    return <div className="osk-range-control"><input type="range" aria-label={field.label} min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}%`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}%</output></div>;
   }
 
   if (field.id === "tts.pitch") {
     const numeric = Math.max(-100, Math.min(100, Number.parseInt(currentValue, 10) || 0));
-    return <div className="osk-range-control"><input type="range" min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}Hz`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}Hz</output></div>;
+    return <div className="osk-range-control"><input type="range" aria-label={field.label} min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}Hz`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}Hz</output></div>;
   }
 
   if (field.type === "select") {
@@ -164,15 +164,15 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange, on
     const options = currentValue && !configuredOptions.some((option) => option.value === currentValue)
       ? [{ value: currentValue, label: `${currentValue} — valor atual` }, ...configuredOptions]
       : configuredOptions;
-    return <SmartSelect id={`field-${field.id}`} value={currentValue} options={options} onChange={(next) => onChange(field, next)} placeholder="Selecione uma opção" />;
+    return <SmartSelect id={`field-${field.id}`} ariaLabel={field.label} value={currentValue} options={options} onChange={(next) => onChange(field, next)} placeholder="Selecione uma opção" />;
   }
 
   if (field.type === "channel" && channelOptions) {
-    return <SmartSelect id={`field-${field.id}`} value={currentValue} options={[{ value: "", label: "Nenhum" }, ...channelOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um canal" emptyLabel="Nenhum canal compatível encontrado" />;
+    return <SmartSelect id={`field-${field.id}`} ariaLabel={field.label} value={currentValue} options={[{ value: "", label: "Nenhum" }, ...channelOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um canal" emptyLabel="Nenhum canal compatível encontrado" />;
   }
 
   if (field.type === "role" && roleOptions) {
-    return <SmartSelect id={`field-${field.id}`} value={currentValue} options={[{ value: "", label: "Nenhum" }, ...roleOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um cargo" emptyLabel="Nenhum cargo encontrado" />;
+    return <SmartSelect id={`field-${field.id}`} ariaLabel={field.label} value={currentValue} options={[{ value: "", label: "Nenhum" }, ...roleOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um cargo" emptyLabel="Nenhum cargo encontrado" />;
   }
 
   if (field.type === "role_multi") {
@@ -201,6 +201,7 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange, on
 
   if (field.type === "textarea") {
     return <textarea
+      aria-label={field.label}
       data-message-field-id={field.id}
       value={currentValue}
       maxLength={field.maxLength}
@@ -219,6 +220,7 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange, on
   return <div className={`${field.type === "color" ? "osk-color-input" : ""}${suffix ? " osk-input-suffix" : ""}`.trim()}>
     {field.type === "color" && <input type="color" value={/^#[0-9a-f]{6}$/i.test(currentValue) ? currentValue : "#5865f2"} onChange={(event) => onChange(field, event.target.value)} aria-label={field.label} />}
     <input
+      aria-label={field.label}
       data-message-field-id={field.type === "text" ? field.id : undefined}
       type={field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}
       min={field.min}
@@ -242,18 +244,43 @@ function RoleMultiEditor({ field, value, options, onChange }: { field: Dashboard
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [working, setWorking] = useState<string[]>(selected);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { if (!open) setWorking(selected); }, [open, value]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!open) return;
     const previousOverflow = document.body.style.overflow;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : triggerRef.current;
     document.body.style.overflow = "hidden";
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    const focusTimer = window.setTimeout(() => searchRef.current?.focus(), 0);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !panelRef.current) return;
+      const focusable = Array.from(panelRef.current.querySelectorAll<HTMLElement>(
+        "button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex='-1'])",
+      )).filter((element) => !element.hasAttribute("hidden"));
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
     window.addEventListener("keydown", onKey);
-    return () => { document.body.style.overflow = previousOverflow; window.removeEventListener("keydown", onKey); };
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKey);
+      window.requestAnimationFrame(() => previousFocus?.focus({ preventScroll: true }));
+    };
   }, [open]);
 
-  if (!options.length) return <input value={selected.join(", ")} placeholder="IDs separados por vírgula" onChange={(event) => onChange(field, event.target.value.split(/[\s,]+/).filter(Boolean))} />;
+  if (!options.length) return <input aria-label={field.label} value={selected.join(", ")} placeholder="IDs separados por vírgula" onChange={(event) => onChange(field, event.target.value.split(/[\s,]+/).filter(Boolean))} />;
 
   const selectedOptions = selected.map((id) => options.find((option) => option.value === id) ?? { value: id, label: `Cargo ${id}` });
   const needle = query.trim().toLocaleLowerCase("pt-BR");
@@ -262,9 +289,9 @@ function RoleMultiEditor({ field, value, options, onChange }: { field: Dashboard
 
   const modal = open ? <div className="osk-root osk-multi-sheet" role="dialog" aria-modal="true" aria-label={`Selecionar ${field.label}`}>
     <button type="button" className="osk-multi-sheet__backdrop" onClick={() => setOpen(false)} aria-label="Fechar" />
-    <div className="osk-multi-sheet__panel">
+    <div className="osk-multi-sheet__panel" ref={panelRef}>
       <header><div><strong>{field.label}</strong><small>{working.length} selecionado{working.length === 1 ? "" : "s"}</small></div><button type="button" onClick={() => setOpen(false)} aria-label="Fechar"><X size={18} /></button></header>
-      <label className="osk-multi-sheet__search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar cargo" /></label>
+      <label className="osk-multi-sheet__search"><Search size={16} /><input ref={searchRef} aria-label="Buscar cargo" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar cargo" /></label>
       <div className="osk-multi-sheet__list">
         {filtered.map((option) => <button key={option.value} type="button" data-selected={working.includes(option.value) || undefined} onClick={() => toggle(option.value)}>
           <span><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span>{working.includes(option.value) && <Check size={17} />}
@@ -280,7 +307,7 @@ function RoleMultiEditor({ field, value, options, onChange }: { field: Dashboard
       {selectedOptions.map((option) => <span key={option.value}>{option.label}<button type="button" onClick={() => onChange(field, selected.filter((id) => id !== option.value))} aria-label={`Remover ${option.label}`}><X size={13} /></button></span>)}
       {!selectedOptions.length && <small>Nenhum cargo selecionado.</small>}
     </div>
-    <button type="button" className="osk-secondary-button osk-role-multi__open" onClick={() => { setWorking(selected); setOpen(true); }}><Plus size={15} />Selecionar cargos</button>
+    <button ref={triggerRef} type="button" className="osk-secondary-button osk-role-multi__open" aria-haspopup="dialog" aria-expanded={open} onClick={() => { setWorking(selected); setOpen(true); }}><Plus size={15} />Selecionar cargos</button>
     {modal && createPortal(modal, document.body)}
   </div>;
 }
@@ -299,7 +326,7 @@ function StringListEditor({ field, value, onChange }: { field: DashboardFieldDef
   return <div className="osk-string-list-editor">
     {items.map((item, index) => <div key={index}>
       <GripVertical size={15} />
-      <input value={item} onChange={(event) => update(index, event.target.value)} placeholder={`Item ${index + 1}`} />
+      <input aria-label={`${field.label}, item ${index + 1}`} value={item} onChange={(event) => update(index, event.target.value)} placeholder={`Item ${index + 1}`} />
       <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label="Mover para cima"><ArrowUp size={14} /></button>
       <button type="button" onClick={() => move(index, 1)} disabled={index === items.length - 1} aria-label="Mover para baixo"><ArrowDown size={14} /></button>
       <button type="button" data-danger onClick={() => remove(index)} aria-label="Remover item"><Trash2 size={14} /></button>
@@ -341,9 +368,10 @@ function FormFieldsEditor({ field, value, onChange }: { field: DashboardFieldDef
     <div className="osk-form-fields-limit"><strong>{fields.length} de 5 perguntas</strong><small>O Discord aceita no máximo cinco campos por formulário.</small></div>
     {fields.map((item, index) => {
       const open = openId === item.id;
+      const panelId = `form-question-panel-${item.id || index}`;
       return <article key={item.id || index} data-open={open || undefined} data-enabled={item.enabled || undefined}>
         <div className="osk-form-question-head">
-          <button type="button" className="osk-form-question-summary" onClick={() => setOpenId((current) => current === item.id ? null : item.id)} aria-expanded={open}>
+          <button type="button" className="osk-form-question-summary" onClick={() => setOpenId((current) => current === item.id ? null : item.id)} aria-expanded={open} aria-controls={panelId}>
             <span><strong>{item.label || `Pergunta ${index + 1}`}</strong><small>{item.enabled ? "Ativa" : "Desativada"} · {item.required ? "Obrigatória" : "Opcional"} · {item.long ? "Resposta longa" : "Resposta curta"}</small></span><ChevronDown size={16} />
           </button>
           <div className="osk-form-question-actions">
@@ -353,7 +381,7 @@ function FormFieldsEditor({ field, value, onChange }: { field: DashboardFieldDef
             <button type="button" data-danger onClick={() => remove(index)} aria-label="Remover pergunta"><Trash2 size={14} /></button>
           </div>
         </div>
-        <div className="osk-form-question-panel">
+        {open && <div className="osk-form-question-panel" id={panelId}>
           <div className="osk-form-question-panel-inner">
             <div className="osk-inline-grid"><label><span>Rótulo</span><input value={item.label} maxLength={45} onChange={(event) => update(index, { label: event.target.value })} /></label><label><span>Título na resposta da equipe</span><input value={item.response_label} maxLength={80} onChange={(event) => update(index, { response_label: event.target.value })} /></label></div>
             <label><span>Exemplo ou instrução</span><input value={item.placeholder} maxLength={100} onChange={(event) => update(index, { placeholder: event.target.value })} /></label>
@@ -364,7 +392,7 @@ function FormFieldsEditor({ field, value, onChange }: { field: DashboardFieldDef
               <SwitchRow label="Mostrar no resumo" description="Inclui a resposta na mensagem enviada à equipe." checked={item.show_in_response} onChange={(checked) => update(index, { show_in_response: checked })} />
             </div>
           </div>
-        </div>
+        </div>}
       </article>;
     })}
     <button type="button" className="osk-add-row" onClick={add} disabled={fields.length >= 5}><Plus size={15} />Adicionar pergunta</button>
@@ -446,7 +474,7 @@ function ColorSlotsEditor({
           <div><strong>{String(slot.name || `Cor ${slotNumber}`)}</strong><small>{colorRoleLabel(slot, { ok: true, channels: [], roles })}</small></div>
         </header>
         <label><span>Nome exibido</span><input value={String(slot.name || "")} maxLength={80} onFocus={() => onSelectSlot?.(slotNumber)} onChange={(event) => update(slotNumber, { name: event.target.value })} /></label>
-        <label><span>Cargo vinculado</span>{availableRoles.length || currentRoleId ? <SmartSelect id={`color-slot-${key}`} value={currentRoleId} options={[{ value: "", label: "Nenhum cargo" }, ...selectOptions]} onChange={(next) => {
+        <label><span>Cargo vinculado</span>{availableRoles.length || currentRoleId ? <SmartSelect id={`color-slot-${key}`} ariaLabel={`Cargo vinculado à opção ${visibleIndex >= 0 ? visibleIndex + 1 : slotNumber}`} value={currentRoleId} options={[{ value: "", label: "Nenhum cargo" }, ...selectOptions]} onChange={(next) => {
           const selected = roles.find((role) => role.id === next);
           update(slotNumber, { role_id: next, role_name: selected?.name || String(slot.name || `Cor ${slotNumber}`), managed: false });
         }} placeholder="Selecione o cargo" /> : <div className="osk-inline-note">Nenhum cargo atribuível foi encontrado.</div>}</label>

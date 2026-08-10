@@ -9,6 +9,7 @@ interface SmartAvatarProps {
   size?: number;
   alt?: string;
   className?: string;
+  loading?: "eager" | "lazy";
 }
 
 /**
@@ -17,7 +18,7 @@ interface SmartAvatarProps {
  * osk-user-chip-avatar) — só troca o conteúdo interno por <img> quando há uma
  * imagem válida, preservando o fundo roxo/azul como fallback.
  */
-export function SmartAvatar({ src, name, type, size, alt, className }: SmartAvatarProps) {
+export function SmartAvatar({ src, name, type, size, alt, className, loading = "lazy" }: SmartAvatarProps) {
   const candidates = useMemo(() => previewImageCandidates(src), [src]);
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [broken, setBroken] = useState(false);
@@ -33,14 +34,14 @@ export function SmartAvatar({ src, name, type, size, alt, className }: SmartAvat
   const style = size ? { width: size, height: size } : undefined;
 
   return (
-    <span className={className} style={style} data-avatar-type={type}>
+    <span className={["osk-smart-avatar", className].filter(Boolean).join(" ")} style={style} data-avatar-type={type}>
       {showImage ? (
         <img
           className="osk-avatar-img"
           key={currentSrc}
           src={currentSrc}
           alt={alt ?? fallbackName}
-          loading="eager"
+          loading={loading}
           decoding="async"
           referrerPolicy="no-referrer"
           onError={() => {

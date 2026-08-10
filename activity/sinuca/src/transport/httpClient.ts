@@ -25,7 +25,19 @@ function payloadMessage(payload: unknown): string | null {
 export async function fetchDashboardJson<T>(path: string, init: RequestInit = {}, timeoutMs = 12000): Promise<T> {
   const normalizedPath = path.startsWith("/api/") || path === "/api" ? path : `/api${path.startsWith("/") ? path : `/${path}`}`;
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const externalSignal = init.signal;
+  let timedOut = false;
+  let externallyAborted = Boolean(externalSignal?.aborted);
+  const abortFromExternal = () => {
+    externallyAborted = true;
+    controller.abort(externalSignal?.reason);
+  };
+  if (externalSignal?.aborted) abortFromExternal();
+  else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     const response = await fetch(normalizedPath, {
       ...init,
@@ -61,11 +73,13 @@ export async function fetchDashboardJson<T>(path: string, init: RequestInit = {}
     return payload as T;
   } catch (error) {
     if (error instanceof DashboardHttpError) throw error;
-    if (error instanceof DOMException && error.name === "AbortError") {
+    if (controller.signal.aborted || error instanceof DOMException && error.name === "AbortError") {
+      if (externallyAborted && !timedOut) throw new DashboardHttpError("Solicitação cancelada.", 0, "aborted");
       throw new DashboardHttpError("A solicitação demorou além do esperado.", 0, "timeout");
     }
     throw new DashboardHttpError(error instanceof Error ? error.message : "Falha de conexão.", 0, "network_error");
   } finally {
     window.clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }

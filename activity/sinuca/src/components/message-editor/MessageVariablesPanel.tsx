@@ -63,6 +63,7 @@ export function MessageVariablesPanel({ variables, insertTargetLabel, onInsert }
         <Search size={16} />
         <input
           type="text"
+          aria-label="Buscar variável"
           value={query}
           placeholder="Buscar variável"
           onChange={(event) => setQuery(event.target.value)}

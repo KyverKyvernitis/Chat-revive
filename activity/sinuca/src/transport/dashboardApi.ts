@@ -1,10 +1,12 @@
 import type {
   DashboardBootstrapPayload,
+  DashboardFullPayload,
   DashboardInvitePayload,
   DashboardOptionsPayload,
   DashboardServersPayload,
   DashboardSettingsPayload,
   DashboardSummaryPayload,
+  DashboardSectionSummary,
   DashboardSupportServerPayload,
   DashboardUserPayload,
 } from "../types/dashboard";
@@ -39,10 +41,26 @@ export async function fetchDashboardOptions(guildId: string): Promise<DashboardO
   return await fetchDashboardJson<DashboardOptionsPayload>(`/dashboard/guild/${encodeURIComponent(guildId)}/options`);
 }
 
+export async function fetchDashboardFull(guildId: string, signal?: AbortSignal): Promise<DashboardFullPayload> {
+  return await fetchDashboardJson<DashboardFullPayload>(
+    `/dashboard/guild/${encodeURIComponent(guildId)}/full`,
+    { method: "GET", signal },
+    18000,
+  );
+}
+
 export async function patchDashboardSettings(
   guildId: string,
   updates: Record<string, unknown>,
-): Promise<{ ok: true; values: Record<string, unknown>; saved: string[]; revision?: number; changed_sections?: string[] }> {
+): Promise<{
+  ok: true;
+  values: Record<string, unknown>;
+  saved: string[];
+  revision?: number;
+  changed_sections?: string[];
+  summary?: DashboardSectionSummary[] | null;
+  summary_error?: string;
+}> {
   return await fetchDashboardJson(`/dashboard/guild/${encodeURIComponent(guildId)}/settings`, {
     method: "PATCH",
     body: JSON.stringify({ updates }),

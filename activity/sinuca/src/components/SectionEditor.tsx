@@ -254,6 +254,7 @@ export function SectionEditor({
           const changed = groupFields.filter((field) => !valuesEqual(values[field.id], draft[field.id])).length;
           const open = openGroup === group;
           const metadata = section.groupMetadata?.[group];
+          const panelId = `section-panel-${section.id}-${index}`;
           return <article
             key={group}
             id={`section-group-${section.id}-${index}`}
@@ -262,13 +263,13 @@ export function SectionEditor({
             data-open={open || undefined}
             style={{ "--osk-card-index": index } as CSSProperties}
           >
-            <button type="button" className="osk-accordion-trigger" onClick={() => toggleGroup(group)} aria-expanded={open}>
+            <button type="button" className="osk-accordion-trigger" onClick={() => toggleGroup(group)} aria-expanded={open} aria-controls={panelId}>
               <span className="osk-accordion-icon"><GroupIcon size={19} /></span>
               <span className="osk-accordion-copy"><strong>{group}</strong><small>{GROUP_DESCRIPTIONS[group] || "Ajustes desta função."}</small></span>
               {changed > 0 && <em>Alterado</em>}
               <ChevronDown size={18} className="osk-accordion-chevron" />
             </button>
-            <div className="osk-accordion-panel" aria-hidden={!open}>
+            {open && <div className="osk-accordion-panel" id={panelId}>
               <div className="osk-accordion-panel-inner">
                 {section.id === "color_roles" && group === "Painel" ? (
                   <ColorRolesPanelManager
@@ -301,7 +302,7 @@ export function SectionEditor({
                   renderFields(groupFields)
                 )}
               </div>
-            </div>
+            </div>}
           </article>;
         })}
       </div>

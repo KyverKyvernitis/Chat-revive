@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowRight, LoaderCircle, LogIn, RefreshCw, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserLanding } from "./components/BrowserLanding";
 import { HomePage } from "./components/HomePage";
 import { InviteScreen } from "./components/InviteScreen";
@@ -11,13 +11,10 @@ import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { mergeDashboardModules, type DashboardVisualModule } from "./moduleCatalog";
 import {
-  fetchDashboardBootstrap,
+  fetchDashboardFull,
   fetchDashboardIdentity,
   fetchDashboardInvite,
-  fetchDashboardOptions,
   fetchDashboardServers,
-  fetchDashboardSettings,
-  fetchDashboardSummary,
   patchDashboardSettings,
 } from "./transport/dashboardApi";
 import { DashboardHttpError } from "./transport/httpClient";
@@ -126,6 +123,9 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [messageEditorActive, setMessageEditorActive] = useState(false);
   const [notice, setNotice] = useState<{ type: "error" | "success" | "info"; text: string } | null>(null);
+  const dashboardLoadRef = useRef<{ generation: number; controller: AbortController | null }>({ generation: 0, controller: null });
+  const activeGuildRef = useRef<string | null>(null);
+  const savingRef = useRef(false);
 
   const visualModules = useMemo(() => mergeDashboardModules(summary), [summary]);
   const selectedSectionId = route.page === "dashboard" ? route.sectionId : null;
@@ -138,6 +138,12 @@ export default function App() {
   const openMobileMenu = useCallback(() => setMobileMenuOpen(true), []);
 
   const currentRoutePath = routePath(route);
+
+  useEffect(() => {
+    activeGuildRef.current = route.page === "dashboard" ? route.guildId : null;
+  }, [route]);
+
+  useEffect(() => () => dashboardLoadRef.current.controller?.abort(), []);
 
   useEffect(() => {
     const previous = window.history.scrollRestoration;
@@ -157,6 +163,9 @@ export default function App() {
       if (!window.confirm("Descartar as alterações que ainda não foram salvas?")) return false;
       setDraft(values);
     }
+    const nextGuildId = next.page === "dashboard" ? next.guildId : null;
+    if (activeGuildRef.current !== nextGuildId) dashboardLoadRef.current.controller?.abort();
+    activeGuildRef.current = nextGuildId;
     const path = routePath(next);
     window.history[replace ? "replaceState" : "pushState"]({}, "", path);
     setRoute(next);
@@ -192,6 +201,12 @@ export default function App() {
         }
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    const normalizedPath = routePath(parseRoute(window.location.pathname));
+    if (normalizedPath === window.location.pathname) return;
+    window.history.replaceState({}, "", `${normalizedPath}${window.location.search}${window.location.hash}`);
   }, []);
 
   useEffect(() => {
@@ -256,30 +271,35 @@ export default function App() {
 
   const loadDashboard = useCallback(async (guildId: string, quiet = false) => {
     if (!isSnowflake(guildId) || sessionState !== "authenticated") return;
+    dashboardLoadRef.current.controller?.abort();
+    const controller = new AbortController();
+    const generation = dashboardLoadRef.current.generation + 1;
+    dashboardLoadRef.current = { generation, controller };
     if (!quiet) setLoadingDashboard(true);
     try {
-      const [bootstrapPayload, settingsPayload, summaryPayload, optionsResult] = await Promise.all([
-        fetchDashboardBootstrap(guildId),
-        fetchDashboardSettings(guildId),
-        fetchDashboardSummary(guildId),
-        fetchDashboardOptions(guildId).catch((error) => ({ ok: false, channels: [], roles: [], error: errorText(error) } as DashboardOptionsPayload)),
-      ]);
-      if (bootstrapPayload.user) setUser(bootstrapPayload.user);
-      if (bootstrapPayload.bot) setBotIdentity(bootstrapPayload.bot);
-      setSections(settingsPayload.sections || []);
-      setValues(settingsPayload.values || {});
-      setDraft(settingsPayload.values || {});
-      setSummary(summaryPayload.sections || []);
-      setGuildOptions(optionsResult);
+      const payload = await fetchDashboardFull(guildId, controller.signal);
+      if (dashboardLoadRef.current.generation !== generation || activeGuildRef.current !== guildId) return;
+      if (payload.user) setUser(payload.user);
+      if (payload.bot) setBotIdentity(payload.bot);
+      setSections(payload.sections || []);
+      setValues(payload.values || {});
+      setDraft(payload.values || {});
+      setSummary(payload.summary || []);
+      setGuildOptions(payload.options || { ok: false, channels: [], roles: [], error: "options_unavailable" });
       setNotice(quiet ? { type: "success", text: "Dados atualizados com os valores persistidos." } : null);
     } catch (error) {
+      if (error instanceof DashboardHttpError && error.code === "aborted") return;
+      if (dashboardLoadRef.current.generation !== generation) return;
       if (error instanceof DashboardHttpError && error.status === 401) {
         setSessionState("anonymous");
         setUser(null);
       }
       setNotice({ type: "error", text: errorText(error) });
     } finally {
-      setLoadingDashboard(false);
+      if (dashboardLoadRef.current.generation === generation) {
+        dashboardLoadRef.current.controller = null;
+        setLoadingDashboard(false);
+      }
     }
   }, [sessionState]);
 
@@ -288,6 +308,14 @@ export default function App() {
     if (!activeDashboardGuildId || sessionState !== "authenticated") return;
     void loadDashboard(activeDashboardGuildId);
   }, [activeDashboardGuildId, loadDashboard, sessionState]);
+
+  useEffect(() => {
+    if (route.page !== "dashboard" || !route.sectionId || sections.length === 0 || selectedSection || loadingDashboard) return;
+    const next: DashboardRoute = { page: "dashboard", guildId: route.guildId, sectionId: null };
+    window.history.replaceState({}, "", routePath(next));
+    setRoute(next);
+    setNotice({ type: "info", text: "Essa área não existe mais. Voltamos para a visão geral." });
+  }, [loadingDashboard, route, sections.length, selectedSection]);
 
   useEffect(() => {
     if (route.page !== "dashboard" || !serversLoaded) return;
@@ -315,25 +343,31 @@ export default function App() {
   }, []);
 
   const handleSave = useCallback(async () => {
-    if (route.page !== "dashboard" || !selectedSection || changedFields.length === 0) return;
+    if (route.page !== "dashboard" || !selectedSection || changedFields.length === 0 || savingRef.current) return;
+    const guildId = route.guildId;
+    savingRef.current = true;
     setSaving(true);
     setNotice(null);
     try {
       const updates = Object.fromEntries(changedFields.map((field) => [field.id, draft[field.id]]));
-      const result = await patchDashboardSettings(route.guildId, updates);
+      const result = await patchDashboardSettings(guildId, updates);
+      if (activeGuildRef.current !== guildId) return;
       const mergedValues = { ...values, ...result.values };
       setValues(mergedValues);
       setDraft(mergedValues);
-      const refreshedSummary = await fetchDashboardSummary(route.guildId);
-      setSummary(refreshedSummary.sections || []);
+      if (result.summary) setSummary(result.summary);
       const count = result.saved.length;
       setNotice({
         type: "success",
-        text: `${count} alteração${count === 1 ? "" : "ões"} salva${count === 1 ? "" : "s"}. O bot sincronizará os módulos compatíveis automaticamente.`,
+        text: result.summary_error
+          ? `${count} alteração${count === 1 ? "" : "ões"} salva${count === 1 ? "" : "s"}. O resumo será atualizado na próxima abertura.`
+          : `${count} alteração${count === 1 ? "" : "ões"} salva${count === 1 ? "" : "s"}. O bot sincronizará os módulos compatíveis automaticamente.`,
       });
     } catch (error) {
+      if (activeGuildRef.current !== guildId) return;
       setNotice({ type: "error", text: errorText(error) });
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }, [changedFields, draft, route, selectedSection, values]);

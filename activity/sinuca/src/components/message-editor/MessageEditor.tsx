@@ -716,7 +716,7 @@ export function MessageEditor(props: MessageEditorProps) {
           type="button"
           className="osk-message-editor__back"
           onClick={view === "canvas" ? handleApply : leaveAuxiliaryView}
-          aria-label={view === "canvas" ? "Aplicar e voltar" : "Voltar à mensagem"}
+          aria-label={view === "canvas" ? "Aplicar ao rascunho e voltar" : "Voltar à mensagem"}
         >
           <ChevronLeft size={19} />
         </button>
@@ -849,7 +849,7 @@ export function MessageEditor(props: MessageEditorProps) {
       ) : (
         <footer className="osk-message-editor__footer">
           <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Descartar</button>
-          <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>{pendingJsonChanges ? "Aplicando..." : localDirty || jsonDirty ? "Aplicar ao painel" : "Concluir"}</button>
+          <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>{pendingJsonChanges ? "Aplicando..." : localDirty || jsonDirty ? "Aplicar ao rascunho" : "Concluir"}</button>
         </footer>
       )}
     </div>

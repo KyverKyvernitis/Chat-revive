@@ -50,6 +50,7 @@ export function TicketFlowEditor({ fields, draft, renderFields, onChange }: Tick
       const description = fieldValue(draft, descriptionField).trim() || definition.fallback;
       const behavior = flowField?.options?.find((option) => option.value === fieldValue(draft, flowField))?.label || "Comportamento padrão";
       const flow = fieldValue(draft, flowField);
+      const panelId = `ticket-flow-panel-${definition.id}`;
       const visibleOptionFields = optionFields.filter((field) => {
         if (field.id.endsWith(".confirmation_text")) return flow === "confirm_ticket";
         if ([".modal_title", ".modal_notice", ".subject_label", ".body_label"].some((suffix) => field.id.endsWith(suffix))) {
@@ -67,14 +68,14 @@ export function TicketFlowEditor({ fields, draft, renderFields, onChange }: Tick
 
       return <article key={definition.id} className="osk-ticket-flow" data-open={open || undefined} data-enabled={enabled || undefined}>
         <div className="osk-ticket-flow__header">
-          <button type="button" className="osk-ticket-flow__summary" onClick={() => setOpenFlow((current) => current === definition.id ? null : definition.id)} aria-expanded={open}>
+          <button type="button" className="osk-ticket-flow__summary" onClick={() => setOpenFlow((current) => current === definition.id ? null : definition.id)} aria-expanded={open} aria-controls={panelId}>
             <span className="osk-ticket-flow__icon"><Route size={18} /></span>
             <span><strong>{label}</strong><small>{description}</small><em>{behavior}</em></span>
             <ChevronDown size={18} className="osk-ticket-flow__chevron" />
           </button>
           <DashboardFieldControl field={enabledField} value={draft[enabledField.id]} guildOptions={null} onChange={onChange} />
         </div>
-        <div className="osk-ticket-flow__panel" aria-hidden={!open}>
+        {open && <div className="osk-ticket-flow__panel" id={panelId}>
           <div className="osk-ticket-flow__panel-inner">
             {!enabled && <div className="osk-inline-note">O fluxo está desativado. Os valores abaixo serão preservados e voltam a valer quando ele for ativado.</div>}
             {identityFields.length > 0 && <section className="osk-ticket-flow__block"><h3><Settings2 size={16} />Identidade</h3>{renderFields(identityFields)}</section>}
@@ -82,7 +83,7 @@ export function TicketFlowEditor({ fields, draft, renderFields, onChange }: Tick
             {messageFields.length > 0 && <section className="osk-ticket-flow__block"><h3><MessageSquareText size={16} />Mensagens</h3>{renderFields(messageFields)}</section>}
             {modalFields.length > 0 && <section className="osk-ticket-flow__block"><h3><MessageSquareText size={16} />Formulário</h3>{renderFields(modalFields)}</section>}
           </div>
-        </div>
+        </div>}
       </article>;
     })}
   </div>;

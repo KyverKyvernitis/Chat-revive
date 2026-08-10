@@ -6,7 +6,6 @@ import {
   LogIn,
   MessagesSquare,
   Palette,
-  Sparkles,
   Ticket,
   Volume2,
 } from "lucide-react";
@@ -50,17 +49,8 @@ export function Brand({
   const botName = displayName(bot, "Osaka");
   return (
     <span className="osk-brand-lockup" data-compact={compact || undefined}>
-      {bot?.avatarUrl ? (
-        <SmartAvatar
-          className="osk-brand-symbol osk-brand-bot-avatar"
-          src={bot.avatarUrl}
-          name={botName}
-          type="user"
-          alt={`Avatar da ${botName}`}
-          size={compact ? 34 : 40}
-        />
-      ) : <span className="osk-brand-symbol" aria-hidden="true"><Sparkles size={18} /></span>}
-      <span className="osk-brand-copy"><strong>Osaka</strong><small>Painel</small></span>
+      <span className="osk-brand-symbol" aria-hidden="true"><span className="osk-yin-yang-mark" /></span>
+      <span className="osk-brand-copy"><strong>{botName}</strong><small>Painel</small></span>
     </span>
   );
 }
@@ -106,8 +96,9 @@ export function BrowserLanding({
 
       <main className="osk-minimal-main">
         <section className="osk-minimal-hero">
-          <h1><strong>Dashboard</strong></h1>
-          <p>Escolha um servidor, ajuste as funções e salve.</p>
+          <span className="osk-minimal-kicker">Controle com clareza</span>
+          <h1><span>Seu servidor,</span><strong>em equilíbrio.</strong></h1>
+          <p>Escolha um servidor, ajuste cada função e publique as mudanças com segurança.</p>
           <button className="osk-primary-button osk-minimal-primary-action" onClick={primaryAction}>
             {loggedIn ? "Abrir painel" : "Entrar com Discord"}
             <ArrowRight size={17} />

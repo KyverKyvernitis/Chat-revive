@@ -123,19 +123,35 @@ export function Sidebar({
   useEffect(() => {
     if (!visualOpen) return;
     const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    const syncScrollLock = () => {
+      document.body.style.overflow = window.innerWidth <= MOBILE_BREAKPOINT ? "hidden" : previousOverflow;
+    };
+    syncScrollLock();
     const focusTimer = window.setTimeout(() => closeRef.current?.focus(), 120);
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setVisualOpen(false);
-      onCloseMobile();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setVisualOpen(false);
+        onCloseMobile();
+        return;
+      }
+      if (event.key !== "Tab" || window.innerWidth > MOBILE_BREAKPOINT || !asideRef.current) return;
+      const focusable = Array.from(asideRef.current.querySelectorAll<HTMLElement>(
+        "button:not(:disabled), a[href], [tabindex]:not([tabindex='-1'])",
+      ));
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     };
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", syncScrollLock);
     return () => {
       window.clearTimeout(focusTimer);
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", syncScrollLock);
     };
   }, [onCloseMobile, setVisualOpen, visualOpen]);
 

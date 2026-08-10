@@ -40,10 +40,16 @@ function FunctionGroup({
     <div className="osk-function-grid">
       {items.map((item) => {
         const Icon = item.icon;
-        return <button key={item.id} className="osk-function-card" onClick={() => onOpen(item.id)}>
+        const state = item.state === "active" || item.state === "configured"
+          ? "active"
+          : item.state === "partial" || item.state === "pending"
+            ? "partial"
+            : "inactive";
+        const status = item.status || (state === "active" ? "Ativo" : state === "partial" ? "Configuração parcial" : "Inativo");
+        return <button key={item.id} className="osk-function-card" data-state={state} onClick={() => onOpen(item.id)} aria-label={`${item.label}: ${status}`}>
           <span className="osk-function-icon"><Icon size={20} /></span>
           <span className="osk-function-copy">
-            <span className="osk-function-title"><strong>{item.label}</strong></span>
+            <span className="osk-function-title"><strong>{item.label}</strong><span className="osk-function-state" data-state={state}><i aria-hidden="true" />{status}</span></span>
             <small>{item.description}</small>
           </span>
           <span className="osk-function-arrow"><ArrowRight size={17} /></span>

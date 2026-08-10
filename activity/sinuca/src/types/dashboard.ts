@@ -193,6 +193,18 @@ export interface DashboardOptionsPayload {
   error?: string;
 }
 
+export interface DashboardFullPayload {
+  ok: boolean;
+  guildId: string;
+  user?: DashboardUserPayload;
+  bot?: DashboardUserPayload | null;
+  sections: DashboardSectionDefinition[];
+  values: Record<string, unknown>;
+  summary: DashboardSectionSummary[];
+  options: DashboardOptionsPayload;
+  error?: string;
+}
+
 export interface DashboardFormField {
   id: string;
   label: string;

@@ -71,6 +71,7 @@ export function MessageInlineTextEditor({
         className="osk-message-inline-editor osk-message-inline-editor--multiline"
         value={value}
         maxLength={field.maxLength}
+        aria-label={field.label}
         placeholder={field.placeholder || field.label}
         data-message-inline-field-id={field.id}
         rows={Math.min(5, Math.max(2, value.split("\n").length))}
@@ -96,6 +97,7 @@ export function MessageInlineTextEditor({
       type="text"
       value={value}
       maxLength={field.maxLength}
+      aria-label={field.label}
       placeholder={field.placeholder || field.label}
       data-message-inline-field-id={field.id}
       onClick={handleClick}

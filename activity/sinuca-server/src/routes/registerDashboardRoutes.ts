@@ -9,6 +9,7 @@ import {
   listDashboardServers,
   listGuildChannelsAndRoles,
   verifyDashboardAccess,
+  verifyDashboardInviteAccess,
 } from "../services/discordAuthService.js";
 
 export interface RegisterDashboardRoutesOptions {
@@ -35,6 +36,8 @@ type SessionAuth = {
 type GuildAuth = SessionAuth & { guildId: string };
 
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+const MAX_RATE_BUCKETS = 10_000;
+let rateLimitChecks = 0;
 
 function sendNoStoreJson(res: Response, status: number, payload: unknown) {
   res.setHeader("Cache-Control", "no-store, max-age=0");
@@ -61,6 +64,7 @@ function isSecureRequest(req: Request): boolean {
 
 function requestOrigin(req: Request, configuredOrigin: string): string {
   if (configuredOrigin) return configuredOrigin;
+  if (process.env.NODE_ENV === "production") return "";
   const protocol = isSecureRequest(req) ? "https" : "http";
   const host = firstString(req.headers["x-forwarded-host"], req.headers.host);
   return host ? `${protocol}://${host}` : "";
@@ -86,6 +90,13 @@ function mutationOriginAllowed(req: Request, configuredOrigin: string, allowedOr
 function takeRateLimit(req: Request, bucket: string, limit: number, windowMs: number): boolean {
   const key = `${bucket}:${req.ip || req.socket.remoteAddress || "unknown"}`;
   const now = Date.now();
+  rateLimitChecks += 1;
+  if (rateLimitChecks % 128 === 0 || rateBuckets.size >= MAX_RATE_BUCKETS) {
+    for (const [storedKey, entry] of rateBuckets) {
+      if (entry.resetAt <= now) rateBuckets.delete(storedKey);
+    }
+  }
+  if (!rateBuckets.has(key) && rateBuckets.size >= MAX_RATE_BUCKETS) return false;
   const current = rateBuckets.get(key);
   if (!current || current.resetAt <= now) {
     rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
@@ -272,8 +283,9 @@ export function registerDashboardRoutes({
     const session = await requireSession(req, res, sessionService);
     if (!session) return;
     const guildId = dashboardGuildId(req);
-    if (!/^\d{15,25}$/.test(guildId)) {
-      sendNoStoreJson(res, 400, { ok: false, error: "invalid_guild_id" });
+    const access = await verifyDashboardInviteAccess(session.accessToken, guildId);
+    if (!access.ok) {
+      sendNoStoreJson(res, access.status, { ok: false, error: access.reason });
       return;
     }
     const inviteUrl = createDashboardInviteUrl(guildId);
@@ -295,6 +307,37 @@ export function registerDashboardRoutes({
       guild_id: auth.guildId,
       sections: configService.listSections().map(({ id, label, emoji, description }) => ({ id, label, emoji, description })),
     });
+  });
+
+  app.get("/api/dashboard/guild/:guildId/full", async (req, res) => {
+    const auth = await requireDashboardAccess(req, res, sessionService);
+    if (!auth) return;
+    try {
+      const [settings, summary, optionsResult, bot] = await Promise.all([
+        configService.getSettings(auth.guildId),
+        configService.getSummary(auth.guildId),
+        listGuildChannelsAndRoles(auth.guildId).catch(() => ({ ok: false, channels: [], roles: [], error: "options_failed" })),
+        getDiscordBotIdentity().catch(() => null),
+      ]);
+      sendNoStoreJson(res, 200, {
+        ok: true,
+        guildId: auth.guildId,
+        user: auth.user,
+        bot,
+        sections: settings.sections,
+        values: settings.values,
+        summary: summary.sections,
+        options: {
+          ok: optionsResult.ok,
+          guildId: auth.guildId,
+          channels: optionsResult.channels,
+          roles: optionsResult.roles,
+          error: optionsResult.error ?? null,
+        },
+      });
+    } catch (error) {
+      sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "dashboard_load_failed" });
+    }
   });
 
   app.get("/api/dashboard/guild/:guildId/summary", async (req, res) => {
@@ -345,7 +388,13 @@ export function registerDashboardRoutes({
       const updates = req.body && typeof req.body.updates === "object" && !Array.isArray(req.body.updates)
         ? req.body.updates as Record<string, unknown>
         : {};
-      sendNoStoreJson(res, 200, await configService.updateSettings(auth.guildId, updates));
+      const result = await configService.updateSettings(auth.guildId, updates);
+      try {
+        const summary = await configService.getSummary(auth.guildId);
+        sendNoStoreJson(res, 200, { ...result, summary: summary.sections });
+      } catch {
+        sendNoStoreJson(res, 200, { ...result, summary: null, summary_error: "summary_refresh_failed" });
+      }
     } catch (error) {
       sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "save_failed" });
     }

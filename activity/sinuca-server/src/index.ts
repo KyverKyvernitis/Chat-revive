@@ -5,7 +5,8 @@ import { createDashboardConfigService } from "./services/dashboardConfigService.
 import { createDashboardSessionService } from "./services/dashboardSessionService.js";
 
 const app = express();
-app.set("trust proxy", 1);
+const configuredProxyHops = Number.parseInt(String(process.env.DASHBOARD_TRUST_PROXY_HOPS || "1"), 10);
+app.set("trust proxy", Number.isFinite(configuredProxyHops) ? Math.max(0, Math.min(10, configuredProxyHops)) : 1);
 
 const discordClientId = process.env.DISCORD_CLIENT_ID || process.env.VITE_DISCORD_CLIENT_ID || "";
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.CLIENT_SECRET || "";
@@ -23,6 +24,9 @@ function normalizedOrigin(value: string): string {
 }
 
 const publicOrigin = normalizedOrigin(process.env.DASHBOARD_PUBLIC_URL || process.env.PUBLIC_HOST || "");
+if (process.env.NODE_ENV === "production" && !publicOrigin) {
+  console.warn("[dashboard-config] DASHBOARD_PUBLIC_URL ausente; OAuth ficará indisponível por segurança");
+}
 const developmentOrigins = process.env.NODE_ENV === "production"
   ? []
   : ["http://localhost:4173", "http://127.0.0.1:4173"];
@@ -45,6 +49,10 @@ app.use((req, res, next) => {
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-site");
+  if (req.secure || req.headers["x-forwarded-proto"] === "https") {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
 
   if (req.method === "OPTIONS") {
     if (origin && !allowedOrigins.has(origin)) {

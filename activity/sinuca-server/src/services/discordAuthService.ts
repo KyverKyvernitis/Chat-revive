@@ -1,3 +1,5 @@
+import { createHash } from "crypto";
+
 export interface DiscordUserIdentity {
   id: string;
   username?: string | null;
@@ -50,8 +52,28 @@ const PERMISSION_VIEW_CHANNEL = 1n << 10n;
 const PERMISSION_SEND_MESSAGES = 1n << 11n;
 const PERMISSION_CONNECT = 1n << 20n;
 const PERMISSION_MANAGE_WEBHOOKS = 1n << 29n;
-const PERMISSION_CREATE_PUBLIC_THREADS = 1n << 35n;
-const PERMISSION_SEND_MESSAGES_IN_THREADS = 1n << 38n;
+const USER_IDENTITY_CACHE_MS = 15_000;
+const DASHBOARD_ACCESS_CACHE_MS = 15_000;
+const MAX_SHORT_CACHE_ENTRIES = 2_000;
+
+const userIdentityCache = new Map<string, { expiresAt: number; value: DiscordUserIdentity }>();
+const dashboardAccessCache = new Map<string, { expiresAt: number; value: { ok: boolean; reason: string } }>();
+
+function pruneShortCache<T>(cache: Map<string, { expiresAt: number; value: T }>, now: number) {
+  if (cache.size < MAX_SHORT_CACHE_ENTRIES) return;
+  for (const [key, entry] of cache) {
+    if (entry.expiresAt <= now) cache.delete(key);
+  }
+  while (cache.size >= MAX_SHORT_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    cache.delete(oldest);
+  }
+}
+
+function tokenCacheKey(token: string): string {
+  return createHash("sha256").update(token).digest("base64url");
+}
 
 function permissionBits(value: unknown): bigint {
   try {
@@ -155,13 +177,14 @@ async function fetchDiscordPublicJson<T>(url: string): Promise<{ ok: boolean; st
   }
 }
 
-function permissionFromRoles(memberRoles: string[], roles: Array<Record<string, unknown>>, ownerId: string | null, userId: string): bigint {
+export function permissionFromRoles(memberRoles: string[], roles: Array<Record<string, unknown>>, ownerId: string | null, userId: string, guildId?: string): bigint {
   if (ownerId && ownerId === userId) return PERMISSION_ADMINISTRATOR | PERMISSION_MANAGE_GUILD;
   let bits = 0n;
   const memberRoleSet = new Set(memberRoles);
   for (const role of roles) {
     const id = String(role.id ?? "");
-    if (!memberRoleSet.has(id)) continue;
+    const everyone = id === guildId || String(role.name ?? "") === "@everyone";
+    if (!everyone && !memberRoleSet.has(id)) continue;
     try {
       bits |= BigInt(String(role.permissions ?? "0"));
     } catch {
@@ -179,6 +202,11 @@ function hasManageBits(permissionValue: unknown, owner: boolean): boolean {
   } catch {
     return false;
   }
+}
+
+export function userCanManageGuild(guilds: Array<Record<string, unknown>>, guildId: string): boolean {
+  const guild = guilds.find((item) => String(item.id ?? "") === guildId);
+  return Boolean(guild && hasManageBits(guild.permissions, guild.owner === true));
 }
 
 function guildIconUrl(guildId: string, iconHash: unknown): string | null {
@@ -284,16 +312,35 @@ export function createDashboardInviteUrl(guildId?: string | null): string | null
 
 export async function getDiscordUserIdentity(accessToken: string): Promise<{ ok: boolean; status: number; user: DiscordUserIdentity | null }> {
   if (!accessToken) return { ok: false, status: 401, user: null };
+  const now = Date.now();
+  const cacheKey = tokenCacheKey(accessToken);
+  const cached = userIdentityCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return { ok: true, status: 200, user: cached.value };
   const me = await fetchDiscordJson<DiscordUserIdentity>("https://discord.com/api/v10/users/@me", `Bearer ${accessToken}`);
   if (!me.ok || !me.data || !/^\d{15,25}$/.test(String(me.data.id ?? ""))) {
+    userIdentityCache.delete(cacheKey);
     return { ok: false, status: me.status || 401, user: null };
   }
-  return { ok: true, status: 200, user: withAvatarUrl(me.data) };
+  const user = withAvatarUrl(me.data)!;
+  pruneShortCache(userIdentityCache, now);
+  userIdentityCache.set(cacheKey, { expiresAt: now + USER_IDENTITY_CACHE_MS, value: user });
+  return { ok: true, status: 200, user };
 }
 
 async function hasGuildAdminPermission(guildId: string, userId: string): Promise<{ ok: boolean; reason: string }> {
   const owners = parseAllowedOwners();
   if (owners.has(userId)) return { ok: true, reason: "owner_env" };
+
+  const now = Date.now();
+  const cacheKey = `${guildId}:${userId}`;
+  const cached = dashboardAccessCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  const remember = (value: { ok: boolean; reason: string }) => {
+    pruneShortCache(dashboardAccessCache, now);
+    dashboardAccessCache.set(cacheKey, { expiresAt: now + DASHBOARD_ACCESS_CACHE_MS, value });
+    return value;
+  };
 
   const token = botToken();
   if (!token) return { ok: false, reason: "bot_token_missing" };
@@ -303,7 +350,7 @@ async function hasGuildAdminPermission(guildId: string, userId: string): Promise
   if (!guildResp.ok || !guildResp.data) return { ok: false, reason: `guild_fetch_failed_${guildResp.status}` };
 
   const ownerId = typeof guildResp.data.owner_id === "string" ? guildResp.data.owner_id : null;
-  if (ownerId && ownerId === userId) return { ok: true, reason: "guild_owner" };
+  if (ownerId && ownerId === userId) return remember({ ok: true, reason: "guild_owner" });
 
   const memberResp = await fetchDiscordJson<Record<string, unknown>>(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}`, auth);
   if (!memberResp.ok || !memberResp.data) return { ok: false, reason: `member_fetch_failed_${memberResp.status}` };
@@ -312,10 +359,10 @@ async function hasGuildAdminPermission(guildId: string, userId: string): Promise
   if (!rolesResp.ok || !Array.isArray(rolesResp.data)) return { ok: false, reason: `roles_fetch_failed_${rolesResp.status}` };
 
   const memberRoles = Array.isArray(memberResp.data.roles) ? memberResp.data.roles.map((item) => String(item)) : [];
-  const permissions = permissionFromRoles(memberRoles, rolesResp.data, ownerId, userId);
-  if ((permissions & PERMISSION_ADMINISTRATOR) === PERMISSION_ADMINISTRATOR) return { ok: true, reason: "administrator" };
-  if ((permissions & PERMISSION_MANAGE_GUILD) === PERMISSION_MANAGE_GUILD) return { ok: true, reason: "manage_guild" };
-  return { ok: false, reason: "missing_manage_guild" };
+  const permissions = permissionFromRoles(memberRoles, rolesResp.data, ownerId, userId, guildId);
+  if ((permissions & PERMISSION_ADMINISTRATOR) === PERMISSION_ADMINISTRATOR) return remember({ ok: true, reason: "administrator" });
+  if ((permissions & PERMISSION_MANAGE_GUILD) === PERMISSION_MANAGE_GUILD) return remember({ ok: true, reason: "manage_guild" });
+  return remember({ ok: false, reason: "missing_manage_guild" });
 }
 
 async function fetchBotGuildIds(): Promise<Set<string> | null> {
@@ -332,6 +379,20 @@ async function checkBotInGuild(guildId: string, botGuildIds: Set<string> | null)
   if (!token) return false;
   const response = await fetchDiscordJson<Record<string, unknown>>(`https://discord.com/api/v10/guilds/${guildId}`, `Bot ${token}`);
   return response.ok;
+}
+
+export async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 export interface DashboardChannelOption {
@@ -405,9 +466,6 @@ export async function listGuildChannelsAndRoles(guildId: string): Promise<Dashbo
       const administrator = permissions !== null && (permissions & PERMISSION_ADMINISTRATOR) === PERMISSION_ADMINISTRATOR;
       const viewable = administrator || permissions !== null && (permissions & PERMISSION_VIEW_CHANNEL) === PERMISSION_VIEW_CHANNEL;
       const textSendable = administrator || permissions !== null && (permissions & PERMISSION_SEND_MESSAGES) === PERMISSION_SEND_MESSAGES;
-      const threadSendable = administrator || permissions !== null
-        && (permissions & PERMISSION_CREATE_PUBLIC_THREADS) === PERMISSION_CREATE_PUBLIC_THREADS
-        && (permissions & PERMISSION_SEND_MESSAGES_IN_THREADS) === PERMISSION_SEND_MESSAGES_IN_THREADS;
       return {
         id: String(channel.id ?? ""),
         name: String(channel.name ?? ""),
@@ -415,7 +473,7 @@ export async function listGuildChannelsAndRoles(guildId: string): Promise<Dashbo
         parentId: channel.parent_id ? String(channel.parent_id) : null,
         permissionsKnown: permissions !== null,
         viewable,
-        sendable: viewable && ([15, 16].includes(type) ? threadSendable : textSendable),
+        sendable: viewable && textSendable,
         connectable: viewable && (administrator || permissions !== null && (permissions & PERMISSION_CONNECT) === PERMISSION_CONNECT),
         manageable: viewable && (administrator || permissions !== null && (permissions & PERMISSION_MANAGE_CHANNELS) === PERMISSION_MANAGE_CHANNELS),
         webhookManageable: viewable && (administrator || permissions !== null && (permissions & PERMISSION_MANAGE_WEBHOOKS) === PERMISSION_MANAGE_WEBHOOKS),
@@ -462,15 +520,20 @@ export async function listDashboardServers(accessToken: string, knownUser?: Disc
   const manageable: DashboardServerCard[] = [];
   const needsInvite: DashboardServerCard[] = [];
 
-  for (const guild of guildsResp.data) {
+  const eligibleGuilds = guildsResp.data.filter((guild) => {
     const id = String(guild.id ?? "");
-    if (!/^\d{15,25}$/.test(id)) continue;
-
+    if (!/^\d{15,25}$/.test(id)) return false;
     const owner = guild.owner === true;
-    const canManage = hasManageBits(guild.permissions, owner);
-    if (!canManage) continue;
+    return hasManageBits(guild.permissions, owner);
+  });
+  const botPresence = botGuildIds
+    ? eligibleGuilds.map((guild) => botGuildIds.has(String(guild.id ?? "")))
+    : await mapWithConcurrency(eligibleGuilds, 4, async (guild) => checkBotInGuild(String(guild.id ?? ""), null));
 
-    const botPresent = await checkBotInGuild(id, botGuildIds);
+  eligibleGuilds.forEach((guild, index) => {
+    const id = String(guild.id ?? "");
+    const owner = guild.owner === true;
+    const botPresent = botPresence[index] ?? false;
     const card: DashboardServerCard = {
       id,
       name: String(guild.name ?? `Servidor ${id.slice(-4)}`),
@@ -486,12 +549,33 @@ export async function listDashboardServers(accessToken: string, knownUser?: Disc
 
     if (botPresent) manageable.push(card);
     else needsInvite.push(card);
-  }
+  });
 
   manageable.sort((left, right) => left.name.localeCompare(right.name, "pt-BR"));
   needsInvite.sort((left, right) => left.name.localeCompare(right.name, "pt-BR"));
 
   return { ok: true, status: 200, user: userResult.user, manageable, needsInvite };
+}
+
+export async function verifyDashboardInviteAccess(
+  accessToken: string,
+  guildId: string,
+): Promise<{ ok: boolean; status: number; reason: string }> {
+  if (!accessToken) return { ok: false, status: 401, reason: "missing_access_token" };
+  if (!/^\d{15,25}$/.test(guildId)) return { ok: false, status: 400, reason: "invalid_guild_id" };
+
+  const guildsResp = await fetchDiscordJson<Array<Record<string, unknown>>>(
+    "https://discord.com/api/v10/users/@me/guilds",
+    `Bearer ${accessToken}`,
+  );
+  if (!guildsResp.ok || !Array.isArray(guildsResp.data)) {
+    const status = guildsResp.status === 401 || guildsResp.status === 403 ? 401 : 502;
+    return { ok: false, status, reason: "guilds_fetch_failed" };
+  }
+  if (!userCanManageGuild(guildsResp.data, guildId)) {
+    return { ok: false, status: 403, reason: "missing_manage_guild" };
+  }
+  return { ok: true, status: 200, reason: "manageable_guild" };
 }
 
 export async function verifyDashboardAccess(accessToken: string, guildId: string, knownUser?: DiscordUserIdentity | null): Promise<DashboardAccessResult> {

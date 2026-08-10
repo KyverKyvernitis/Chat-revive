@@ -29,6 +29,8 @@ interface StoredSession extends Document {
   updated_at: Date;
 }
 
+type RefreshedSessionTokens = Pick<DashboardSession, "accessToken" | "refreshToken" | "accessExpiresAt">;
+
 interface CreateDashboardSessionServiceOptions {
   mongoUri: string;
   mongoDbName: string;
@@ -138,6 +140,7 @@ export function createDashboardSessionService(options: CreateDashboardSessionSer
   let client: MongoClient | null = null;
   let collection: Collection<StoredSession> | null = null;
   let indexesReady = false;
+  const refreshFlights = new Map<string, Promise<RefreshedSessionTokens | null>>();
 
   async function getCollection(): Promise<Collection<StoredSession>> {
     if (!options.mongoUri) throw new Error("mongodb_not_configured");
@@ -156,6 +159,40 @@ export function createDashboardSessionService(options: CreateDashboardSessionSer
       indexesReady = true;
     }
     return collection;
+  }
+
+  async function refreshSessionTokens(
+    coll: Collection<StoredSession>,
+    doc: StoredSession,
+    refreshToken: string,
+  ): Promise<RefreshedSessionTokens | null> {
+    const refreshed = await options.refreshDiscordToken(refreshToken);
+    if (!refreshed.ok || !refreshed.accessToken) {
+      await coll.deleteOne({ _id: doc._id });
+      return null;
+    }
+
+    const nextRefreshToken = refreshed.refreshToken ?? refreshToken;
+    const nextAccessExpiresAt = typeof refreshed.expiresIn === "number" && refreshed.expiresIn > 0
+      ? Date.now() + refreshed.expiresIn * 1000
+      : null;
+    const update = await coll.updateOne(
+      { _id: doc._id },
+      {
+        $set: {
+          access_token: encryptText(refreshed.accessToken, encryptionKey),
+          refresh_token: nextRefreshToken ? encryptText(nextRefreshToken, encryptionKey) : null,
+          access_expires_at: nextAccessExpiresAt ? new Date(nextAccessExpiresAt) : null,
+          updated_at: new Date(),
+        },
+      },
+    );
+    if (update.matchedCount !== 1) return null;
+    return {
+      accessToken: refreshed.accessToken,
+      refreshToken: nextRefreshToken,
+      accessExpiresAt: nextAccessExpiresAt,
+    };
   }
 
   function signPayload(payload: string): string {
@@ -243,7 +280,8 @@ export function createDashboardSessionService(options: CreateDashboardSessionSer
     const rawSessionId = cookieValue(cookieHeader, SESSION_COOKIE);
     if (!rawSessionId) return null;
     const coll = await getCollection();
-    const doc = await coll.findOne({ type: "dashboard_session", session_hash: sessionHash(rawSessionId) });
+    const hashedSessionId = sessionHash(rawSessionId);
+    const doc = await coll.findOne({ type: "dashboard_session", session_hash: hashedSessionId });
     if (!doc || doc.expires_at.getTime() <= Date.now()) {
       if (doc) await coll.deleteOne({ _id: doc._id });
       return null;
@@ -265,27 +303,20 @@ export function createDashboardSessionService(options: CreateDashboardSessionSer
         await coll.deleteOne({ _id: doc._id });
         return null;
       }
-      const refreshed = await options.refreshDiscordToken(refreshToken);
-      if (!refreshed.ok || !refreshed.accessToken) {
-        await coll.deleteOne({ _id: doc._id });
-        return null;
+      let flight = refreshFlights.get(hashedSessionId);
+      if (!flight) {
+        flight = refreshSessionTokens(coll, doc, refreshToken);
+        refreshFlights.set(hashedSessionId, flight);
+        const clearFlight = () => {
+          if (refreshFlights.get(hashedSessionId) === flight) refreshFlights.delete(hashedSessionId);
+        };
+        void flight.then(clearFlight, clearFlight);
       }
+      const refreshed = await flight;
+      if (!refreshed) return null;
       accessToken = refreshed.accessToken;
-      refreshToken = refreshed.refreshToken ?? refreshToken;
-      accessExpiresAt = typeof refreshed.expiresIn === "number" && refreshed.expiresIn > 0
-        ? Date.now() + refreshed.expiresIn * 1000
-        : null;
-      await coll.updateOne(
-        { _id: doc._id },
-        {
-          $set: {
-            access_token: encryptText(accessToken, encryptionKey),
-            refresh_token: refreshToken ? encryptText(refreshToken, encryptionKey) : null,
-            access_expires_at: accessExpiresAt ? new Date(accessExpiresAt) : null,
-            updated_at: new Date(),
-          },
-        },
-      );
+      refreshToken = refreshed.refreshToken;
+      accessExpiresAt = refreshed.accessExpiresAt;
     }
 
     return {

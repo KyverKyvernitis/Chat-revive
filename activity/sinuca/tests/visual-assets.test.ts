@@ -42,6 +42,7 @@ test("não mantém os assets invisíveis enquanto aguarda eventos do navegador",
 
 test("aplica o fundo estrelado apenas à landing e cobre a altura visível", () => {
   assert.match(theme, /\.osk-minimal-landing\s*\{[\s\S]*?min-height:\s*100dvh/);
-  assert.match(theme, /\.osk-minimal-landing::before\s*\{[\s\S]*?osaka-landing-stars\.jpg\?v=53f0d2fc/);
+  assert.match(theme, /\.osk-minimal-landing::before\s*\{[\s\S]*?height:\s*100vh;[\s\S]*?height:\s*100lvh;[\s\S]*?osaka-landing-stars\.jpg\?v=53f0d2fc/);
+  assert.match(theme, /\.osk-minimal-landing::before\s*\{[\s\S]*?transform:\s*translateZ\(0\)/);
   assert.match(theme, /@media \(max-width: 720px\)[\s\S]*?\.osk-minimal-landing::before\s*\{[\s\S]*?background-size:\s*cover/);
 });

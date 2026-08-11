@@ -184,7 +184,11 @@ body { color: var(--osk-ink); }
   content: "";
   position: fixed;
   z-index: -2;
-  inset: 0;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 100vh;
+  height: 100lvh;
   pointer-events: none;
   background-image:
     linear-gradient(180deg, rgba(7,7,7,.46), rgba(7,7,7,.68)),
@@ -192,6 +196,8 @@ body { color: var(--osk-ink); }
   background-position: center, center top;
   background-repeat: no-repeat, repeat;
   background-size: cover, min(736px, 58vw) auto;
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .osk-minimal-nav {

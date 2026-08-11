@@ -16,11 +16,14 @@ test("usa os assets enviados como padrão dos templates visuais", () => {
 
 test("mantém imagens válidas no diretório público", () => {
   const decorativeImage = readFileSync(join(projectRoot, "public/assets/osaka-landing-character.jpg"));
+  const landingStars = readFileSync(join(projectRoot, "public/assets/osaka-landing-stars.jpg"));
   const loadingGif = readFileSync(join(projectRoot, "public/assets/osaka-loading.gif"));
 
   assert.deepEqual([...decorativeImage.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+  assert.deepEqual([...landingStars.subarray(0, 3)], [0xff, 0xd8, 0xff]);
   assert.equal(loadingGif.subarray(0, 6).toString("ascii"), "GIF89a");
   assert.ok(decorativeImage.byteLength > 50_000);
+  assert.ok(landingStars.byteLength > 40_000);
   assert.ok(loadingGif.byteLength > 100_000);
   assert.ok(loadingGif.includes(Buffer.from("NETSCAPE2.0")), "o GIF deve preservar a animação em loop");
 });
@@ -35,4 +38,10 @@ test("reconhece imediatamente imagens restauradas do cache", () => {
 test("não mantém os assets invisíveis enquanto aguarda eventos do navegador", () => {
   assert.match(theme, /\.osk-decorative-template\s*\{[\s\S]*?opacity:\s*var\(--osk-decorative-opacity\)/);
   assert.match(theme, /\.osk-loading-visual img\s*\{[\s\S]*?opacity:\s*1/);
+});
+
+test("aplica o fundo estrelado apenas à landing e cobre a altura visível", () => {
+  assert.match(theme, /\.osk-minimal-landing\s*\{[\s\S]*?min-height:\s*100dvh/);
+  assert.match(theme, /\.osk-minimal-landing::before\s*\{[\s\S]*?osaka-landing-stars\.jpg\?v=53f0d2fc/);
+  assert.match(theme, /@media \(max-width: 720px\)[\s\S]*?\.osk-minimal-landing::before\s*\{[\s\S]*?background-size:\s*cover/);
 });

@@ -175,7 +175,24 @@ body { color: var(--osk-ink); }
   background: transparent;
 }
 
-.osk-minimal-landing { overflow-x: clip; }
+.osk-minimal-landing {
+  min-height: 100dvh;
+  overflow: visible;
+}
+
+.osk-minimal-landing::before {
+  content: "";
+  position: fixed;
+  z-index: -2;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(180deg, rgba(7,7,7,.46), rgba(7,7,7,.68)),
+    url("/assets/osaka-landing-stars.jpg?v=53f0d2fc");
+  background-position: center, center top;
+  background-repeat: no-repeat, repeat;
+  background-size: cover, min(736px, 58vw) auto;
+}
 
 .osk-minimal-nav {
   border-bottom: 1px solid var(--osk-line);
@@ -189,6 +206,7 @@ body { color: var(--osk-ink); }
 .osk-minimal-main {
   position: relative;
   isolation: isolate;
+  padding-bottom: clamp(2.5rem, 6vh, 5rem);
 }
 
 .osk-minimal-main::before {
@@ -286,7 +304,8 @@ body { color: var(--osk-ink); }
 .osk-support-card {
   color: var(--osk-ink);
   border: 1px solid var(--osk-line-strong);
-  background: rgba(255,255,255,.035);
+  background: rgba(7,7,7,.76);
+  backdrop-filter: blur(2px);
   box-shadow: none;
 }
 
@@ -785,6 +804,12 @@ body { color: var(--osk-ink); }
 
 @media (max-width: 720px) {
   .osk-minimal-nav { background: rgba(7,7,7,.94); }
+  .osk-minimal-landing::before {
+    background-position: center, center top;
+    background-repeat: no-repeat;
+    background-size: cover;
+  }
+  .osk-minimal-main { padding-bottom: clamp(2rem, 5vh, 4rem); }
   .osk-decorative-template { top: 7rem; right: -3rem; width: min(var(--osk-decorative-size), 15rem); max-width: 58vw; }
   .osk-decorative-template { opacity: calc(var(--osk-decorative-opacity) * .34); }
   .osk-decorative-template[data-opaque-source] { opacity: calc(var(--osk-decorative-opacity) * .58); }

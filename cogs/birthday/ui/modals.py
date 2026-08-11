@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import re
-from zoneinfo import ZoneInfo
 
 import discord
 
 from ..constants import (
     DEFAULT_REACTION,
     DEFAULT_TEMPLATES,
-    DEFAULT_TIMEZONE,
     TEMPLATE_LABELS,
     VARIABLE_HELP,
     VARIABLES_BY_TEMPLATE,
@@ -83,7 +81,6 @@ class BirthdayTimeModal(discord.ui.Modal):
         self.panel = view
         cfg = view.cog._normalize_config(view.config)
         hour, minute = _announcement_time_from_config(cfg)
-        timezone_name = str(cfg.get("timezone") or DEFAULT_TIMEZONE)
         self.time_input = discord.ui.TextInput(
             label="Horário",
             placeholder="09:00",
@@ -91,15 +88,7 @@ class BirthdayTimeModal(discord.ui.Modal):
             required=True,
             max_length=5,
         )
-        self.tz_input = discord.ui.TextInput(
-            label="Fuso horário",
-            placeholder="America/Sao_Paulo",
-            default=timezone_name[:100],
-            required=True,
-            max_length=100,
-        )
         self.add_item(self.time_input)
-        self.add_item(self.tz_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         raw_time = str(self.time_input.value or "").strip()
@@ -118,16 +107,7 @@ class BirthdayTimeModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
-        tz_name = str(self.tz_input.value or DEFAULT_TIMEZONE).strip() or DEFAULT_TIMEZONE
-        try:
-            ZoneInfo(tz_name)
-        except Exception:
-            await interaction.response.send_message(
-                view=_make_notice_view("Fuso inválido", "Use um nome de fuso válido, como `America/Sao_Paulo`.", ok=False),
-                ephemeral=True,
-            )
-            return
-        await self.panel.cog._update_config(interaction.guild.id, {"announce_hour": hour, "announce_minute": minute, "timezone": tz_name})
+        await self.panel.cog._update_config(interaction.guild.id, {"announce_hour": hour, "announce_minute": minute})
         self.panel.config = await self.panel.cog._get_config(int(interaction.guild.id))
         self.panel.notice = "Horário salvo."
         self.panel.return_to("preferences")

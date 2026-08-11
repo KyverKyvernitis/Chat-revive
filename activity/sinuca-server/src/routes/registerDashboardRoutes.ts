@@ -1,5 +1,6 @@
 import type { Express, Request, Response } from "express";
-import { DashboardConfigValidationError, type DashboardConfigService } from "../services/dashboardConfigService.js";
+import { DashboardConfigValidationError, DashboardConfigValueError, type DashboardConfigService } from "../services/dashboardConfigService.js";
+import { buildDashboardCommands } from "../services/dashboardCommandsService.js";
 import type { DashboardOAuthTokenResult, DashboardSessionService } from "../services/dashboardSessionService.js";
 import {
   createDashboardInviteUrl,
@@ -421,6 +422,21 @@ export function registerDashboardRoutes({
     });
   });
 
+  app.get("/api/dashboard/guild/:guildId/commands", async (req, res) => {
+    if (!takeRateLimit(req, "commands-read", 180, 10 * 60 * 1000)) {
+      sendNoStoreJson(res, 429, { ok: false, error: "rate_limited" });
+      return;
+    }
+    const auth = await requireDashboardAccess(req, res, sessionService);
+    if (!auth) return;
+    try {
+      const context = await configService.getCommandContext(auth.guildId);
+      sendNoStoreJson(res, 200, { ok: true, guildId: auth.guildId, ...buildDashboardCommands(context) });
+    } catch (error) {
+      sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "commands_failed" });
+    }
+  });
+
   app.patch("/api/dashboard/guild/:guildId/settings", async (req, res) => {
     if (!mutationOriginAllowed(req, publicOrigin, allowedOrigins)) {
       sendNoStoreJson(res, 403, { ok: false, error: "origin_denied" });
@@ -446,6 +462,10 @@ export function registerDashboardRoutes({
     } catch (error) {
       if (error instanceof DashboardConfigValidationError) {
         sendNoStoreJson(res, 400, { ok: false, error: error.code, message: error.message, section: error.sectionId, issues: error.issues });
+        return;
+      }
+      if (error instanceof DashboardConfigValueError) {
+        sendNoStoreJson(res, 400, { ok: false, error: error.code, message: error.message, field: error.fieldId });
         return;
       }
       sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "save_failed" });

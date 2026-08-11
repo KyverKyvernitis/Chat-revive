@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyLegacyFeatureFlags, resolveDashboardSectionState } from "../src/services/dashboardConfigService.js";
+import { applyLegacyFeatureFlags, createDashboardConfigService, resolveDashboardSectionState } from "../src/services/dashboardConfigService.js";
 
 test("expõe somente os estados ativa e desativada", () => {
   const values: Record<string, unknown> = {
@@ -52,6 +52,18 @@ test("configuração Geral não recebe estado de função", () => {
   assert.equal(general.enabled, null);
   assert.equal(general.status, "");
   assert.deepEqual(general.issues, []);
+});
+
+test("centraliza o fuso horário em Geral", () => {
+  const service = createDashboardConfigService({ mongoUri: "", mongoDbName: "test", mongoCollectionName: "test" });
+  const sections = service.listSections();
+  const general = sections.find((section) => section.id === "general");
+  const birthday = sections.find((section) => section.id === "birthday");
+  const welcome = sections.find((section) => section.id === "welcome");
+
+  assert.ok(general?.fields.some((field) => field.id === "general.timezone"));
+  assert.ok(!birthday?.fields.some((field) => field.id.includes("timezone")));
+  assert.ok(!welcome?.fields.some((field) => field.id.includes("timezone")));
 });
 
 test("migra funções já publicadas sem alterar o comportamento existente", () => {

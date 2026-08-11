@@ -1,0 +1,1019 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "key": "voice",
+      "label": "Voz e TTS",
+      "emoji": "🔊",
+      "description": "Fale na call e ajuste sua voz.",
+      "accent": "green",
+      "search_terms": [
+        "tts",
+        "voz",
+        "falar",
+        "fala",
+        "call",
+        "audio"
+      ]
+    },
+    {
+      "key": "music",
+      "label": "Música",
+      "emoji": "🎵",
+      "description": "Toque músicas e controle a fila.",
+      "accent": "blurple",
+      "search_terms": [
+        "musica",
+        "player",
+        "fila",
+        "som"
+      ]
+    },
+    {
+      "key": "games",
+      "label": "Jogos e fichas",
+      "emoji": "🎮",
+      "description": "Jogue, ganhe e use suas fichas.",
+      "accent": "orange",
+      "search_terms": [
+        "jogos",
+        "jogo",
+        "fichas",
+        "ficha",
+        "economia",
+        "saldo"
+      ]
+    },
+    {
+      "key": "chatbot",
+      "label": "Chatbot e imagens",
+      "emoji": "🤖",
+      "description": "Converse com o bot ou crie imagens.",
+      "accent": "fuchsia",
+      "search_terms": [
+        "chatbot",
+        "chat",
+        "ia",
+        "imagem",
+        "imagens",
+        "profile",
+        "perfil"
+      ]
+    },
+    {
+      "key": "server",
+      "label": "Servidor",
+      "emoji": "⚙️",
+      "description": "Configure recursos deste servidor.",
+      "accent": "gold",
+      "search_terms": [
+        "servidor",
+        "server",
+        "staff",
+        "admin",
+        "config",
+        "configurar"
+      ]
+    }
+  ],
+  "entries": [
+    {
+      "key": "gtts",
+      "category": "voice",
+      "group": "Falar",
+      "description": "Fala usando gTTS.",
+      "usage": "{gtts_prefix}texto",
+      "search_terms": [
+        "google tts",
+        "gtts"
+      ]
+    },
+    {
+      "key": "edge",
+      "category": "voice",
+      "group": "Falar",
+      "description": "Fala usando Edge TTS.",
+      "usage": "{edge_prefix}texto",
+      "search_terms": [
+        "edge",
+        "edge tts"
+      ]
+    },
+    {
+      "key": "tts_menu",
+      "category": "voice",
+      "group": "Configurar",
+      "description": "Configura sua voz.",
+      "usage": "/tts menu",
+      "search_terms": [
+        "menu tts",
+        "painel tts",
+        "configurar voz"
+      ],
+      "slash_root": "tts",
+      "slash_path": "tts menu"
+    },
+    {
+      "key": "tts_status",
+      "category": "voice",
+      "group": "Configurar",
+      "description": "Mostra seu TTS atual.",
+      "usage": "/tts status",
+      "search_terms": [
+        "status tts",
+        "meu tts"
+      ],
+      "slash_root": "tts",
+      "slash_path": "tts status"
+    },
+    {
+      "key": "panel",
+      "category": "voice",
+      "group": "Configurar",
+      "description": "Abre seu painel de TTS.",
+      "usage": "{bot_prefix}panel",
+      "search_terms": [
+        "painel",
+        "p",
+        "painel usuario",
+        "painel usuário"
+      ],
+      "aliases": [
+        "painel",
+        "p"
+      ]
+    },
+    {
+      "key": "set_lang",
+      "category": "voice",
+      "group": "Configurar",
+      "description": "Troca seu idioma do gTTS.",
+      "usage": "{bot_prefix}set lang <idioma>",
+      "search_terms": [
+        "idioma tts",
+        "idioma gtts",
+        "set lang",
+        "lingua tts"
+      ]
+    },
+    {
+      "key": "join",
+      "category": "voice",
+      "group": "Call",
+      "description": "Entra na sua call.",
+      "usage": "{bot_prefix}join",
+      "search_terms": [
+        "entrar call",
+        "conectar"
+      ]
+    },
+    {
+      "key": "leave",
+      "category": "voice",
+      "group": "Call",
+      "description": "Sai da call.",
+      "usage": "{bot_prefix}leave",
+      "search_terms": [
+        "sair call",
+        "desconectar"
+      ]
+    },
+    {
+      "key": "clear",
+      "category": "voice",
+      "group": "Call",
+      "description": "Limpa a fila de fala.",
+      "usage": "{bot_prefix}clear",
+      "search_terms": [
+        "limpar tts",
+        "limpar fila"
+      ]
+    },
+    {
+      "key": "panel_other",
+      "category": "voice",
+      "group": "Staff",
+      "description": "Abre o TTS de outro usuário.",
+      "usage": "{bot_prefix}panel @usuário",
+      "search_terms": [
+        "tts usuario",
+        "tts usuário",
+        "painel outro",
+        "editar tts usuario"
+      ],
+      "permission": "kick",
+      "detail_note": "Requer Expulsar membros."
+    },
+    {
+      "key": "tts_server",
+      "category": "voice",
+      "group": "Staff",
+      "description": "Configura o TTS do servidor.",
+      "usage": "/tts server menu",
+      "search_terms": [
+        "tts servidor",
+        "server tts",
+        "painel servidor tts"
+      ],
+      "permission": "kick",
+      "slash_root": "tts",
+      "slash_path": "tts server menu",
+      "detail_note": "Requer Expulsar membros."
+    },
+    {
+      "key": "panel_server",
+      "category": "voice",
+      "group": "Staff",
+      "description": "Abre o painel de TTS do servidor.",
+      "usage": "{bot_prefix}panel_server",
+      "search_terms": [
+        "painel servidor",
+        "server panel",
+        "sp"
+      ],
+      "aliases": [
+        "sp"
+      ],
+      "permission": "kick",
+      "detail_note": "Atalho do painel principal de TTS · Requer Expulsar membros.",
+      "show_in_category": false
+    },
+    {
+      "key": "panel_toggle",
+      "category": "voice",
+      "group": "Staff",
+      "description": "Abre os controles do TTS.",
+      "usage": "{bot_prefix}toggle_panel",
+      "search_terms": [
+        "painel toggle",
+        "painel toggles",
+        "tp"
+      ],
+      "aliases": [
+        "tp"
+      ],
+      "permission": "kick",
+      "detail_note": "Requer Expulsar membros."
+    },
+    {
+      "key": "reset_tts",
+      "category": "voice",
+      "group": "Staff",
+      "description": "Reseta o TTS de outro usuário.",
+      "usage": "{bot_prefix}reset @usuário",
+      "search_terms": [
+        "reset tts",
+        "reset usuario tts",
+        "reset usuário tts"
+      ],
+      "permission": "kick",
+      "detail_note": "Requer Expulsar membros."
+    },
+    {
+      "key": "play",
+      "category": "music",
+      "group": "Player",
+      "description": "Toca uma música ou playlist.",
+      "usage": "{bot_prefix}play <nome ou link>",
+      "search_terms": [
+        "tocar",
+        "music",
+        "musica"
+      ],
+      "aliases": [
+        "tocar",
+        "music",
+        "musica"
+      ]
+    },
+    {
+      "key": "pause",
+      "category": "music",
+      "group": "Player",
+      "description": "Pausa a reprodução.",
+      "usage": "{bot_prefix}pause",
+      "search_terms": [
+        "pausar"
+      ],
+      "aliases": [
+        "pausar",
+        "pa"
+      ]
+    },
+    {
+      "key": "resume",
+      "category": "music",
+      "group": "Player",
+      "description": "Continua a reprodução.",
+      "usage": "{bot_prefix}resume",
+      "search_terms": [
+        "retomar",
+        "continuar"
+      ],
+      "aliases": [
+        "retomar",
+        "continuar",
+        "r"
+      ]
+    },
+    {
+      "key": "skip",
+      "category": "music",
+      "group": "Player",
+      "description": "Pula a música atual.",
+      "usage": "{bot_prefix}skip",
+      "search_terms": [
+        "pular"
+      ],
+      "aliases": [
+        "pular",
+        "s"
+      ]
+    },
+    {
+      "key": "back",
+      "category": "music",
+      "group": "Player",
+      "description": "Volta uma faixa.",
+      "usage": "{bot_prefix}back",
+      "search_terms": [
+        "voltar musica",
+        "anterior"
+      ],
+      "aliases": [
+        "b",
+        "previous",
+        "voltar",
+        "anterior"
+      ]
+    },
+    {
+      "key": "stop",
+      "category": "music",
+      "group": "Player",
+      "description": "Encerra o player.",
+      "usage": "{bot_prefix}stop",
+      "search_terms": [
+        "parar musica"
+      ],
+      "aliases": [
+        "st",
+        "pararmusica",
+        "musicstop"
+      ]
+    },
+    {
+      "key": "queue",
+      "category": "music",
+      "group": "Fila",
+      "description": "Mostra a fila.",
+      "usage": "{bot_prefix}queue",
+      "search_terms": [
+        "fila"
+      ],
+      "aliases": [
+        "fila",
+        "q"
+      ]
+    },
+    {
+      "key": "shuffle",
+      "category": "music",
+      "group": "Fila",
+      "description": "Embaralha a fila.",
+      "usage": "{bot_prefix}shuffle",
+      "search_terms": [
+        "embaralhar"
+      ],
+      "aliases": [
+        "sh",
+        "embaralhar"
+      ]
+    },
+    {
+      "key": "loop",
+      "category": "music",
+      "group": "Fila",
+      "description": "Repete a reprodução.",
+      "usage": "{bot_prefix}loop",
+      "search_terms": [
+        "repetir"
+      ],
+      "aliases": [
+        "l",
+        "repeat",
+        "repetir"
+      ]
+    },
+    {
+      "key": "remove",
+      "category": "music",
+      "group": "Fila",
+      "description": "Remove uma faixa da fila.",
+      "usage": "{bot_prefix}remove <posição>",
+      "search_terms": [
+        "remover musica"
+      ],
+      "aliases": [
+        "rm",
+        "remover"
+      ]
+    },
+    {
+      "key": "move",
+      "category": "music",
+      "group": "Fila",
+      "description": "Move uma faixa na fila.",
+      "usage": "{bot_prefix}move <de> <para>",
+      "search_terms": [
+        "mover musica"
+      ],
+      "aliases": [
+        "mv",
+        "mover"
+      ]
+    },
+    {
+      "key": "skipto",
+      "category": "music",
+      "group": "Fila",
+      "description": "Pula até uma posição da fila.",
+      "usage": "{bot_prefix}skipto <posição>",
+      "search_terms": [
+        "pular ate",
+        "ir para musica"
+      ],
+      "aliases": [
+        "goto",
+        "jump",
+        "jumpto",
+        "tocarfila"
+      ]
+    },
+    {
+      "key": "clearqueue",
+      "category": "music",
+      "group": "Fila",
+      "description": "Limpa a fila de músicas.",
+      "usage": "{bot_prefix}clearqueue",
+      "search_terms": [
+        "limpar fila musica"
+      ],
+      "aliases": [
+        "cq",
+        "limparfila",
+        "limparqueue",
+        "clearq"
+      ]
+    },
+    {
+      "key": "np",
+      "category": "music",
+      "group": "Outros",
+      "description": "Mostra o que está tocando.",
+      "usage": "{bot_prefix}np",
+      "search_terms": [
+        "tocando",
+        "now playing"
+      ],
+      "aliases": [
+        "now",
+        "nowplaying",
+        "tocando"
+      ]
+    },
+    {
+      "key": "volume",
+      "category": "music",
+      "group": "Outros",
+      "description": "Ajusta o volume.",
+      "usage": "{bot_prefix}volume <0-100>",
+      "search_terms": [
+        "volume musica"
+      ],
+      "aliases": [
+        "v",
+        "vol"
+      ]
+    },
+    {
+      "key": "history",
+      "category": "music",
+      "group": "Outros",
+      "description": "Mostra o histórico recente.",
+      "usage": "{bot_prefix}history",
+      "search_terms": [
+        "historico musica",
+        "histórico música"
+      ],
+      "aliases": [
+        "h",
+        "historico",
+        "played"
+      ]
+    },
+    {
+      "key": "readd",
+      "category": "music",
+      "group": "Outros",
+      "description": "Readiciona uma música do histórico.",
+      "usage": "{bot_prefix}readd <posição>",
+      "search_terms": [
+        "readicionar"
+      ],
+      "aliases": [
+        "ra",
+        "readicionar",
+        "historicofila",
+        "historicoqueue"
+      ]
+    },
+    {
+      "key": "ficha",
+      "category": "games",
+      "group": "Fichas",
+      "description": "Mostra seu saldo.",
+      "usage": "ficha",
+      "search_terms": [
+        "saldo",
+        "fichas"
+      ],
+      "aliases": [
+        "fichas"
+      ]
+    },
+    {
+      "key": "extrato",
+      "category": "games",
+      "group": "Fichas",
+      "description": "Mostra movimentações recentes.",
+      "usage": "extrato",
+      "search_terms": [
+        "movimentacoes",
+        "movimentações"
+      ]
+    },
+    {
+      "key": "daily",
+      "category": "games",
+      "group": "Fichas",
+      "description": "Resgata o prêmio diário.",
+      "usage": "daily",
+      "search_terms": [
+        "diario",
+        "diário",
+        "bonus",
+        "login"
+      ],
+      "aliases": [
+        "bonus",
+        "login"
+      ]
+    },
+    {
+      "key": "recarga",
+      "category": "games",
+      "group": "Fichas",
+      "description": "Recupera um saldo muito baixo.",
+      "usage": "recarga",
+      "search_terms": [
+        "recarregar fichas"
+      ],
+      "aliases": [
+        "recarrega"
+      ]
+    },
+    {
+      "key": "rank",
+      "category": "games",
+      "group": "Fichas",
+      "description": "Mostra o ranking de fichas.",
+      "usage": "rank",
+      "search_terms": [
+        "ranking",
+        "leaderboard"
+      ],
+      "aliases": [
+        "leaderboard"
+      ]
+    },
+    {
+      "key": "pay",
+      "category": "games",
+      "group": "Fichas",
+      "description": "Envia fichas para alguém.",
+      "usage": "pay @usuário <valor>",
+      "search_terms": [
+        "pagar",
+        "enviar fichas"
+      ]
+    },
+    {
+      "key": "mendigar",
+      "category": "games",
+      "group": "Fichas",
+      "description": "Pede fichas.",
+      "usage": "mendigar <valor>",
+      "search_terms": [
+        "pedir fichas"
+      ]
+    },
+    {
+      "key": "race",
+      "category": "games",
+      "group": "Perfil",
+      "description": "Abre a seleção de raça.",
+      "usage": "race",
+      "search_terms": [
+        "raca",
+        "raça"
+      ],
+      "aliases": [
+        "raça"
+      ]
+    },
+    {
+      "key": "roleta",
+      "category": "games",
+      "group": "Jogos",
+      "description": "Joga roleta.",
+      "usage": "roleta",
+      "search_terms": [
+        "roulette"
+      ]
+    },
+    {
+      "key": "carta",
+      "category": "games",
+      "group": "Jogos",
+      "description": "Joga uma rodada de cartas.",
+      "usage": "carta",
+      "search_terms": [
+        "cartas"
+      ],
+      "aliases": [
+        "cartas"
+      ]
+    },
+    {
+      "key": "buckshot",
+      "category": "games",
+      "group": "Jogos",
+      "description": "Abre uma partida de sobrevivência.",
+      "usage": "buckshot",
+      "search_terms": [
+        "buckshot roulette"
+      ]
+    },
+    {
+      "key": "alvo",
+      "category": "games",
+      "group": "Jogos",
+      "description": "Abre uma disputa de mira.",
+      "usage": "alvo",
+      "search_terms": [
+        "mira"
+      ]
+    },
+    {
+      "key": "corrida",
+      "category": "games",
+      "group": "Jogos",
+      "description": "Abre uma corrida de cavalos.",
+      "usage": "corrida",
+      "search_terms": [
+        "cavalos",
+        "corrida cavalo"
+      ]
+    },
+    {
+      "key": "poker",
+      "category": "games",
+      "group": "Jogos",
+      "description": "Abre uma mesa de poker.",
+      "usage": "poker @usuário",
+      "search_terms": [
+        "pôquer"
+      ]
+    },
+    {
+      "key": "truco",
+      "category": "games",
+      "group": "Jogos",
+      "description": "Desafia alguém para truco.",
+      "usage": "truco @usuário",
+      "search_terms": [
+        "truco 1v1"
+      ]
+    },
+    {
+      "key": "roubar",
+      "category": "games",
+      "group": "Jogos",
+      "description": "Tenta roubar fichas de alguém.",
+      "usage": "roubar @usuário",
+      "search_terms": [
+        "rob",
+        "roubo"
+      ],
+      "aliases": [
+        "rob"
+      ]
+    },
+    {
+      "key": "economia",
+      "category": "games",
+      "group": "Staff",
+      "description": "Configura jogos, fichas e raças.",
+      "usage": "/economia",
+      "search_terms": [
+        "config economia",
+        "administrar economia"
+      ],
+      "permission": "economy_staff",
+      "slash_root": "economia",
+      "slash_path": "economia",
+      "detail_note": "Disponível apenas para a staff configurada."
+    },
+    {
+      "key": "chat",
+      "category": "chatbot",
+      "group": "Conversar",
+      "description": "Conversa com o chatbot.",
+      "usage": "@bot mensagem",
+      "search_terms": [
+        "conversar",
+        "mencionar bot",
+        "responder bot"
+      ]
+    },
+    {
+      "key": "imagem",
+      "category": "chatbot",
+      "group": "Criar",
+      "description": "Gera uma imagem com o perfil ativo.",
+      "usage": "/imagem <prompt>",
+      "search_terms": [
+        "gerar imagem",
+        "imagem ia"
+      ],
+      "slash_root": "imagem",
+      "slash_path": "imagem",
+      "suffix": " `prompt`"
+    },
+    {
+      "key": "reset",
+      "category": "chatbot",
+      "group": "Memória",
+      "description": "Limpa sua memória pessoal do chatbot.",
+      "usage": "/reset",
+      "search_terms": [
+        "reset memoria",
+        "limpar memoria",
+        "esquecer"
+      ],
+      "slash_root": "reset",
+      "slash_path": "reset"
+    },
+    {
+      "key": "chatbot_profile",
+      "category": "chatbot",
+      "group": "Staff",
+      "description": "Gerencia perfis do chatbot.",
+      "usage": "/chatbot profile",
+      "search_terms": [
+        "profile",
+        "profiles",
+        "perfil chatbot"
+      ],
+      "permission": "manage_guild",
+      "slash_root": "chatbot",
+      "slash_path": "chatbot profile",
+      "detail_note": "Requer Gerenciar servidor."
+    },
+    {
+      "key": "chatbot_persona",
+      "category": "chatbot",
+      "group": "Staff",
+      "description": "Configura uma persona baseada em usuário.",
+      "usage": "/chatbot persona",
+      "search_terms": [
+        "persona"
+      ],
+      "permission": "manage_guild",
+      "slash_root": "chatbot",
+      "slash_path": "chatbot persona",
+      "detail_note": "Requer Gerenciar servidor."
+    },
+    {
+      "key": "chatbot_extrovert",
+      "category": "chatbot",
+      "group": "Staff",
+      "description": "Ajusta respostas espontâneas do chatbot.",
+      "usage": "/chatbot extrovert",
+      "search_terms": [
+        "extrovert",
+        "extrovertido",
+        "resposta espontanea"
+      ],
+      "permission": "manage_guild",
+      "slash_root": "chatbot",
+      "slash_path": "chatbot extrovert",
+      "detail_note": "Requer Gerenciar servidor."
+    },
+    {
+      "key": "chatbot_memoria",
+      "category": "chatbot",
+      "group": "Staff",
+      "description": "Reseta a memória do chatbot no servidor.",
+      "usage": "/chatbot memoria",
+      "search_terms": [
+        "memoria servidor",
+        "reset servidor chatbot"
+      ],
+      "permission": "manage_guild",
+      "slash_root": "chatbot",
+      "slash_path": "chatbot memoria",
+      "detail_note": "Requer Gerenciar servidor."
+    },
+    {
+      "key": "welcome",
+      "category": "server",
+      "group": "Painéis",
+      "description": "Configura boas-vindas.",
+      "usage": "{bot_prefix}welcome",
+      "search_terms": [
+        "boas vindas",
+        "boas-vindas",
+        "bv"
+      ],
+      "aliases": [
+        "boasvindas",
+        "boas-vindas",
+        "boas",
+        "bv"
+      ],
+      "permission": "manage_guild"
+    },
+    {
+      "key": "birthday",
+      "category": "server",
+      "group": "Painéis",
+      "description": "Configura aniversários.",
+      "usage": "{bot_prefix}birthday",
+      "search_terms": [
+        "aniversario",
+        "aniversário",
+        "aniversarios"
+      ],
+      "permission": "manage_guild"
+    },
+    {
+      "key": "ticket",
+      "category": "server",
+      "group": "Painéis",
+      "description": "Publica o painel de tickets.",
+      "usage": "{bot_prefix}ticket",
+      "search_terms": [
+        "tickets",
+        "publicar ticket"
+      ],
+      "permission": "ticket_staff"
+    },
+    {
+      "key": "ticketedit",
+      "category": "server",
+      "group": "Painéis",
+      "description": "Abre o editor de tickets.",
+      "usage": "{bot_prefix}ticketedit",
+      "search_terms": [
+        "editar ticket",
+        "editor ticket"
+      ],
+      "permission": "ticket_staff"
+    },
+    {
+      "key": "color",
+      "category": "server",
+      "group": "Personalização",
+      "description": "Publica o painel de cores.",
+      "usage": "{bot_prefix}color",
+      "search_terms": [
+        "cores",
+        "painel cores"
+      ],
+      "permission": "administrator",
+      "detail_note": "Requer Administrador."
+    },
+    {
+      "key": "coloredit",
+      "category": "server",
+      "group": "Personalização",
+      "description": "Edita as cores do painel.",
+      "usage": "{bot_prefix}coloredit",
+      "search_terms": [
+        "editar cores"
+      ],
+      "permission": "administrator",
+      "detail_note": "Requer Administrador."
+    },
+    {
+      "key": "roleicon",
+      "category": "server",
+      "group": "Personalização",
+      "description": "Gerencia ícones conectados a cargos.",
+      "usage": "{bot_prefix}roleicon",
+      "search_terms": [
+        "icone cargo",
+        "ícone cargo",
+        "role icon"
+      ],
+      "permission": "manage_roles",
+      "detail_note": "Requer Gerenciar cargos."
+    },
+    {
+      "key": "form",
+      "category": "server",
+      "group": "Formulário",
+      "description": "Publica ou atualiza o formulário.",
+      "usage": "form",
+      "search_terms": [
+        "formulario",
+        "formulário"
+      ],
+      "permission": "kick_or_manage_guild"
+    },
+    {
+      "key": "form_config",
+      "category": "server",
+      "group": "Formulário",
+      "description": "Abre a configuração do formulário.",
+      "usage": "c",
+      "search_terms": [
+        "config formulario",
+        "configurar formulario",
+        "customizar formulario"
+      ],
+      "permission": "kick_or_manage_guild"
+    },
+    {
+      "key": "say",
+      "category": "server",
+      "group": "Outros",
+      "description": "Envia uma mensagem pelo bot.",
+      "usage": "/say",
+      "search_terms": [
+        "falar pelo bot",
+        "mensagem webhook"
+      ],
+      "permission": "say_staff",
+      "slash_root": "say",
+      "slash_path": "say",
+      "detail_note": "Disponível para staff."
+    },
+    {
+      "key": "feedback",
+      "category": "server",
+      "group": "Outros",
+      "description": "Envia feedback para o dono do bot.",
+      "usage": "/feedback",
+      "search_terms": [
+        "sugestao",
+        "sugestão",
+        "bug",
+        "relato"
+      ],
+      "permission": "feedback_staff",
+      "slash_root": "feedback",
+      "slash_path": "feedback",
+      "detail_note": "Disponível para a staff."
+    },
+    {
+      "key": "ping",
+      "category": null,
+      "group": "",
+      "description": "Mostra latência e estado do bot.",
+      "usage": "/ping",
+      "search_terms": [
+        "latencia",
+        "latência",
+        "status bot"
+      ],
+      "slash_root": "ping",
+      "slash_path": "ping"
+    },
+    {
+      "key": "help",
+      "category": null,
+      "group": "",
+      "description": "Abre esta central de ajuda.",
+      "usage": "/help",
+      "search_terms": [
+        "ajuda",
+        "comandos"
+      ],
+      "slash_root": "help",
+      "slash_path": "help"
+    }
+  ]
+}

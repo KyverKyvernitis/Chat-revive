@@ -1,4 +1,5 @@
 import { Long, MongoClient, type Collection, type Db, type Document } from "mongodb";
+import type { DashboardCommandContext } from "./dashboardCommandsService.js";
 
 export type DashboardFieldType =
   | "boolean"
@@ -88,10 +89,20 @@ export class DashboardConfigValidationError extends Error {
   }
 }
 
+export class DashboardConfigValueError extends Error {
+  readonly code = "invalid_setting";
+
+  constructor(readonly fieldId: string, message: string) {
+    super(message);
+    this.name = "DashboardConfigValueError";
+  }
+}
+
 export interface DashboardConfigService {
   listSections(): DashboardSectionDefinition[];
   getSummary(guildId: string): Promise<DashboardGuildSummary>;
   getSettings(guildId: string): Promise<{ guildId: string; sections: DashboardSectionDefinition[]; values: Record<string, unknown> }>;
+  getCommandContext(guildId: string): Promise<DashboardCommandContext>;
   updateSettings(guildId: string, updates: Record<string, unknown>): Promise<{ ok: true; values: Record<string, unknown>; saved: string[]; revision?: number; changed_sections?: string[] }>;
 }
 
@@ -388,6 +399,7 @@ function defaultGuildDoc(guildId: string): Record<string, unknown> {
     type: "guild",
     guild_id: snowflakeToLong(guildId),
     bot_prefix: "_",
+    timezone: "America/Sao_Paulo",
     tts_prefix: ".",
     atts_prefix: "%",
     teto_prefix: "'",
@@ -497,9 +509,10 @@ function ticketOptionFields(id: string, label: string): DashboardFieldDefinition
 
 const sections: DashboardSectionDefinition[] = [
   {
-    id: "general", label: "Geral", emoji: "⚙️", description: "Preferências básicas usadas pelos comandos do bot.",
+    id: "general", label: "Geral", emoji: "⚙️", description: "Preferências aplicadas a todo o servidor.",
     fields: [
       { id: "general.bot_prefix", label: "Prefixo do bot", description: "Prefixo usado pelos comandos por mensagem.", type: "text", scope: "guild", path: "bot_prefix", maxLength: 8, placeholder: "_" },
+      { id: "general.timezone", label: "Fuso horário", description: "Usado em aniversários e em futuras ações programadas do servidor.", type: "text", scope: "guild", path: "timezone", maxLength: 64, placeholder: "America/Sao_Paulo" },
     ],
   },
   {
@@ -809,7 +822,7 @@ const sections: DashboardSectionDefinition[] = [
         kind: "message",
         variables: BIRTHDAY_ANNOUNCE_VARIABLES,
         settingsFieldIds: [
-          "birthday.timezone", "birthday.announce_hour", "birthday.announce_minute",
+          "birthday.announce_hour", "birthday.announce_minute",
           "birthday.options.show_age", "birthday.options.group_announcements", "birthday.options.delete_on_leave",
         ],
         editors: [{
@@ -840,7 +853,6 @@ const sections: DashboardSectionDefinition[] = [
       messageField("birthday.templates.saved", "Mensagem ao salvar", "birthday", "templates.saved", "Registro de datas"),
       messageField("birthday.templates.updated", "Mensagem ao atualizar", "birthday", "templates.updated", "Registro de datas"),
       messageField("birthday.templates.invalid", "Mensagem de data inválida", "birthday", "templates.invalid", "Registro de datas"),
-      { id: "birthday.timezone", label: "Fuso horário", type: "text", scope: "birthday", path: "timezone", maxLength: 64, placeholder: "America/Sao_Paulo", group: "Avisos" },
       { id: "birthday.announce_hour", label: "Hora do aviso", type: "number", scope: "birthday", path: "announce_hour", min: 0, max: 23, group: "Avisos" },
       { id: "birthday.announce_minute", label: "Minuto do aviso", type: "number", scope: "birthday", path: "announce_minute", min: 0, max: 59, group: "Avisos" },
       { id: "birthday.options.show_age", label: "Mostrar idade", type: "boolean", scope: "birthday", path: "options.show_age", group: "Avisos" },
@@ -1085,6 +1097,25 @@ function normalizeDashboardPrefix(raw: unknown, maxLength = 8): string {
   return String(raw ?? "").trim().slice(0, maxLength);
 }
 
+function isDashboardTimeZone(value: unknown): value is string {
+  const timeZone = String(value ?? "").trim();
+  if (!timeZone || timeZone.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeDashboardTimeZone(raw: unknown): string {
+  const timeZone = String(raw ?? "").trim();
+  if (!isDashboardTimeZone(timeZone)) {
+    throw new DashboardConfigValueError("general.timezone", "Escolha um fuso horário válido.");
+  }
+  return timeZone;
+}
+
 function validateDashboardPrefixes(guild: Record<string, unknown>): void {
   const entries: Array<[string, string]> = [
     ["bot", normalizeDashboardPrefix(getPath(guild, "bot_prefix"))],
@@ -1146,6 +1177,7 @@ function normalizeFieldValue(field: DashboardFieldDefinition, raw: unknown): unk
   if (field.type === "form_fields") return normalizeFormFields(raw);
   if (field.type === "color_slots") return normalizeColorSlots(raw);
   if (field.type === "color_panel_layout") return normalizeColorPanelLayout(raw);
+  if (field.id === "general.timezone") return normalizeDashboardTimeZone(raw);
   if (DASHBOARD_PREFIX_FIELD_IDS.has(field.id)) return normalizeDashboardPrefix(raw, field.maxLength ?? 8);
   return String(raw ?? "").slice(0, field.maxLength ?? (field.type === "textarea" ? 1800 : 300));
 }
@@ -1243,14 +1275,22 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
     const raw = (doc as Record<string, unknown> | null) ?? {};
     const merged = deepMerge(defaults, raw);
     applyLegacyFeatureFlags(type, raw, merged);
-    return merged;
+    return { raw, merged };
   }
   async function readAll(guildId: string) {
-    const [guild, welcome, birthday] = await Promise.all([
+    const [guildDoc, welcomeDoc, birthdayDoc] = await Promise.all([
       readDoc(guildId, "guild", defaultGuildDoc(guildId)),
       readDoc(guildId, WELCOME_DOC_CONFIG, defaultWelcomeDoc(guildId)),
       readDoc(guildId, BIRTHDAY_DOC_CONFIG, defaultBirthdayDoc(guildId)),
     ]);
+    const guild = guildDoc.merged;
+    const welcome = welcomeDoc.merged;
+    const birthday = birthdayDoc.merged;
+    if (!isDashboardTimeZone(guildDoc.raw.timezone)) {
+      guild.timezone = isDashboardTimeZone(birthdayDoc.raw.timezone)
+        ? String(birthdayDoc.raw.timezone).trim()
+        : "America/Sao_Paulo";
+    }
     return { guild, welcome, birthday };
   }
   function valuesFromDocs(docs: Awaited<ReturnType<typeof readAll>>) {
@@ -1302,6 +1342,22 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
       const docs = await readAll(guildId);
       return { guildId, sections: clone(sections), values: valuesFromDocs(docs) };
     },
+    async getCommandContext(guildId: string) {
+      const { merged: guild } = await readDoc(guildId, "guild", defaultGuildDoc(guildId));
+      const gamesMode = String(getPath(guild, "gincana_input_mode") || "triggers").trim().toLowerCase() === "commands"
+        ? "commands" as const
+        : "triggers" as const;
+      return {
+        gamesMode,
+        prefixes: {
+          bot_prefix: normalizeDashboardPrefix(getPath(guild, "bot_prefix")) || "_",
+          atts_prefix: normalizeDashboardPrefix(getPath(guild, "atts_prefix")) || "%",
+          teto_prefix: normalizeDashboardPrefix(getPath(guild, "teto_prefix")) || "'",
+          gtts_prefix: normalizeDashboardPrefix(getPath(guild, "gtts_prefix")) || ".",
+          edge_prefix: normalizeDashboardPrefix(getPath(guild, "edge_prefix")) || ",",
+        },
+      };
+    },
     async updateSettings(guildId: string, updates: Record<string, unknown>) {
       const docs = await readAll(guildId);
       const fieldsById = new Map(allFields().map((field) => [field.id, field]));
@@ -1322,6 +1378,7 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
       if (saved.some((fieldId) => DASHBOARD_PREFIX_FIELD_IDS.has(fieldId))) {
         validateDashboardPrefixes(docs.guild);
       }
+      if (saved.includes("general.timezone")) changedSections.add("birthday");
       if (saved.includes("color_roles.panel_layout")) {
         const layout = normalizeColorPanelLayout(getPath(docs.guild, "color_roles.panel_layout"));
         const panelCount = layout.length;

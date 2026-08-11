@@ -1,13 +1,15 @@
 import { AlertTriangle, ArrowRight, LogIn, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserLanding } from "./components/BrowserLanding";
-import { HomePage } from "./components/HomePage";
+import { CommandsPage } from "./components/CommandsPage";
+import { GeneralPage } from "./components/GeneralPage";
+import { ModulesPage } from "./components/HomePage";
 import { InviteScreen } from "./components/InviteScreen";
 import { LegalPage } from "./components/LegalPage";
 import { SaveDock } from "./components/SaveDock";
 import { SectionEditor } from "./components/SectionEditor";
 import { ServerPicker } from "./components/ServerPicker";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, type DashboardNavigationPage } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { LoadingProgress, LoadingVisual } from "./components/VisualTemplates";
 import { mergeDashboardModules, type DashboardVisualModule } from "./moduleCatalog";
@@ -18,6 +20,7 @@ import {
   fetchDashboardInvite,
   fetchDashboardServers,
   patchDashboardSettings,
+  clearDashboardCommandsCache,
 } from "./transport/dashboardApi";
 import { DashboardHttpError } from "./transport/httpClient";
 import { fetchDashboardSession, logoutDashboard, openDiscordLogin } from "./transport/sessionApi";
@@ -37,7 +40,7 @@ type Route =
   | { page: "terms" }
   | { page: "servers" }
   | { page: "invite"; guildId: string }
-  | { page: "dashboard"; guildId: string; sectionId: string | null };
+  | { page: "dashboard"; guildId: string; view: "general" | "modules" | "commands" | "module"; moduleId: string | null };
 
 type DashboardRoute = Extract<Route, { page: "dashboard" }>;
 type SessionState = "loading" | "authenticated" | "anonymous";
@@ -59,8 +62,27 @@ function parseRoute(pathname = window.location.pathname): Route {
   if (pathname === "/dashboard" || pathname === "/dashboard/") return { page: "servers" };
   const invite = pathname.match(/^\/dashboard\/invite\/(\d{15,25})\/?$/);
   if (invite) return { page: "invite", guildId: invite[1] };
-  const dashboard = pathname.match(/^\/dashboard\/(\d{15,25})(?:\/([a-z0-9_-]+))?\/?$/i);
-  if (dashboard) return { page: "dashboard", guildId: dashboard[1], sectionId: dashboard[2] || null };
+  const dashboard = pathname.match(/^\/dashboard\/(\d{15,25})(?:\/(.*?))?\/?$/i);
+  if (dashboard) {
+    const guildId = dashboard[1];
+    const segments = String(dashboard[2] || "").split("/").filter(Boolean);
+    if (segments.length === 0 || (segments.length === 1 && ["geral", "general"].includes(segments[0].toLowerCase()))) {
+      return { page: "dashboard", guildId, view: "general", moduleId: null };
+    }
+    if (segments.length === 1 && segments[0].toLowerCase() === "modulos") {
+      return { page: "dashboard", guildId, view: "modules", moduleId: null };
+    }
+    if (segments.length === 1 && segments[0].toLowerCase() === "comandos") {
+      return { page: "dashboard", guildId, view: "commands", moduleId: null };
+    }
+    if (segments.length === 2 && segments[0].toLowerCase() === "modulos" && /^[a-z0-9_-]+$/i.test(segments[1])) {
+      return { page: "dashboard", guildId, view: "module", moduleId: segments[1] };
+    }
+    if (segments.length === 1 && /^[a-z0-9_-]+$/i.test(segments[0])) {
+      return { page: "dashboard", guildId, view: "module", moduleId: segments[0] };
+    }
+    return { page: "dashboard", guildId, view: "modules", moduleId: null };
+  }
   return { page: "landing" };
 }
 
@@ -69,7 +91,12 @@ function routePath(route: Route): string {
   if (route.page === "terms") return "/terms";
   if (route.page === "servers") return "/dashboard";
   if (route.page === "invite") return `/dashboard/invite/${route.guildId}`;
-  if (route.page === "dashboard") return `/dashboard/${route.guildId}${route.sectionId ? `/${route.sectionId}` : ""}`;
+  if (route.page === "dashboard") {
+    if (route.view === "modules") return `/dashboard/${route.guildId}/modulos`;
+    if (route.view === "commands") return `/dashboard/${route.guildId}/comandos`;
+    if (route.view === "module" && route.moduleId) return `/dashboard/${route.guildId}/modulos/${route.moduleId}`;
+    return `/dashboard/${route.guildId}/geral`;
+  }
   return "/";
 }
 
@@ -133,6 +160,7 @@ export default function App() {
   const [inviteBusy, setInviteBusy] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [messageEditorActive, setMessageEditorActive] = useState(false);
+  const [commandsRefreshToken, setCommandsRefreshToken] = useState(0);
   const [notice, setNotice] = useState<{ type: "error" | "success" | "info"; text: string } | null>(null);
   const dashboardLoadRef = useRef<{ generation: number; controller: AbortController | null }>({ generation: 0, controller: null });
   const loadedGuildRef = useRef<string | null>(null);
@@ -140,9 +168,13 @@ export default function App() {
   const savingRef = useRef(false);
 
   const visualModules = useMemo(() => mergeDashboardModules(summary), [summary]);
-  const selectedSectionId = route.page === "dashboard" ? route.sectionId : null;
+  const selectedSectionId = route.page === "dashboard"
+    ? route.view === "general" ? "general" : route.view === "module" ? route.moduleId : null
+    : null;
   const selectedSection = useMemo(() => sections.find((section) => section.id === selectedSectionId) ?? null, [sections, selectedSectionId]);
-  const selectedModule = useMemo(() => visualModules.find((item) => item.id === selectedSectionId) ?? null, [visualModules, selectedSectionId]);
+  const selectedModule = useMemo(() => route.page === "dashboard" && route.view === "module"
+    ? visualModules.find((item) => item.id === selectedSectionId) ?? null
+    : null, [route, selectedSectionId, visualModules]);
   const changedFields = useMemo(() => selectedSection?.fields.filter((field) => !valuesEqual(values[field.id], draft[field.id])) ?? [], [draft, selectedSection, values]);
   const hasUnsavedChanges = changedFields.length > 0;
 
@@ -373,11 +405,11 @@ export default function App() {
   }, [activeDashboardGuildId, loadDashboard, sessionState]);
 
   useEffect(() => {
-    if (route.page !== "dashboard" || !route.sectionId || sections.length === 0 || selectedSection || loadingDashboard) return;
-    const next: DashboardRoute = { page: "dashboard", guildId: route.guildId, sectionId: null };
+    if (route.page !== "dashboard" || route.view !== "module" || !route.moduleId || sections.length === 0 || selectedSection || loadingDashboard) return;
+    const next: DashboardRoute = { page: "dashboard", guildId: route.guildId, view: "modules", moduleId: null };
     window.history.replaceState({}, "", routePath(next));
     setRoute(next);
-    setNotice({ type: "info", text: "Essa área não existe mais. Voltamos para a visão geral." });
+    setNotice({ type: "info", text: "Esse módulo não existe mais. Voltamos para Módulos." });
   }, [loadingDashboard, route, sections.length, selectedSection]);
 
   useEffect(() => {
@@ -420,6 +452,7 @@ export default function App() {
       setValues(mergedValues);
       setDraft(mergedValues);
       if (result.summary) setSummary(result.summary);
+      if (result.saved.includes("general.bot_prefix")) clearDashboardCommandsCache(guildId);
       const count = result.saved.length;
       setNotice({
         type: "success",
@@ -438,7 +471,12 @@ export default function App() {
 
   const openSection = useCallback((sectionId: string) => {
     if (route.page !== "dashboard") return;
-    navigate({ page: "dashboard", guildId: route.guildId, sectionId });
+    navigate({ page: "dashboard", guildId: route.guildId, view: "module", moduleId: sectionId });
+  }, [navigate, route]);
+
+  const navigateDashboardPage = useCallback((page: DashboardNavigationPage) => {
+    if (route.page !== "dashboard") return;
+    navigate({ page: "dashboard", guildId: route.guildId, view: page, moduleId: null });
   }, [navigate, route]);
 
   const openInvite = useCallback(async (guildId: string) => {
@@ -464,15 +502,13 @@ export default function App() {
     }
   }, [inviteBusy]);
 
-  const handleDashboardHome = useCallback(() => {
-    if (route.page === "dashboard") navigate({ page: "dashboard", guildId: route.guildId, sectionId: null });
-  }, [navigate, route]);
-
   const handleChangeServer = useCallback(() => navigate({ page: "servers" }), [navigate]);
   const handleDiscard = useCallback(() => setDraft(values), [values]);
   const handleRefreshDashboard = useCallback(() => {
     if (route.page !== "dashboard") return;
     if (hasUnsavedChanges && !window.confirm("Recarregar os valores persistidos e descartar as alterações locais?")) return;
+    clearDashboardCommandsCache(route.guildId);
+    if (route.view === "commands") setCommandsRefreshToken((current) => current + 1);
     void loadDashboard(route.guildId, true);
   }, [hasUnsavedChanges, loadDashboard, route]);
 
@@ -488,7 +524,7 @@ export default function App() {
     {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} user={user} bot={botIdentity} supportServer={supportServer} refreshing={loadingServers} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onNavigate={(path) => navigate(parseRoute(path))} />}
     {route.page === "privacy" && <LegalPage kind="privacy" onBack={() => navigate({ page: "landing" })} />}
     {route.page === "terms" && <LegalPage kind="terms" onBack={() => navigate({ page: "landing" })} />}
-    {route.page === "servers" && user && <ServerPicker manageable={manageable} needsInvite={needsInvite} loading={loadingServers} user={user} bot={botIdentity} supportServer={supportServer} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, sectionId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
+    {route.page === "servers" && user && <ServerPicker manageable={manageable} needsInvite={needsInvite} loading={loadingServers} user={user} bot={botIdentity} supportServer={supportServer} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, view: "general", moduleId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
     {route.page === "invite" && <InviteScreen server={selectedServer || needsInvite.find((item) => item.id === route.guildId) || null} busy={inviteBusy} onBack={() => navigate({ page: "servers" })} onOpenInvite={() => void openInvite(route.guildId)} />}
     {route.page === "dashboard" && <DashboardShell
       route={route}
@@ -497,7 +533,6 @@ export default function App() {
       botIdentity={botIdentity}
       supportServer={supportServer}
       modules={visualModules}
-      selectedSectionId={selectedSectionId}
       selectedSection={selectedSection}
       selectedModule={selectedModule}
       sectionsLoaded={loadedGuildRef.current === route.guildId && sections.length > 0}
@@ -510,10 +545,11 @@ export default function App() {
       changedCount={changedFields.length}
       mobileMenuOpen={mobileMenuOpen}
       messageEditorActive={messageEditorActive}
+      commandsRefreshToken={commandsRefreshToken}
       onCloseMenu={closeMobileMenu}
       onOpenMenu={openMobileMenu}
-      onHome={handleDashboardHome}
-      onSelect={openSection}
+      onNavigate={navigateDashboardPage}
+      onOpenModule={openSection}
       onLogout={() => void handleLogout()}
       onRefresh={handleRefreshDashboard}
       onChangeServer={handleChangeServer}
@@ -532,7 +568,6 @@ interface DashboardShellProps {
   botIdentity: DashboardUserPayload | null;
   supportServer: DashboardSupportServerPayload | null;
   modules: DashboardVisualModule[];
-  selectedSectionId: string | null;
   selectedSection: DashboardSectionDefinition | null;
   selectedModule: DashboardVisualModule | null;
   sectionsLoaded: boolean;
@@ -545,10 +580,11 @@ interface DashboardShellProps {
   changedCount: number;
   mobileMenuOpen: boolean;
   messageEditorActive: boolean;
+  commandsRefreshToken: number;
   onCloseMenu(): void;
   onOpenMenu(): void;
-  onHome(): void;
-  onSelect(sectionId: string): void;
+  onNavigate(page: DashboardNavigationPage): void;
+  onOpenModule(sectionId: string): void;
   onLogout(): void;
   onRefresh(): void;
   onChangeServer(): void;
@@ -565,7 +601,6 @@ function DashboardShell({
   botIdentity,
   supportServer,
   modules,
-  selectedSectionId,
   selectedSection,
   selectedModule,
   sectionsLoaded,
@@ -578,10 +613,11 @@ function DashboardShell({
   changedCount,
   mobileMenuOpen,
   messageEditorActive,
+  commandsRefreshToken,
   onCloseMenu,
   onOpenMenu,
-  onHome,
-  onSelect,
+  onNavigate,
+  onOpenModule,
   onLogout,
   onRefresh,
   onChangeServer,
@@ -593,28 +629,39 @@ function DashboardShell({
   const guildName = selectedServer?.name || `Servidor ${route.guildId.slice(-6)}`;
   const guildIcon = selectedServer?.icon || null;
   const botName = botIdentity?.global_name || botIdentity?.username || "Osaka";
+  const activePage: DashboardNavigationPage = route.view === "module" ? "modules" : route.view;
+  const editableSection = route.view === "general" || route.view === "module" ? selectedSection : null;
 
 
   return <div className="osk-dashboard-shell" data-has-draft={changedCount > 0 || undefined}>
     <Sidebar
-      modules={modules}
-      selectedSectionId={selectedSectionId || ""}
-      view={selectedSection ? "section" : "home"}
+      activePage={activePage}
       mobileOpen={mobileMenuOpen}
       botName={botName}
       botAvatarUrl={botIdentity?.avatarUrl}
       onCloseMobile={onCloseMenu}
       onOpenMobile={onOpenMenu}
       gestureDisabled={messageEditorActive}
-      onHome={onHome}
-      onSelect={onSelect}
+      onNavigate={onNavigate}
       onLogout={onLogout}
     />
     <div className="osk-dashboard-main">
       <Topbar guildName={guildName} guildIcon={guildIcon} user={user} supportServer={supportServer} busy={loading} onRefresh={onRefresh} onChangeServer={onChangeServer} onLogout={onLogout} onOpenMenu={onOpenMenu} />
       <main className="osk-dashboard-content">
-        <div key={selectedSection?.id || "home"} className="osk-page-motion">
-          {loading && !sectionsLoaded ? <DashboardLoading progress={loadingProgress} /> : selectedSection ? (
+        <div key={`${route.view}:${route.moduleId || "root"}`} className="osk-page-motion">
+          {loading && !sectionsLoaded ? <DashboardLoading progress={loadingProgress} /> : route.view === "general" && selectedSection ? (
+            <GeneralPage
+              section={selectedSection}
+              values={values}
+              draft={draft}
+              guildOptions={guildOptions}
+              guildName={guildName}
+              guildIcon={guildIcon}
+              onChange={onFieldChange}
+            />
+          ) : route.view === "commands" ? (
+            <CommandsPage guildId={route.guildId} refreshToken={commandsRefreshToken} />
+          ) : route.view === "module" && selectedSection ? (
             <SectionEditor
               section={selectedSection}
               module={selectedModule}
@@ -627,13 +674,13 @@ function DashboardShell({
               previewGuildAvatarUrl={guildIcon}
               onChange={onFieldChange}
               onMessageEditorActiveChange={onMessageEditorActiveChange}
-              onBack={onHome}
+              onBack={() => onNavigate("modules")}
             />
-          ) : <HomePage modules={modules} onOpen={onSelect} />}
+          ) : <ModulesPage modules={modules} onOpen={onOpenModule} />}
         </div>
       </main>
     </div>
-    {!messageEditorActive && selectedSection && <SaveDock changedCount={changedCount} sectionLabel={selectedSection.label} saving={saving} onDiscard={onDiscard} onSave={onSave} />}
+    {!messageEditorActive && editableSection && <SaveDock changedCount={changedCount} sectionLabel={editableSection.label} saving={saving} onDiscard={onDiscard} onSave={onSave} />}
   </div>;
 }
 

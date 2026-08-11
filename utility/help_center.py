@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import difflib
+import json
+from pathlib import Path
 import re
 import unicodedata
 from collections.abc import Awaitable, Callable
@@ -41,204 +43,73 @@ class HelpEntry:
     show_in_category: bool = True
 
 
-CATEGORIES: tuple[HelpCategory, ...] = (
-    HelpCategory(
-        key="voice",
-        label="Voz e TTS",
-        emoji="🔊",
-        description="Fale na call e ajuste sua voz.",
-        accent=discord.Color.green(),
-        search_terms=("tts", "voz", "falar", "fala", "call", "audio"),
-    ),
-    HelpCategory(
-        key="music",
-        label="Música",
-        emoji="🎵",
-        description="Toque músicas e controle a fila.",
-        accent=discord.Color.blurple(),
-        search_terms=("musica", "player", "fila", "som"),
-    ),
-    HelpCategory(
-        key="games",
-        label="Jogos e fichas",
-        emoji="🎮",
-        description="Jogue, ganhe e use suas fichas.",
-        accent=discord.Color.orange(),
-        search_terms=("jogos", "jogo", "fichas", "ficha", "economia", "saldo"),
-    ),
-    HelpCategory(
-        key="chatbot",
-        label="Chatbot e imagens",
-        emoji="🤖",
-        description="Converse com o bot ou crie imagens.",
-        accent=discord.Color.fuchsia(),
-        search_terms=("chatbot", "chat", "ia", "imagem", "imagens", "profile", "perfil"),
-    ),
-    HelpCategory(
-        key="server",
-        label="Servidor",
-        emoji="⚙️",
-        description="Configure recursos deste servidor.",
-        accent=discord.Color.gold(),
-        search_terms=("servidor", "server", "staff", "admin", "config", "configurar"),
-    ),
-)
+_CATALOG_PATH = Path(__file__).resolve().parents[1] / "shared" / "help_catalog.json"
+_ACCENT_FACTORIES: dict[str, Callable[[], discord.Color]] = {
+    "green": discord.Color.green,
+    "blurple": discord.Color.blurple,
+    "orange": discord.Color.orange,
+    "fuchsia": discord.Color.fuchsia,
+    "gold": discord.Color.gold,
+}
 
 
-ENTRIES: tuple[HelpEntry, ...] = (
-    # Voz e TTS
-    HelpEntry("gtts", "voice", "Falar", "Fala usando gTTS.", "{gtts_prefix}texto", ("google tts", "gtts")),
-    HelpEntry("edge", "voice", "Falar", "Fala usando Edge TTS.", "{edge_prefix}texto", ("edge", "edge tts")),
-    HelpEntry(
-        "tts_menu", "voice", "Configurar", "Configura sua voz.", "/tts menu",
-        ("menu tts", "painel tts", "configurar voz"), slash_root="tts", slash_path="tts menu",
-    ),
-    HelpEntry(
-        "tts_status", "voice", "Configurar", "Mostra seu TTS atual.", "/tts status",
-        ("status tts", "meu tts"), slash_root="tts", slash_path="tts status",
-    ),
-    HelpEntry(
-        "panel", "voice", "Configurar", "Abre seu painel de TTS.", "{bot_prefix}panel",
-        ("painel", "p", "painel usuario", "painel usuário"), aliases=("painel", "p"),
-    ),
-    HelpEntry(
-        "set_lang", "voice", "Configurar", "Troca seu idioma do gTTS.", "{bot_prefix}set lang <idioma>",
-        ("idioma tts", "idioma gtts", "set lang", "lingua tts"),
-    ),
-    HelpEntry("join", "voice", "Call", "Entra na sua call.", "{bot_prefix}join", ("entrar call", "conectar")),
-    HelpEntry("leave", "voice", "Call", "Sai da call.", "{bot_prefix}leave", ("sair call", "desconectar")),
-    HelpEntry("clear", "voice", "Call", "Limpa a fila de fala.", "{bot_prefix}clear", ("limpar tts", "limpar fila")),
-    HelpEntry(
-        "panel_other", "voice", "Staff", "Abre o TTS de outro usuário.", "{bot_prefix}panel @usuário",
-        ("tts usuario", "tts usuário", "painel outro", "editar tts usuario"), permission="kick",
-        detail_note="Requer Expulsar membros.",
-    ),
-    HelpEntry(
-        "tts_server", "voice", "Staff", "Configura o TTS do servidor.", "/tts server menu",
-        ("tts servidor", "server tts", "painel servidor tts"), permission="kick",
-        slash_root="tts", slash_path="tts server menu", detail_note="Requer Expulsar membros.",
-    ),
-    HelpEntry(
-        "panel_server", "voice", "Staff", "Abre o painel de TTS do servidor.", "{bot_prefix}panel_server",
-        ("painel servidor", "server panel", "sp"), aliases=("sp",), permission="kick",
-        detail_note="Atalho do painel principal de TTS · Requer Expulsar membros.", show_in_category=False,
-    ),
-    HelpEntry(
-        "panel_toggle", "voice", "Staff", "Abre os controles do TTS.", "{bot_prefix}toggle_panel",
-        ("painel toggle", "painel toggles", "tp"), aliases=("tp",), permission="kick",
-        detail_note="Requer Expulsar membros.",
-    ),
-    HelpEntry(
-        "reset_tts", "voice", "Staff", "Reseta o TTS de outro usuário.", "{bot_prefix}reset @usuário",
-        ("reset tts", "reset usuario tts", "reset usuário tts"), permission="kick",
-        detail_note="Requer Expulsar membros.",
-    ),
+def _catalog_strings(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item).strip() for item in value if str(item).strip())
 
-    # Música
-    HelpEntry("play", "music", "Player", "Toca uma música ou playlist.", "{bot_prefix}play <nome ou link>", ("tocar", "music", "musica"), ("tocar", "music", "musica")),
-    HelpEntry("pause", "music", "Player", "Pausa a reprodução.", "{bot_prefix}pause", ("pausar",), ("pausar", "pa")),
-    HelpEntry("resume", "music", "Player", "Continua a reprodução.", "{bot_prefix}resume", ("retomar", "continuar"), ("retomar", "continuar", "r")),
-    HelpEntry("skip", "music", "Player", "Pula a música atual.", "{bot_prefix}skip", ("pular",), ("pular", "s")),
-    HelpEntry("back", "music", "Player", "Volta uma faixa.", "{bot_prefix}back", ("voltar musica", "anterior"), ("b", "previous", "voltar", "anterior")),
-    HelpEntry("stop", "music", "Player", "Encerra o player.", "{bot_prefix}stop", ("parar musica",), ("st", "pararmusica", "musicstop")),
-    HelpEntry("queue", "music", "Fila", "Mostra a fila.", "{bot_prefix}queue", ("fila",), ("fila", "q")),
-    HelpEntry("shuffle", "music", "Fila", "Embaralha a fila.", "{bot_prefix}shuffle", ("embaralhar",), ("sh", "embaralhar")),
-    HelpEntry("loop", "music", "Fila", "Repete a reprodução.", "{bot_prefix}loop", ("repetir",), ("l", "repeat", "repetir")),
-    HelpEntry("remove", "music", "Fila", "Remove uma faixa da fila.", "{bot_prefix}remove <posição>", ("remover musica",), ("rm", "remover")),
-    HelpEntry("move", "music", "Fila", "Move uma faixa na fila.", "{bot_prefix}move <de> <para>", ("mover musica",), ("mv", "mover")),
-    HelpEntry("skipto", "music", "Fila", "Pula até uma posição da fila.", "{bot_prefix}skipto <posição>", ("pular ate", "ir para musica"), ("goto", "jump", "jumpto", "tocarfila")),
-    HelpEntry("clearqueue", "music", "Fila", "Limpa a fila de músicas.", "{bot_prefix}clearqueue", ("limpar fila musica",), ("cq", "limparfila", "limparqueue", "clearq")),
-    HelpEntry("np", "music", "Outros", "Mostra o que está tocando.", "{bot_prefix}np", ("tocando", "now playing"), ("now", "nowplaying", "tocando")),
-    HelpEntry("volume", "music", "Outros", "Ajusta o volume.", "{bot_prefix}volume <0-100>", ("volume musica",), ("v", "vol")),
-    HelpEntry("history", "music", "Outros", "Mostra o histórico recente.", "{bot_prefix}history", ("historico musica", "histórico música"), ("h", "historico", "played")),
-    HelpEntry("readd", "music", "Outros", "Readiciona uma música do histórico.", "{bot_prefix}readd <posição>", ("readicionar",), ("ra", "readicionar", "historicofila", "historicoqueue")),
 
-    # Jogos e fichas
-    HelpEntry("ficha", "games", "Fichas", "Mostra seu saldo.", "ficha", ("saldo", "fichas"), ("fichas",)),
-    HelpEntry("extrato", "games", "Fichas", "Mostra movimentações recentes.", "extrato", ("movimentacoes", "movimentações")),
-    HelpEntry("daily", "games", "Fichas", "Resgata o prêmio diário.", "daily", ("diario", "diário", "bonus", "login"), ("bonus", "login")),
-    HelpEntry("recarga", "games", "Fichas", "Recupera um saldo muito baixo.", "recarga", ("recarregar fichas",), ("recarrega",)),
-    HelpEntry("rank", "games", "Fichas", "Mostra o ranking de fichas.", "rank", ("ranking", "leaderboard"), ("leaderboard",)),
-    HelpEntry("pay", "games", "Fichas", "Envia fichas para alguém.", "pay @usuário <valor>", ("pagar", "enviar fichas")),
-    HelpEntry("mendigar", "games", "Fichas", "Pede fichas.", "mendigar <valor>", ("pedir fichas",)),
-    HelpEntry("race", "games", "Perfil", "Abre a seleção de raça.", "race", ("raca", "raça"), ("raça",)),
-    HelpEntry("roleta", "games", "Jogos", "Joga roleta.", "roleta", ("roulette",)),
-    HelpEntry("carta", "games", "Jogos", "Joga uma rodada de cartas.", "carta", ("cartas",), ("cartas",)),
-    HelpEntry("buckshot", "games", "Jogos", "Abre uma partida de sobrevivência.", "buckshot", ("buckshot roulette",)),
-    HelpEntry("alvo", "games", "Jogos", "Abre uma disputa de mira.", "alvo", ("mira",)),
-    HelpEntry("corrida", "games", "Jogos", "Abre uma corrida de cavalos.", "corrida", ("cavalos", "corrida cavalo")),
-    HelpEntry("poker", "games", "Jogos", "Abre uma mesa de poker.", "poker @usuário", ("pôquer",)),
-    HelpEntry("truco", "games", "Jogos", "Desafia alguém para truco.", "truco @usuário", ("truco 1v1",)),
-    HelpEntry("roubar", "games", "Jogos", "Tenta roubar fichas de alguém.", "roubar @usuário", ("rob", "roubo"), ("rob",)),
-    HelpEntry(
-        "economia", "games", "Staff", "Configura jogos, fichas e raças.", "/economia",
-        ("config economia", "administrar economia"), permission="economy_staff",
-        slash_root="economia", slash_path="economia", detail_note="Disponível apenas para a staff configurada.",
-    ),
+def _load_help_catalog() -> tuple[tuple[HelpCategory, ...], tuple[HelpEntry, ...]]:
+    raw = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or int(raw.get("version") or 0) != 1:
+        raise RuntimeError("catálogo de ajuda incompatível")
 
-    # Chatbot e imagens
-    HelpEntry("chat", "chatbot", "Conversar", "Conversa com o chatbot.", "@bot mensagem", ("conversar", "mencionar bot", "responder bot")),
-    HelpEntry(
-        "imagem", "chatbot", "Criar", "Gera uma imagem com o perfil ativo.", "/imagem <prompt>",
-        ("gerar imagem", "imagem ia"), slash_root="imagem", slash_path="imagem", suffix=" `prompt`",
-    ),
-    HelpEntry(
-        "reset", "chatbot", "Memória", "Limpa sua memória pessoal do chatbot.", "/reset",
-        ("reset memoria", "limpar memoria", "esquecer"), slash_root="reset", slash_path="reset",
-    ),
-    HelpEntry(
-        "chatbot_profile", "chatbot", "Staff", "Gerencia perfis do chatbot.", "/chatbot profile",
-        ("profile", "profiles", "perfil chatbot"), permission="manage_guild",
-        slash_root="chatbot", slash_path="chatbot profile", detail_note="Requer Gerenciar servidor.",
-    ),
-    HelpEntry(
-        "chatbot_persona", "chatbot", "Staff", "Configura uma persona baseada em usuário.", "/chatbot persona",
-        ("persona",), permission="manage_guild", slash_root="chatbot", slash_path="chatbot persona",
-        detail_note="Requer Gerenciar servidor.",
-    ),
-    HelpEntry(
-        "chatbot_extrovert", "chatbot", "Staff", "Ajusta respostas espontâneas do chatbot.", "/chatbot extrovert",
-        ("extrovert", "extrovertido", "resposta espontanea"), permission="manage_guild",
-        slash_root="chatbot", slash_path="chatbot extrovert", detail_note="Requer Gerenciar servidor.",
-    ),
-    HelpEntry(
-        "chatbot_memoria", "chatbot", "Staff", "Reseta a memória do chatbot no servidor.", "/chatbot memoria",
-        ("memoria servidor", "reset servidor chatbot"), permission="manage_guild",
-        slash_root="chatbot", slash_path="chatbot memoria", detail_note="Requer Gerenciar servidor.",
-    ),
+    categories: list[HelpCategory] = []
+    for item in raw.get("categories") or []:
+        if not isinstance(item, dict):
+            continue
+        accent_name = str(item.get("accent") or "blurple").strip().lower()
+        accent_factory = _ACCENT_FACTORIES.get(accent_name, discord.Color.blurple)
+        categories.append(HelpCategory(
+            key=str(item.get("key") or "").strip(),
+            label=str(item.get("label") or "").strip(),
+            emoji=str(item.get("emoji") or "").strip(),
+            description=str(item.get("description") or "").strip(),
+            accent=accent_factory(),
+            search_terms=_catalog_strings(item.get("search_terms")),
+        ))
 
-    # Servidor
-    HelpEntry("welcome", "server", "Painéis", "Configura boas-vindas.", "{bot_prefix}welcome", ("boas vindas", "boas-vindas", "bv"), ("boasvindas", "boas-vindas", "boas", "bv"), "manage_guild"),
-    HelpEntry("birthday", "server", "Painéis", "Configura aniversários.", "{bot_prefix}birthday", ("aniversario", "aniversário", "aniversarios"), permission="manage_guild"),
-    HelpEntry("ticket", "server", "Painéis", "Publica o painel de tickets.", "{bot_prefix}ticket", ("tickets", "publicar ticket"), permission="ticket_staff"),
-    HelpEntry("ticketedit", "server", "Painéis", "Abre o editor de tickets.", "{bot_prefix}ticketedit", ("editar ticket", "editor ticket"), permission="ticket_staff"),
-    HelpEntry("color", "server", "Personalização", "Publica o painel de cores.", "{bot_prefix}color", ("cores", "painel cores"), permission="administrator", detail_note="Requer Administrador."),
-    HelpEntry("coloredit", "server", "Personalização", "Edita as cores do painel.", "{bot_prefix}coloredit", ("editar cores",), permission="administrator", detail_note="Requer Administrador."),
-    HelpEntry("roleicon", "server", "Personalização", "Gerencia ícones conectados a cargos.", "{bot_prefix}roleicon", ("icone cargo", "ícone cargo", "role icon"), permission="manage_roles", detail_note="Requer Gerenciar cargos."),
-    HelpEntry("form", "server", "Formulário", "Publica ou atualiza o formulário.", "form", ("formulario", "formulário"), permission="kick_or_manage_guild"),
-    HelpEntry("form_config", "server", "Formulário", "Abre a configuração do formulário.", "c", ("config formulario", "configurar formulario", "customizar formulario"), permission="kick_or_manage_guild"),
-    HelpEntry(
-        "say", "server", "Outros", "Envia uma mensagem pelo bot.", "/say",
-        ("falar pelo bot", "mensagem webhook"), permission="say_staff", slash_root="say", slash_path="say",
-        detail_note="Disponível para staff.",
-    ),
-    HelpEntry(
-        "feedback", "server", "Outros", "Envia feedback para o dono do bot.", "/feedback",
-        ("sugestao", "sugestão", "bug", "relato"), permission="feedback_staff", slash_root="feedback", slash_path="feedback",
-        detail_note="Disponível para a staff.",
-    ),
+    entries: list[HelpEntry] = []
+    for item in raw.get("entries") or []:
+        if not isinstance(item, dict):
+            continue
+        category_raw = item.get("category")
+        entries.append(HelpEntry(
+            key=str(item.get("key") or "").strip(),
+            category=str(category_raw).strip() if category_raw is not None else None,
+            group=str(item.get("group") or "").strip(),
+            description=str(item.get("description") or "").strip(),
+            usage=str(item.get("usage") or "").strip(),
+            search_terms=_catalog_strings(item.get("search_terms")),
+            aliases=_catalog_strings(item.get("aliases")),
+            permission=str(item.get("permission") or "user").strip(),
+            slash_root=str(item.get("slash_root") or "").strip() or None,
+            slash_path=str(item.get("slash_path") or "").strip() or None,
+            suffix=str(item.get("suffix") or ""),
+            detail_note=str(item.get("detail_note") or "").strip(),
+            show_in_category=bool(item.get("show_in_category", True)),
+        ))
 
-    # Utilidades diretas, sem ocupar uma categoria própria.
-    HelpEntry(
-        "ping", None, "", "Mostra latência e estado do bot.", "/ping",
-        ("latencia", "latência", "status bot"), slash_root="ping", slash_path="ping",
-    ),
-    HelpEntry(
-        "help", None, "", "Abre esta central de ajuda.", "/help",
-        ("ajuda", "comandos"), slash_root="help", slash_path="help",
-    ),
-)
+    category_keys = {category.key for category in categories}
+    entry_keys = {entry.key for entry in entries}
+    if not categories or not entries or len(category_keys) != len(categories) or len(entry_keys) != len(entries):
+        raise RuntimeError("catálogo de ajuda inválido")
+    if any(entry.category is not None and entry.category not in category_keys for entry in entries):
+        raise RuntimeError("catálogo de ajuda possui categoria desconhecida")
+    return tuple(categories), tuple(entries)
 
+
+CATEGORIES, ENTRIES = _load_help_catalog()
 
 
 _CATEGORY_DIRECT_TERMS: dict[str, tuple[str, ...]] = {

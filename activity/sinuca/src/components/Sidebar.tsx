@@ -1,4 +1,4 @@
-import { Home, LogOut, X } from "lucide-react";
+import { Command, LayoutGrid, LogOut, Settings2, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -6,21 +6,19 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import type { DashboardVisualModule } from "../moduleCatalog";
 import { SmartAvatar } from "./SmartAvatar";
 
+export type DashboardNavigationPage = "general" | "modules" | "commands";
+
 interface SidebarProps {
-  modules: DashboardVisualModule[];
-  selectedSectionId: string;
-  view: "home" | "section";
+  activePage: DashboardNavigationPage;
   mobileOpen: boolean;
   botName?: string;
   botAvatarUrl?: string | null;
   gestureDisabled?: boolean;
   onCloseMobile(): void;
   onOpenMobile(): void;
-  onHome(): void;
-  onSelect(id: string): void;
+  onNavigate(page: DashboardNavigationPage): void;
   onLogout(): void;
 }
 
@@ -61,21 +59,16 @@ function hasBlockingOverlay() {
 }
 
 export function Sidebar({
-  modules,
-  selectedSectionId,
-  view,
+  activePage,
   mobileOpen,
   botName = "Osaka",
   botAvatarUrl,
   gestureDisabled = false,
   onCloseMobile,
   onOpenMobile,
-  onHome,
-  onSelect,
+  onNavigate,
   onLogout,
 }: SidebarProps) {
-  const main = modules.filter((item) => item.group === "main");
-  const system = modules.filter((item) => item.group === "system");
   const asideRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const pointerRef = useRef<DrawerPointer | null>(null);
@@ -289,8 +282,6 @@ export function Sidebar({
     onCloseMobile();
   }, [onCloseMobile, setVisualOpen]);
 
-  const select = (id: string) => onSelect(id);
-  const goHome = () => onHome();
   const width = asideRef.current?.getBoundingClientRect().width || 280;
   const progress = dragging
     ? Math.max(0, Math.min(1, 1 - Math.abs(dragOffset) / width))
@@ -324,21 +315,18 @@ export function Sidebar({
         <button ref={closeRef} type="button" className="osk-sidebar-close" onClick={close} aria-label="Fechar menu"><X size={21} /></button>
       </div>
       <nav>
-        <button className="osk-sidebar-link" data-active={view === "home" || undefined} onClick={goHome}><Home size={18} /><span>Início</span></button>
-        <span className="osk-sidebar-label">Funções</span>
-        {main.map((item, index) => <SidebarLink key={item.id} item={item} index={index} active={view === "section" && selectedSectionId === item.id} onClick={() => select(item.id)} />)}
-        {system.length > 0 && <span className="osk-sidebar-label">Configurações</span>}
-        {system.map((item, index) => <SidebarLink key={item.id} item={item} index={main.length + index} active={view === "section" && selectedSectionId === item.id} onClick={() => select(item.id)} />)}
+        <SidebarLink label="Geral" icon={Settings2} index={0} active={activePage === "general"} onClick={() => onNavigate("general")} />
+        <SidebarLink label="Módulos" icon={LayoutGrid} index={1} active={activePage === "modules"} onClick={() => onNavigate("modules")} />
+        <SidebarLink label="Comandos" icon={Command} index={2} active={activePage === "commands"} onClick={() => onNavigate("commands")} />
       </nav>
       <button className="osk-sidebar-logout" onClick={onLogout}><LogOut size={17} /> Sair do painel</button>
     </aside>
   </>;
 }
 
-function SidebarLink({ item, active, onClick, index }: { item: DashboardVisualModule; active: boolean; onClick(): void; index: number }) {
-  const Icon = item.icon;
-  return <button className="osk-sidebar-link" style={{ "--osk-menu-index": index } as CSSProperties} data-active={active || undefined} onClick={onClick}>
+function SidebarLink({ label, icon: Icon, active, onClick, index }: { label: string; icon: typeof Settings2; active: boolean; onClick(): void; index: number }) {
+  return <button className="osk-sidebar-link" style={{ "--osk-menu-index": index } as CSSProperties} data-active={active || undefined} aria-current={active ? "page" : undefined} onClick={onClick}>
     <Icon size={18} />
-    <span>{item.label}</span>
+    <span>{label}</span>
   </button>;
 }

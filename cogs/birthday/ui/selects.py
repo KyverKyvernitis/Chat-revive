@@ -253,7 +253,7 @@ class _PreferencesActionSelect(discord.ui.Select):
             max_values=1,
             options=[
                 discord.SelectOption(label="Preferências gerais", value="prefs", emoji="⚙️", description="Reação, 29/02, agrupamento e limpeza."),
-                discord.SelectOption(label="Horário dos avisos", value="time", emoji="🕘", description="Hora e fuso horário."),
+                discord.SelectOption(label="Horário dos avisos", value="time", emoji="🕘", description="Hora usada nos avisos automáticos."),
             ],
         )
 

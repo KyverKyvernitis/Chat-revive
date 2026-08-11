@@ -1,5 +1,6 @@
 import type {
   DashboardBootstrapPayload,
+  DashboardCommandsPayload,
   DashboardFullPayload,
   DashboardInvitePayload,
   DashboardOptionsPayload,
@@ -11,6 +12,11 @@ import type {
   DashboardUserPayload,
 } from "../types/dashboard";
 import { DashboardHttpError, fetchDashboardJson, fetchDashboardNdjson } from "./httpClient";
+
+const COMMANDS_CACHE_MS = 30_000;
+const commandsCache = new Map<string, { expiresAt: number; payload: DashboardCommandsPayload }>();
+const commandsRequests = new Map<string, Promise<DashboardCommandsPayload>>();
+const commandsCacheEpoch = new Map<string, number>();
 
 
 export async function fetchDashboardIdentity(signal?: AbortSignal): Promise<{ ok: boolean; bot?: DashboardUserPayload | null; supportServer?: DashboardSupportServerPayload | null }> {
@@ -39,6 +45,39 @@ export async function fetchDashboardSettings(guildId: string): Promise<Dashboard
 
 export async function fetchDashboardOptions(guildId: string): Promise<DashboardOptionsPayload> {
   return await fetchDashboardJson<DashboardOptionsPayload>(`/dashboard/guild/${encodeURIComponent(guildId)}/options`);
+}
+
+export async function fetchDashboardCommands(guildId: string, force = false): Promise<DashboardCommandsPayload> {
+  const cached = commandsCache.get(guildId);
+  if (!force && cached && cached.expiresAt > Date.now()) return cached.payload;
+  const pending = !force ? commandsRequests.get(guildId) : null;
+  if (pending) return await pending;
+
+  const requestEpoch = commandsCacheEpoch.get(guildId) ?? 0;
+  const request = fetchDashboardJson<DashboardCommandsPayload>(`/dashboard/guild/${encodeURIComponent(guildId)}/commands`, { method: "GET" }, 12000)
+    .then((payload) => {
+      if ((commandsCacheEpoch.get(guildId) ?? 0) === requestEpoch) {
+        commandsCache.set(guildId, { expiresAt: Date.now() + COMMANDS_CACHE_MS, payload });
+      }
+      return payload;
+    })
+    .finally(() => {
+      if (commandsRequests.get(guildId) === request) commandsRequests.delete(guildId);
+    });
+  commandsRequests.set(guildId, request);
+  return await request;
+}
+
+export function clearDashboardCommandsCache(guildId?: string): void {
+  if (guildId) {
+    commandsCache.delete(guildId);
+    commandsCacheEpoch.set(guildId, (commandsCacheEpoch.get(guildId) ?? 0) + 1);
+    return;
+  }
+  for (const key of new Set([...commandsCache.keys(), ...commandsRequests.keys(), ...commandsCacheEpoch.keys()])) {
+    commandsCacheEpoch.set(key, (commandsCacheEpoch.get(key) ?? 0) + 1);
+  }
+  commandsCache.clear();
 }
 
 export async function fetchDashboardFull(

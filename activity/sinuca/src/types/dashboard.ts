@@ -206,6 +206,33 @@ export interface DashboardFullPayload {
   error?: string;
 }
 
+export interface DashboardCommandCategory {
+  key: string;
+  label: string;
+  emoji: string;
+  description: string;
+}
+
+export interface DashboardCommandEntry {
+  key: string;
+  category: string;
+  group: string;
+  description: string;
+  usage: string;
+  aliases: string[];
+  keywords: string[];
+}
+
+export interface DashboardCommandsPayload {
+  ok: boolean;
+  guildId: string;
+  catalogVersion: number;
+  musicAvailable: boolean;
+  categories: DashboardCommandCategory[];
+  commands: DashboardCommandEntry[];
+  error?: string;
+}
+
 export interface DashboardFormField {
   id: string;
   label: string;

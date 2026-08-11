@@ -100,12 +100,33 @@ class BirthdayCog(commands.Cog):
         cfg.setdefault("timezone", DEFAULT_TIMEZONE)
         return cfg
 
+    def _server_timezone(self, guild_id: int, legacy_timezone: object = None) -> str:
+        db = self.db
+        guild_cache = getattr(db, "guild_cache", {}) if db is not None else {}
+        guild_doc = guild_cache.get(int(guild_id), {}) if isinstance(guild_cache, dict) else {}
+        candidates = (
+            guild_doc.get("timezone") if isinstance(guild_doc, dict) else None,
+            legacy_timezone,
+            DEFAULT_TIMEZONE,
+        )
+        for candidate in candidates:
+            name = str(candidate or "").strip()
+            if not name:
+                continue
+            try:
+                ZoneInfo(name)
+                return name
+            except Exception:
+                continue
+        return DEFAULT_TIMEZONE
+
     async def _get_config(self, guild_id: int) -> dict[str, Any]:
         db = self.db
         if db is None or not hasattr(db, "coll"):
             return self._normalize_config({"guild_id": int(guild_id)})
         doc = await db.coll.find_one({"type": BIRTHDAY_DOC_CONFIG, "guild_id": int(guild_id)}, {"_id": 0})
         cfg = self._normalize_config(doc or {"guild_id": int(guild_id)})
+        cfg["timezone"] = self._server_timezone(int(guild_id), cfg.get("timezone"))
         try:
             cfg["birthday_count"] = await db.coll.count_documents({"type": BIRTHDAY_DOC_ENTRY, "guild_id": int(guild_id)})
         except Exception:
@@ -119,9 +140,11 @@ class BirthdayCog(commands.Cog):
         cfg = self._normalize_config(config)
         cfg["guild_id"] = int(guild_id)
         cfg["type"] = BIRTHDAY_DOC_CONFIG
+        persisted = dict(cfg)
+        persisted.pop("timezone", None)
         await db.coll.update_one(
             {"type": BIRTHDAY_DOC_CONFIG, "guild_id": int(guild_id)},
-            {"$set": cfg},
+            {"$set": persisted},
             upsert=True,
         )
 
@@ -138,6 +161,8 @@ class BirthdayCog(commands.Cog):
                 templates = dict(cfg.get("templates") or {})
                 templates.update(dict(value or {}))
                 cfg["templates"] = templates
+            elif key == "timezone":
+                continue
             else:
                 cfg[key] = value
         await self._save_config(int(guild_id), cfg)

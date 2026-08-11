@@ -7,7 +7,6 @@ import discord
 from ..constants import (
     DEFAULT_REACTION,
     DEFAULT_TEMPLATES,
-    DEFAULT_TIMEZONE,
     TEMPLATE_DESCRIPTIONS,
     TEMPLATE_LABELS,
     VARIABLE_CATEGORIES,
@@ -288,7 +287,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
         lines = [
             "# ⚙️ Preferências",
             f"**Horário dos avisos:** `{hour:02d}:{minute:02d}`",
-            f"**Fuso:** `{cfg.get('timezone') or DEFAULT_TIMEZONE}`",
+            "-# O fuso horário é definido em Geral no dashboard",
             f"**Reação em data válida:** {opts.get('valid_reaction') or DEFAULT_REACTION}",
             f"**Idade nos avisos:** {'sim' if opts.get('show_age', True) else 'não'}",
             f"**Avisos agrupados:** {'sim' if opts.get('group_announcements', True) else 'não'}",

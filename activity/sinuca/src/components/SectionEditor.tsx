@@ -239,7 +239,7 @@ export function SectionEditor({
 
   return <>
   <section className="osk-dashboard-page osk-section-page" aria-hidden={activeEditor ? true : undefined}>
-    <button className="osk-page-back" onClick={onBack}><ArrowLeft size={16} />Funções</button>
+    <button className="osk-page-back" onClick={onBack}><ArrowLeft size={16} />Módulos</button>
     <header className="osk-function-heading">
       <span className="osk-function-heading-icon"><Icon size={24} /></span>
       <div><h1>{section.label}</h1><p>{module?.description || section.description}</p></div>

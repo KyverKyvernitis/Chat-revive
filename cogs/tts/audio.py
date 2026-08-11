@@ -216,6 +216,7 @@ class QueueItem:
 class GuildTTSState:
     queue: asyncio.Queue
     worker_task: Optional[asyncio.Task] = None
+    dashboard_enabled: bool = True
     last_text_channel_id: Optional[int] = None
     last_channel_id: Optional[int] = None
     warmed_until: float = 0.0
@@ -4059,6 +4060,21 @@ class TTSAudioMixin:
                     return
 
                 fetched_from_queue = False
+
+                if not state.dashboard_enabled:
+                    if prefetched_audio_task is not None:
+                        if not prefetched_audio_task.done():
+                            prefetched_audio_task.cancel()
+                            with contextlib.suppress(BaseException):
+                                await prefetched_audio_task
+                        elif not prefetched_audio_task.cancelled():
+                            with contextlib.suppress(Exception):
+                                prefetched_path, should_cleanup = prefetched_audio_task.result()
+                                if should_cleanup and prefetched_path:
+                                    os.remove(prefetched_path)
+                    if prefetched_item is not None:
+                        state.queue.task_done()
+                    return
 
                 if prefetched_item is not None:
                     item = prefetched_item

@@ -14,7 +14,7 @@ export function HomePage({ modules, onOpen }: HomePageProps) {
     <header className="osk-home-intro">
       <span className="osk-kicker">Visão geral</span>
       <h1>Configure seu servidor.</h1>
-      <p>Escolha uma função. Cada área salva apenas as próprias alterações.</p>
+      <p>Escolha uma função para configurar. Cada área salva as próprias alterações.</p>
     </header>
 
     <FunctionGroup title="Funções" icon={LayoutGrid} items={main} onOpen={onOpen} />
@@ -34,25 +34,27 @@ function FunctionGroup({
   onOpen(id: string): void;
 }) {
   if (!items.length) return null;
+  const showsState = title === "Funções";
+  const activeCount = items.filter((item) => item.state === "active").length;
 
   return <section className="osk-function-group">
-    <header><span><GroupIcon size={15} /><h2>{title}</h2></span><small>{items.length}</small></header>
+    <header>
+      <span><GroupIcon size={15} /><h2>{title}</h2></span>
+      <small aria-label={showsState ? `${activeCount} de ${items.length} funções ativas` : `${items.length} configuração`}>{showsState ? `${activeCount}/${items.length}` : items.length}</small>
+    </header>
     <div className="osk-function-grid">
       {items.map((item) => {
         const Icon = item.icon;
-        const state = item.state === "active" || item.state === "configured"
-          ? "active"
-          : item.state === "partial" || item.state === "pending"
-            ? "partial"
-            : "inactive";
-        const status = item.status || (state === "active" ? "Ativo" : state === "partial" ? "Configuração parcial" : "Inativo");
-        return <button key={item.id} className="osk-function-card" data-state={state} onClick={() => onOpen(item.id)} aria-label={`${item.label}: ${status}`}>
+        const state = item.state === "active" ? "active" : "inactive";
+        const status = state === "active" ? "Ativa" : "Desativada";
+        const accessibleLabel = showsState ? `${item.label}: ${status}` : item.label;
+        return <button key={item.id} className="osk-function-card" data-state={showsState ? state : undefined} onClick={() => onOpen(item.id)} aria-label={accessibleLabel}>
           <span className="osk-function-icon"><Icon size={20} /></span>
           <span className="osk-function-copy">
-            <span className="osk-function-title"><strong>{item.label}</strong><span className="osk-function-state" data-state={state}><i aria-hidden="true" />{status}</span></span>
+            <span className="osk-function-title"><strong>{item.label}</strong>{showsState && <span className="osk-function-state" data-state={state}><i aria-hidden="true" />{status}</span>}</span>
             <small>{item.description}</small>
           </span>
-          <span className="osk-function-arrow"><ArrowRight size={17} /></span>
+          <span className="osk-function-arrow"><ArrowRight size={16} /></span>
         </button>;
       })}
     </div>

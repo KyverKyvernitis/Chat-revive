@@ -37,6 +37,14 @@ interface DashboardFieldControlProps {
 const TEXT_LIKE_CHANNEL_TYPES = new Set([0, 5, 15, 16]);
 const VOICE_CHANNEL_TYPES = new Set([2, 13]);
 const CATEGORY_CHANNEL_TYPE = 4;
+const FUNCTION_TOGGLE_IDS = new Set([
+  "welcome.enabled",
+  "forms.enabled",
+  "tickets.feature_enabled",
+  "color_roles.enabled",
+  "birthday.enabled",
+  "tts.enabled",
+]);
 
 function channelKindForField(field: DashboardFieldDefinition): "category" | "voice" | "text" {
   const hint = `${field.id} ${field.path}`.toLowerCase();
@@ -146,7 +154,10 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange, on
     : null;
 
   if (field.type === "boolean") {
-    return <label className="osk-switch"><input type="checkbox" aria-label={field.label} checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} /><span className="osk-switch-track" /><span className="osk-switch-state">{Boolean(value) ? "Ativado" : "Desativado"}</span></label>;
+    const stateLabel = FUNCTION_TOGGLE_IDS.has(field.id)
+      ? Boolean(value) ? "Ativa" : "Desativada"
+      : Boolean(value) ? "Ativado" : "Desativado";
+    return <label className="osk-switch"><input type="checkbox" aria-label={field.label} checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} /><span className="osk-switch-track" /><span className="osk-switch-state">{stateLabel}</span></label>;
   }
 
   if (field.id === "tts.rate") {

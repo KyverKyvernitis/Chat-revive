@@ -144,6 +144,8 @@ class DashboardSync(commands.Cog):
             await run("TicketsCog", "_refresh_public_panel", int(guild_id))
         if "color_roles" in changed:
             await run("ColorRolesCog", "_refresh_public_panel_messages", int(guild_id))
+        if "tts" in changed:
+            await run("TTSVoice", "_apply_dashboard_enabled_state", guild)
 
     @dashboard_sync_loop.before_loop
     async def before_dashboard_sync_loop(self):

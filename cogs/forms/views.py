@@ -154,6 +154,7 @@ class FormView(discord.ui.LayoutView):
 
         cfg = cog._get_config(guild_id)
         panel = cfg.get("panel") or {}
+        feature_enabled = cog._feature_active(cfg)
         title = str(panel.get("title") or DEFAULT_PANEL["title"])
         description = str(panel.get("description") or DEFAULT_PANEL["description"])
         button_label = _truncate(panel.get("button_label") or DEFAULT_PANEL["button_label"], BUTTON_LABEL_MAX)
@@ -165,6 +166,7 @@ class FormView(discord.ui.LayoutView):
             emoji=button_emoji,
             style=_style_from_name(panel.get("button_style"), discord.ButtonStyle.primary),
             custom_id=f"{CID_SUBMIT_PREFIX}:{self.guild_id}",
+            disabled=not feature_enabled,
         )
         button.callback = self._on_submit_click
 
@@ -172,6 +174,8 @@ class FormView(discord.ui.LayoutView):
             discord.ui.TextDisplay(f"# {title}"),
             discord.ui.TextDisplay(description),
         ]
+        if not feature_enabled:
+            children.extend([discord.ui.Separator(), discord.ui.TextDisplay("_Esta função está desativada no momento._")])
         if media_url:
             children.extend([
                 discord.ui.Separator(),

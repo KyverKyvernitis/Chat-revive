@@ -14,6 +14,7 @@ import {
   MessageSquare,
   Palette,
   PencilLine,
+  Power,
   X,
   Route,
   Send,
@@ -67,6 +68,7 @@ interface ActiveMessageEditor {
 }
 
 const GROUP_DESCRIPTIONS: Record<string, string> = {
+  "Ativação": "Controle quando esta função pode executar novas ações.",
   "Mensagem de entrada": "Canal, formato e conteúdo enviado quando alguém entra.",
   "Mensagem privada": "Mensagem enviada diretamente ao novo membro.",
   "Aparência": "Cores, imagem e detalhes visuais compartilhados.",
@@ -95,6 +97,7 @@ const GROUP_DESCRIPTIONS: Record<string, string> = {
 
 function groupIcon(group: string) {
   const normalized = group.toLocaleLowerCase("pt-BR");
+  if (normalized.includes("ativação")) return Power;
   if (normalized.includes("webhook")) return Webhook;
   if (normalized.includes("mensagem privada")) return Mail;
   if (normalized.includes("mensagem") || normalized.includes("textos")) return MessageSquare;
@@ -241,6 +244,18 @@ export function SectionEditor({
       <span className="osk-function-heading-icon"><Icon size={24} /></span>
       <div><h1>{section.label}</h1><p>{module?.description || section.description}</p></div>
     </header>
+
+    {module?.group === "main" && <aside className="osk-function-runtime" data-state={module.state === "active" ? "active" : "inactive"} aria-label={`Estado da função: ${module.state === "active" ? "Ativa" : "Desativada"}`}>
+      <span className="osk-function-runtime__icon" aria-hidden="true">{module.state === "active" ? <Check size={17} /> : <X size={17} />}</span>
+      <span>
+        <strong>{module.state === "active" ? "Função ativa" : "Função desativada"}</strong>
+        <small>{module.state === "active"
+          ? "Novas ações estão liberadas para este servidor."
+          : module.issues?.length
+            ? module.issues.join(" ")
+            : "As configurações estão preservadas e podem ser editadas normalmente."}</small>
+      </span>
+    </aside>}
 
     {groups && groups.length > 3 && <nav className="osk-section-jump-nav" aria-label={`Áreas de ${section.label}`}>
       {groups.map((group) => <button key={group} type="button" data-active={openGroup === group || undefined} onClick={() => toggleGroup(group, true)}>{group}</button>)}

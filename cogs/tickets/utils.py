@@ -286,6 +286,12 @@ def sanitize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
     base = default_ticket_config()
     raw = cfg if isinstance(cfg, dict) else {}
 
+    if "feature_enabled" in raw:
+        base["feature_enabled"] = bool(raw.get("feature_enabled"))
+    else:
+        legacy_panel = raw.get("panel") if isinstance(raw.get("panel"), dict) else {}
+        base["feature_enabled"] = bool(int(legacy_panel.get("channel_id") or 0) and int(legacy_panel.get("message_id") or 0))
+
     for section in ("panel", "channels", "roles", "enabled", "options", "texts"):
         payload = raw.get(section) if isinstance(raw.get(section), dict) else {}
         base[section].update(payload)

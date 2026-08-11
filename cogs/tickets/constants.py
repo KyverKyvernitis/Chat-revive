@@ -141,6 +141,7 @@ DEFAULT_OPTION_ITEMS: dict[str, dict[str, Any]] = {
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "feature_enabled": False,
     "panel": {
         "channel_id": 0,
         "message_id": 0,

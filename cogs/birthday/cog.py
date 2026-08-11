@@ -75,6 +75,10 @@ class BirthdayCog(commands.Cog):
 
     def _normalize_config(self, config: dict[str, Any] | None) -> dict[str, Any]:
         cfg = dict(config or {})
+        if "enabled" in cfg:
+            cfg["enabled"] = bool(cfg.get("enabled"))
+        else:
+            cfg["enabled"] = bool(int(cfg.get("register_channel_id") or 0) or int(cfg.get("announce_channel_id") or 0))
         cfg.setdefault("type", BIRTHDAY_DOC_CONFIG)
         cfg.setdefault("templates", {})
         templates = dict(DEFAULT_TEMPLATES)
@@ -123,6 +127,8 @@ class BirthdayCog(commands.Cog):
 
     async def _update_config(self, guild_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         cfg = await self._get_config(int(guild_id))
+        if any(key in updates and int(updates.get(key) or 0) > 0 for key in ("register_channel_id", "announce_channel_id")):
+            cfg["enabled"] = True
         for key, value in updates.items():
             if key == "options":
                 opts = dict(cfg.get("options") or {})
@@ -208,6 +214,7 @@ class BirthdayCog(commands.Cog):
         message_id = int(cfg.get("register_message_id") or 0)
         thread_id = int(cfg.get("birthday_thread_id") or 0)
         cfg["register_channel_id"] = int(channel.id)
+        cfg["enabled"] = True
         if message_id and current_channel_id == int(channel.id):
             await self._save_config(int(guild.id), cfg)
             await self._sync_public_calendar(guild)
@@ -534,6 +541,8 @@ class BirthdayCog(commands.Cog):
             return
 
         cfg = await self._get_config(int(message.guild.id))
+        if not bool(cfg.get("enabled", False)):
+            return
         channel_id = int(getattr(message.channel, "id", 0) or 0)
         if not self._is_birthday_thread(message.channel, cfg):
             return
@@ -568,6 +577,8 @@ class BirthdayCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         cfg = await self._get_config(int(member.guild.id))
+        if not bool(cfg.get("enabled", False)):
+            return
         if not bool(cfg.get("options", {}).get("delete_on_leave", True)):
             return
         removed = await self._remove_birthday(int(member.guild.id), int(member.id))
@@ -603,6 +614,8 @@ class BirthdayCog(commands.Cog):
 
     async def _maybe_send_daily_announcements(self, guild: discord.Guild):
         cfg = await self._get_config(int(guild.id))
+        if not bool(cfg.get("enabled", False)):
+            return
         channel_id = int(cfg.get("announce_channel_id") or 0)
         if not channel_id:
             return

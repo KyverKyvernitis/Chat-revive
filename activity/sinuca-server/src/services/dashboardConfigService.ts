@@ -71,11 +71,21 @@ export interface DashboardGuildSummary {
     emoji: string;
     description: string;
     enabled: boolean | null;
-    state: "active" | "inactive" | "partial" | "configured" | "pending";
+    state: "active" | "inactive";
     configured: number;
     total: number;
     status: string;
+    issues: string[];
   }>;
+}
+
+export class DashboardConfigValidationError extends Error {
+  readonly code = "activation_requirements";
+
+  constructor(readonly sectionId: string, readonly issues: string[]) {
+    super(`Não foi possível ativar esta função. ${issues.join(" ")}`);
+    this.name = "DashboardConfigValidationError";
+  }
 }
 
 export interface DashboardConfigService {
@@ -303,6 +313,7 @@ function defaultTicketOption(id: string, label: string, emoji: string, descripti
 
 function defaultFormsConfig() {
   return {
+    enabled: false,
     form_channel_id: 0,
     responses_channel_id: 0,
     active_message_id: 0,
@@ -344,6 +355,7 @@ function defaultTicketsConfig() {
     other: defaultTicketOption("other", "Outros", "⚙️", "Abrir um ticket para outros assuntos.", "modal_ticket", "Explique aqui o que você precisa e aguarde a equipe."),
   };
   return {
+    feature_enabled: false,
     panel: { channel_id: 0, message_id: 0, title: "🎫 Atendimento", description: "Escolha abaixo o tipo de atendimento.", placeholder: "Escolha uma opção", accent_color: "#5865F2", image_url: "", side_image_url: "" },
     channels: { category_id: 0, logs_channel_id: 0, suggestions_channel_id: 0 },
     roles: { staff_role_id: 0, partnership_staff_role_id: 0, report_staff_role_id: 0, other_staff_role_id: 0 },
@@ -386,11 +398,13 @@ function defaultGuildDoc(guildId: string): Record<string, unknown> {
     auto_leave_enabled: true,
     ignored_tts_role_id: 0,
     ignored_tts_role_enabled: false,
+    tts_enabled: true,
     tts_voice_channel_id: 0,
     tts_defaults: { engine: "edge", voice: "", language: "pt-BR", rate: "+0%", pitch: "+0Hz" },
     forms: defaultFormsConfig(),
     tickets: defaultTicketsConfig(),
     color_roles: {
+      enabled: false,
       channel_id: 0,
       message_ids: [],
       panel_count: 3,
@@ -439,6 +453,7 @@ function defaultBirthdayDoc(guildId: string): Record<string, unknown> {
   return {
     type: BIRTHDAY_DOC_CONFIG,
     guild_id: snowflakeToLong(guildId),
+    enabled: false,
     register_channel_id: 0,
     announce_channel_id: 0,
     timezone: "America/Sao_Paulo",
@@ -489,13 +504,13 @@ const sections: DashboardSectionDefinition[] = [
   },
   {
     id: "welcome", label: "Boas-vindas", emoji: "👋", description: "Mensagem pública, DM, cargos automáticos e identidade de envio.",
-    groups: ["Mensagem de entrada", "Mensagem privada", "Aparência", "Cargos"],
+    groups: ["Ativação", "Mensagem de entrada", "Mensagem privada", "Aparência", "Cargos"],
     groupMetadata: {
       "Mensagem de entrada": {
         kind: "message",
         variables: WELCOME_TEMPLATE_VARIABLES,
         settingsFieldIds: [
-          "welcome.enabled", "welcome.channel_id", "welcome.render_mode", "welcome.delete_on_leave_enabled",
+          "welcome.channel_id", "welcome.render_mode", "welcome.delete_on_leave_enabled",
         ],
         editors: [{
           id: "welcome-public",
@@ -531,7 +546,7 @@ const sections: DashboardSectionDefinition[] = [
       },
     },
     fields: [
-      { id: "welcome.enabled", label: "Ativar boas-vindas", type: "boolean", scope: "welcome", path: "enabled", group: "Mensagem de entrada" },
+      { id: "welcome.enabled", label: "Boas-vindas", description: "Ative para enviar novas mensagens de entrada. As configurações ficam preservadas ao desativar.", type: "boolean", scope: "welcome", path: "enabled", group: "Ativação" },
       { id: "welcome.channel_id", label: "Canal de boas-vindas", type: "channel", scope: "welcome", path: "channel_id", group: "Mensagem de entrada" },
       { id: "welcome.render_mode", label: "Formato público", type: "select", scope: "welcome", path: "render_mode", options: WELCOME_MODE_OPTIONS, group: "Mensagem de entrada" },
       { id: "welcome.style", label: "Estilo Components V2", type: "select", scope: "welcome", path: "style", options: WELCOME_STYLE_OPTIONS, group: "Mensagem de entrada" },
@@ -576,7 +591,7 @@ const sections: DashboardSectionDefinition[] = [
   },
   {
     id: "forms", label: "Formulários", emoji: "📝", description: "Painel, perguntas, respostas e aprovação da verificação.",
-    groups: ["Canais", "Painel", "Perguntas", "Resposta", "Aprovação"],
+    groups: ["Ativação", "Canais", "Painel", "Perguntas", "Resposta", "Aprovação"],
     groupMetadata: {
       Painel: {
         kind: "message",
@@ -632,6 +647,7 @@ const sections: DashboardSectionDefinition[] = [
       },
     },
     fields: [
+      { id: "forms.enabled", label: "Formulários", description: "Ative para aceitar novos envios. Respostas pendentes continuam disponíveis ao desativar.", type: "boolean", scope: "guild", path: "forms.enabled", group: "Ativação" },
       { id: "forms.form_channel_id", label: "Canal do formulário", type: "channel", scope: "guild", path: "forms.form_channel_id", group: "Canais" },
       { id: "forms.responses_channel_id", label: "Canal de respostas", type: "channel", scope: "guild", path: "forms.responses_channel_id", group: "Canais" },
       { id: "forms.panel.title", label: "Título do painel", type: "text", scope: "guild", path: "forms.panel.title", maxLength: 250, group: "Painel" },
@@ -662,7 +678,7 @@ const sections: DashboardSectionDefinition[] = [
   },
   {
     id: "tickets", label: "Tickets", emoji: "🎫", description: "Painel, fluxos de atendimento, permissões e transcrições.",
-    groups: ["Painel", "Atendimento", "Comportamento", "Fluxos", "Textos", "Denúncias", "Permissões"],
+    groups: ["Ativação", "Painel", "Atendimento", "Comportamento", "Fluxos", "Textos", "Denúncias", "Permissões"],
     groupMetadata: {
       Painel: {
         kind: "message",
@@ -690,6 +706,7 @@ const sections: DashboardSectionDefinition[] = [
       },
     },
     fields: [
+      { id: "tickets.feature_enabled", label: "Tickets", description: "Ative para permitir novos atendimentos. Tickets já abertos continuam funcionando ao desativar.", type: "boolean", scope: "guild", path: "tickets.feature_enabled", group: "Ativação" },
       { id: "tickets.panel.channel_id", label: "Canal do painel", type: "channel", scope: "guild", path: "tickets.panel.channel_id", group: "Painel" },
       { id: "tickets.panel.title", label: "Título", type: "text", scope: "guild", path: "tickets.panel.title", maxLength: 250, group: "Painel" },
       { id: "tickets.panel.description", label: "Descrição", type: "textarea", scope: "guild", path: "tickets.panel.description", maxLength: 1200, group: "Painel" },
@@ -707,10 +724,10 @@ const sections: DashboardSectionDefinition[] = [
       { id: "tickets.options.allow_multiple_open_tickets", label: "Permitir vários tickets por usuário", type: "boolean", scope: "guild", path: "tickets.options.allow_multiple_open_tickets", group: "Comportamento" },
       { id: "tickets.options.transcript_on_close", label: "Gerar transcrição ao fechar", type: "boolean", scope: "guild", path: "tickets.options.transcript_on_close", group: "Comportamento" },
       { id: "tickets.options.use_server_webhook", label: "Usar identidade do servidor", type: "boolean", scope: "guild", path: "tickets.options.use_server_webhook", group: "Comportamento" },
-      { id: "tickets.enabled.partnership", label: "Ativar Parceria", type: "boolean", scope: "guild", path: "tickets.enabled.partnership", group: "Fluxos" },
-      { id: "tickets.enabled.report", label: "Ativar Denúncia", type: "boolean", scope: "guild", path: "tickets.enabled.report", group: "Fluxos" },
-      { id: "tickets.enabled.suggestion", label: "Ativar Sugestão", type: "boolean", scope: "guild", path: "tickets.enabled.suggestion", group: "Fluxos" },
-      { id: "tickets.enabled.other", label: "Ativar Outros", type: "boolean", scope: "guild", path: "tickets.enabled.other", group: "Fluxos" },
+      { id: "tickets.enabled.partnership", label: "Ativar Parceria", type: "boolean", scope: "guild", path: "tickets.option_items.partnership.enabled", group: "Fluxos" },
+      { id: "tickets.enabled.report", label: "Ativar Denúncia", type: "boolean", scope: "guild", path: "tickets.option_items.report.enabled", group: "Fluxos" },
+      { id: "tickets.enabled.suggestion", label: "Ativar Sugestão", type: "boolean", scope: "guild", path: "tickets.option_items.suggestion.enabled", group: "Fluxos" },
+      { id: "tickets.enabled.other", label: "Ativar Outros", type: "boolean", scope: "guild", path: "tickets.option_items.other.enabled", group: "Fluxos" },
       ...ticketOptionFields("partnership", "Parceria"),
       ...ticketOptionFields("report", "Denúncia"),
       ...ticketOptionFields("suggestion", "Sugestão"),
@@ -743,7 +760,7 @@ const sections: DashboardSectionDefinition[] = [
   },
   {
     id: "color_roles", label: "Cargos de cor", emoji: "🎨", description: "Até três painéis com opções vinculadas aos cargos do servidor.",
-    groups: ["Painel", "Mensagens"],
+    groups: ["Ativação", "Painel", "Mensagens"],
     groupMetadata: {
       Painel: {
         kind: "message",
@@ -764,6 +781,7 @@ const sections: DashboardSectionDefinition[] = [
       },
     },
     fields: [
+      { id: "color_roles.enabled", label: "Cargos de cor", description: "Ative para permitir novas escolhas. Os cargos já aplicados não serão removidos ao desativar.", type: "boolean", scope: "guild", path: "color_roles.enabled", group: "Ativação" },
       { id: "color_roles.channel_id", label: "Canal do painel", type: "channel", scope: "guild", path: "color_roles.channel_id", group: "Painel" },
       { id: "color_roles.panel_layout", label: "Painéis", description: "Adicione, remova e reorganize até três painéis.", type: "color_panel_layout", scope: "guild", path: "color_roles.panel_layout", group: "Painel" },
       { id: "color_roles.slots", label: "Opções dos painéis", description: "Nome e cargo vinculado de cada opção.", type: "color_slots", scope: "guild", path: "color_roles.slots", group: "Painel" },
@@ -774,7 +792,7 @@ const sections: DashboardSectionDefinition[] = [
   },
   {
     id: "birthday", label: "Aniversários", emoji: "🎂", description: "Cadastro, calendário e avisos automáticos de aniversário.",
-    groups: ["Geral", "Canais", "Registro de datas", "Avisos", "Calendário"],
+    groups: ["Ativação", "Geral", "Canais", "Registro de datas", "Avisos", "Calendário"],
     groupMetadata: {
       "Registro de datas": {
         kind: "message",
@@ -813,6 +831,7 @@ const sections: DashboardSectionDefinition[] = [
       },
     },
     fields: [
+      { id: "birthday.enabled", label: "Aniversários", description: "Ative para aceitar cadastros e enviar avisos. As datas existentes ficam preservadas ao desativar.", type: "boolean", scope: "birthday", path: "enabled", group: "Ativação" },
       { id: "birthday.options.allow_update", label: "Permitir atualizar a própria data", type: "boolean", scope: "birthday", path: "options.allow_update", group: "Geral" },
       { id: "birthday.register_channel_id", label: "Canal do calendário/cadastro", type: "channel", scope: "birthday", path: "register_channel_id", group: "Canais" },
       { id: "birthday.announce_channel_id", label: "Canal de avisos", type: "channel", scope: "birthday", path: "announce_channel_id", group: "Canais" },
@@ -834,9 +853,10 @@ const sections: DashboardSectionDefinition[] = [
     ],
   },
   {
-    id: "tts", label: "Texto pra Voz", emoji: "🔊", description: "Engine, voz, idioma, prefixos e comportamento do leitor.",
-    groups: ["Voz", "Prefixos", "Comportamento"],
+    id: "tts", label: "Texto pra Voz", emoji: "🔊", description: "Vozes, idiomas, prefixos e comportamento de leitura.",
+    groups: ["Ativação", "Voz", "Prefixos", "Comportamento"],
     fields: [
+      { id: "tts.enabled", label: "Texto pra Voz", description: "Ative para ler novas mensagens. Ao desativar, a fala atual termina e a fila pendente é descartada.", type: "boolean", scope: "guild", path: "tts_enabled", group: "Ativação" },
       { id: "tts.engine", label: "Mecanismo de voz", type: "select", scope: "guild", path: "tts_defaults.engine", options: TTS_ENGINE_OPTIONS, group: "Voz" },
       { id: "tts.voice", label: "Voz", description: "Voz usada pelo Microsoft Edge.", type: "select", scope: "guild", path: "tts_defaults.voice", options: TTS_VOICE_OPTIONS, group: "Voz" },
       { id: "tts.language", label: "Idioma", description: "Idioma usado pelo Google TTS.", type: "select", scope: "guild", path: "tts_defaults.language", options: TTS_LANGUAGE_OPTIONS, group: "Voz" },
@@ -887,6 +907,47 @@ function deepMerge(defaults: Record<string, unknown>, raw: Record<string, unknow
     else result[key] = value;
   }
   return result;
+}
+function hasOwn(source: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(source, key);
+}
+function hasStoredId(value: unknown): boolean {
+  const serialized = serializeSnowflake(value);
+  return Boolean(serialized && serialized !== "0");
+}
+export function applyLegacyFeatureFlags(type: string, raw: Record<string, unknown>, merged: Record<string, unknown>) {
+  if (type === "guild") {
+    const rawForms = isPlainObject(raw.forms) ? raw.forms : {};
+    const forms = isPlainObject(merged.forms) ? merged.forms : {};
+    if (!hasOwn(rawForms, "enabled")) {
+      forms.enabled = hasStoredId(forms.form_channel_id)
+        && hasStoredId(forms.responses_channel_id)
+        && hasStoredId(forms.active_message_id);
+    }
+    merged.forms = forms;
+
+    const rawTickets = isPlainObject(raw.tickets) ? raw.tickets : {};
+    const tickets = isPlainObject(merged.tickets) ? merged.tickets : {};
+    if (!hasOwn(rawTickets, "feature_enabled")) {
+      const panel = isPlainObject(tickets.panel) ? tickets.panel : {};
+      tickets.feature_enabled = hasStoredId(panel.channel_id) && hasStoredId(panel.message_id);
+    }
+    merged.tickets = tickets;
+
+    const rawColors = isPlainObject(raw.color_roles) ? raw.color_roles : {};
+    const colors = isPlainObject(merged.color_roles) ? merged.color_roles : {};
+    if (!hasOwn(rawColors, "enabled")) {
+      const messageIds = Array.isArray(colors.message_ids) ? colors.message_ids : [];
+      colors.enabled = hasStoredId(colors.channel_id) && messageIds.some(hasStoredId);
+    }
+    merged.color_roles = colors;
+
+    if (!hasOwn(raw, "tts_enabled")) merged.tts_enabled = true;
+  }
+
+  if (type === BIRTHDAY_DOC_CONFIG && !hasOwn(raw, "enabled")) {
+    merged.enabled = hasStoredId(merged.register_channel_id) || hasStoredId(merged.announce_channel_id);
+  }
 }
 function getPath(source: Record<string, unknown>, path: string): unknown {
   let current: unknown = source;
@@ -1101,62 +1162,65 @@ function isConfiguredValue(value: unknown): boolean {
 
 type DashboardSectionState = {
   enabled: boolean | null;
-  state: "active" | "inactive" | "partial" | "configured" | "pending";
+  state: "active" | "inactive";
   status: string;
+  issues: string[];
 };
 
 function hasValue(values: Record<string, unknown>, fieldId: string): boolean {
   return isConfiguredValue(values[fieldId]);
 }
 
-function sectionState(sectionId: string, values: Record<string, unknown>): DashboardSectionState {
+function binarySectionState(enabled: boolean, issues: string[]): DashboardSectionState {
+  const active = enabled && issues.length === 0;
+  return { enabled, state: active ? "active" : "inactive", status: active ? "Ativa" : "Desativada", issues };
+}
+
+export function resolveDashboardSectionState(sectionId: string, values: Record<string, unknown>): DashboardSectionState {
   if (sectionId === "welcome") {
     const enabled = Boolean(values["welcome.enabled"]);
-    const hasChannel = hasValue(values, "welcome.channel_id");
-    if (!enabled) return { enabled: false, state: "inactive", status: "Desativada" };
-    if (!hasChannel) return { enabled: true, state: "partial", status: "Requer canal" };
-    return { enabled: true, state: "active", status: "Ativa" };
+    const issues = hasValue(values, "welcome.channel_id") ? [] : ["Selecione o canal de boas-vindas."];
+    return binarySectionState(enabled, issues);
   }
 
   if (sectionId === "birthday") {
+    const enabled = Boolean(values["birthday.enabled"]);
     const register = hasValue(values, "birthday.register_channel_id");
     const announce = hasValue(values, "birthday.announce_channel_id");
-    if (register && announce) return { enabled: null, state: "active", status: "Ativa" };
-    if (register || announce) return { enabled: null, state: "partial", status: "Configuração parcial" };
-    return { enabled: null, state: "pending", status: "Não configurada" };
+    const issues = register || announce ? [] : ["Selecione um canal de cadastro ou de avisos."];
+    return binarySectionState(enabled, issues);
   }
 
   if (sectionId === "forms") {
+    const enabled = Boolean(values["forms.enabled"]);
     const formChannel = hasValue(values, "forms.form_channel_id");
     const responseChannel = hasValue(values, "forms.responses_channel_id");
-    if (formChannel && responseChannel) return { enabled: null, state: "active", status: "Ativa" };
-    if (formChannel || responseChannel) return { enabled: null, state: "partial", status: "Configuração parcial" };
-    return { enabled: null, state: "pending", status: "Não configurada" };
+    const issues: string[] = [];
+    if (!formChannel) issues.push("Selecione o canal do formulário.");
+    if (!responseChannel) issues.push("Selecione o canal de respostas.");
+    return binarySectionState(enabled, issues);
   }
 
   if (sectionId === "tickets") {
+    const enabled = Boolean(values["tickets.feature_enabled"]);
     const panel = hasValue(values, "tickets.panel.channel_id");
-    const category = hasValue(values, "tickets.channels.category_id");
-    const staff = hasValue(values, "tickets.roles.staff_role_id");
-    const enabledFlow = ["partnership", "report", "suggestion", "other"].some((flow) => Boolean(values[`tickets.enabled.${flow}`]));
-    if (panel && category && staff && enabledFlow) return { enabled: null, state: "active", status: "Ativa" };
-    // Fluxos possuem padrões habilitados; sozinhos não significam que o módulo foi configurado.
-    if (panel || category || staff) return { enabled: null, state: "partial", status: "Configuração parcial" };
-    return { enabled: null, state: "pending", status: "Não configurada" };
+    const enabledFlow = ["partnership", "report", "suggestion", "other"].some((flow) => Boolean(values[`tickets.option_items.${flow}.enabled`] ?? values[`tickets.enabled.${flow}`]));
+    const issues: string[] = [];
+    if (!panel) issues.push("Selecione o canal do painel.");
+    if (!enabledFlow) issues.push("Ative pelo menos um fluxo de atendimento.");
+    return binarySectionState(enabled, issues);
   }
 
   if (sectionId === "color_roles") {
+    const enabled = Boolean(values["color_roles.enabled"]);
     const panel = hasValue(values, "color_roles.channel_id");
-    const slots = values["color_roles.slots"];
-    const hasLinkedRole = isPlainObject(slots) && Object.values(slots).some((slot) => isPlainObject(slot) && isConfiguredValue(slot.role_id));
-    if (panel && hasLinkedRole) return { enabled: null, state: "active", status: "Ativa" };
-    if (panel || hasLinkedRole) return { enabled: null, state: "partial", status: "Configuração parcial" };
-    return { enabled: null, state: "pending", status: "Não configurada" };
+    const issues: string[] = [];
+    if (!panel) issues.push("Selecione o canal dos painéis.");
+    return binarySectionState(enabled, issues);
   }
 
-  if (sectionId === "tts") return { enabled: null, state: "configured", status: "Disponível" };
-  if (sectionId === "general") return { enabled: null, state: "configured", status: "Configurado" };
-  return { enabled: null, state: "configured", status: "Configurado" };
+  if (sectionId === "tts") return binarySectionState(Boolean(values["tts.enabled"]), []);
+  return { enabled: null, state: "inactive", status: "", issues: [] };
 }
 
 export function createDashboardConfigService(options: CreateDashboardConfigServiceOptions): DashboardConfigService {
@@ -1176,7 +1240,10 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
   async function readDoc(guildId: string, type: string, defaults: Record<string, unknown>) {
     const collection = await getCollection();
     const doc = await collection.findOne({ type, guild_id: snowflakeToLong(guildId) }, { projection: { _id: 0 } });
-    return deepMerge(defaults, (doc as Record<string, unknown> | null) ?? {});
+    const raw = (doc as Record<string, unknown> | null) ?? {};
+    const merged = deepMerge(defaults, raw);
+    applyLegacyFeatureFlags(type, raw, merged);
+    return merged;
   }
   async function readAll(guildId: string) {
     const [guild, welcome, birthday] = await Promise.all([
@@ -1221,12 +1288,12 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
       return {
         guildId,
         sections: sections.map((section) => {
-          const semantic = sectionState(section.id, values);
+          const semantic = resolveDashboardSectionState(section.id, values);
           const configured = section.fields.filter((field) => isConfiguredValue(values[field.id])).length;
           return {
             id: section.id, label: section.label, emoji: section.emoji, description: section.description,
             enabled: semantic.enabled, state: semantic.state, configured, total: section.fields.length,
-            status: semantic.status,
+            status: semantic.status, issues: semantic.issues,
           };
         }),
       };
@@ -1264,6 +1331,21 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
         dotSetForPath(guildPatch, "color_roles.panel_layout", layout);
         dotSetForPath(guildPatch, "color_roles.panel_count", panelCount);
         patches.set("guild", guildPatch);
+      }
+
+      const activationFields: Record<string, string> = {
+        welcome: "welcome.enabled",
+        forms: "forms.enabled",
+        tickets: "tickets.feature_enabled",
+        color_roles: "color_roles.enabled",
+        birthday: "birthday.enabled",
+        tts: "tts.enabled",
+      };
+      const nextValues = valuesFromDocs(docs);
+      for (const [sectionId, fieldId] of Object.entries(activationFields)) {
+        if (!saved.includes(fieldId) || !Boolean(nextValues[fieldId])) continue;
+        const semantic = resolveDashboardSectionState(sectionId, nextValues);
+        if (semantic.issues.length) throw new DashboardConfigValidationError(sectionId, semantic.issues);
       }
 
       if (saved.length && changedSections.has("welcome")) {

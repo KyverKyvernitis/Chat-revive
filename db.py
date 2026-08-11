@@ -652,6 +652,7 @@ class SettingsDB:
         g = self.guild_cache.get(guild_id, {})
         tts = g.get("tts_defaults", {}) or {}
         return {
+            "enabled": bool(g.get("tts_enabled", True)),
             "engine": str(tts.get("engine", "") or ""),
             "voice": str(tts.get("voice", "") or ""),
             "language": str(tts.get("language", "") or ""),
@@ -681,6 +682,7 @@ class SettingsDB:
         self,
         guild_id: int,
         *,
+        enabled: Optional[bool] = None,
         engine: Optional[str] = None,
         voice: Optional[str] = None,
         language: Optional[str] = None,
@@ -705,6 +707,8 @@ class SettingsDB:
         doc = self._get_guild_doc(guild_id)
         tts = doc.get("tts_defaults", {}) or {}
 
+        if enabled is not None:
+            doc["tts_enabled"] = bool(enabled)
         if engine is not None:
             tts["engine"] = engine
         if voice is not None:
@@ -2183,6 +2187,7 @@ def _settingsdb_color_roles_defaults() -> dict[str, Any]:
             "managed": False,
         }
     return {
+        "enabled": False,
         "channel_id": 0,
         "message_ids": [],
         "panel_count": 3,
@@ -2274,6 +2279,10 @@ def _settingsdb_get_color_roles_config(self, guild_id: int) -> Dict[str, Any]:
     doc = self._get_guild_doc(guild_id)
     raw = deepcopy(doc.get("color_roles") or {})
     base = _settingsdb_color_roles_defaults()
+    if "enabled" in raw:
+        base["enabled"] = bool(raw.get("enabled"))
+    else:
+        base["enabled"] = bool(int(raw.get("channel_id") or 0) and list(raw.get("message_ids") or []))
     base["channel_id"] = int(raw.get("channel_id", base["channel_id"]) or 0)
     base["message_ids"] = [int(mid) for mid in (raw.get("message_ids") or []) if str(mid).isdigit()]
     try:
@@ -2435,6 +2444,7 @@ SettingsDB.set_role_icons_config = _settingsdb_set_role_icons_config
 
 def _settingsdb_forms_defaults() -> Dict[str, Any]:
     return {
+        "enabled": False,
         "form_channel_id": 0,
         "responses_channel_id": 0,
         "active_message_id": 0,
@@ -2530,6 +2540,15 @@ def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
     doc = self._get_guild_doc(guild_id)
     raw = deepcopy(doc.get("forms") or {})
     base = _settingsdb_forms_defaults()
+
+    if "enabled" in raw:
+        base["enabled"] = bool(raw.get("enabled"))
+    else:
+        base["enabled"] = bool(
+            int(raw.get("form_channel_id") or 0)
+            and int(raw.get("responses_channel_id") or 0)
+            and int(raw.get("active_message_id") or 0)
+        )
 
     base["form_channel_id"] = int(raw.get("form_channel_id") or 0)
     base["responses_channel_id"] = int(raw.get("responses_channel_id") or 0)
@@ -2776,6 +2795,7 @@ def _settingsdb_tickets_defaults() -> Dict[str, Any]:
         return default_ticket_config()
     except Exception:
         return {
+            "feature_enabled": False,
             "panel": {"channel_id": 0, "message_id": 0, "title": "🎫 Atendimento", "description": "Escolha abaixo o tipo de atendimento.", "placeholder": "Escolha uma opção", "accent_color": "#5865F2"},
             "channels": {"category_id": 0, "logs_channel_id": 0, "suggestions_channel_id": 0},
             "roles": {"staff_role_id": 0, "partnership_staff_role_id": 0, "report_staff_role_id": 0, "other_staff_role_id": 0},

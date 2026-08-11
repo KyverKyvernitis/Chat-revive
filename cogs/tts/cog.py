@@ -3415,6 +3415,36 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         return cleared
 
+    async def _apply_dashboard_enabled_state(self, guild: discord.Guild | None) -> int:
+        """Descarta apenas falas pendentes quando o dashboard desativa o TTS.
+
+        A reprodução atual não é interrompida e nenhum novo estado é criado.
+        """
+        if guild is None:
+            return 0
+        db = self._get_db()
+        defaults = await self._maybe_await(db.get_guild_tts_defaults(guild.id)) if db else {}
+        state = self.guild_states.get(int(guild.id))
+        enabled = bool((defaults or {}).get("enabled", True))
+        if state is not None:
+            state.dashboard_enabled = enabled
+        if enabled:
+            return 0
+        if state is None:
+            return 0
+        cleared = 0
+        while True:
+            try:
+                item = state.queue.get_nowait()
+                try:
+                    self._decrement_pending_signature(state, item)
+                finally:
+                    state.queue.task_done()
+                    cleared += 1
+            except asyncio.QueueEmpty:
+                break
+        return cleared
+
     async def _prefix_leave(self, message: discord.Message):
         if not message.guild:
             return

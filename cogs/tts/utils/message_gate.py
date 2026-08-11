@@ -78,6 +78,9 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             reason="prefix_command",
         )
 
+    if not bool(guild_defaults.get("enabled", True)):
+        return MessageGateDecision(False, False, guild_defaults, reason="tts_guild_disabled")
+
     # Compatibilidade com o prefixo antigo único. Servidores antigos podem ter
     # só `tts_prefix=,`; nesse caso o split novo cria gTTS=`,` e Edge=`,` ao
     # mesmo tempo, e a ordem antiga acabava forçando Edge silenciosamente.

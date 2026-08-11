@@ -78,6 +78,7 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
 _DEFAULT_MESSAGE = {"title": "", "subtitle": "", "footer": ""}
 
 _DEFAULT_CONFIG: dict[str, Any] = {
+    "enabled": False,
     "channel_id": 0,
     "message_ids": [],
     "panel_count": 3,
@@ -488,8 +489,8 @@ class _ColorRoleLinkModal(discord.ui.Modal):
 
 
 class _ColorPickerButton(discord.ui.Button):
-    def __init__(self, cog: "ColorRolesCog", guild_id: int, slot_number: int, position: int):
-        super().__init__(label=_math_sans_bold(str(position)), style=discord.ButtonStyle.secondary, custom_id=f"color:pick:{guild_id}:{slot_number}")
+    def __init__(self, cog: "ColorRolesCog", guild_id: int, slot_number: int, position: int, *, disabled: bool = False):
+        super().__init__(label=_math_sans_bold(str(position)), style=discord.ButtonStyle.secondary, custom_id=f"color:pick:{guild_id}:{slot_number}", disabled=disabled)
         self.cog = cog
         self.guild_id = int(guild_id)
         self.slot_number = int(slot_number)
@@ -504,9 +505,11 @@ class _ColorPublicPanelView(discord.ui.View):
         self.cog = cog
         self.guild_id = int(guild_id)
         self.block_index = int(block_index)
+        cfg = self.cog._get_config(self.guild_id)
+        feature_enabled = bool(cfg.get("enabled", False) and int(cfg.get("channel_id") or 0))
         if _message_supports_slots(block_index):
             for position, slot_number in enumerate(self.cog._get_panel_slot_numbers(self.guild_id, block_index), start=1):
-                self.add_item(_ColorPickerButton(self.cog, self.guild_id, slot_number, position))
+                self.add_item(_ColorPickerButton(self.cog, self.guild_id, slot_number, position, disabled=not feature_enabled))
 
 
 class _ConfirmActionView(discord.ui.View):
@@ -1138,6 +1141,10 @@ class ColorRolesCog(commands.Cog):
     def _sanitize_config(self, guild_id: int, config: dict[str, Any]) -> dict[str, Any]:
         base = _deepcopy_default_config()
         payload = deepcopy(config or {})
+        if "enabled" in payload:
+            base["enabled"] = bool(payload.get("enabled"))
+        else:
+            base["enabled"] = bool(int(payload.get("channel_id") or 0) and list(payload.get("message_ids") or []))
         base["channel_id"] = int(payload.get("channel_id") or 0)
         base["message_ids"] = [int(mid) for mid in (payload.get("message_ids") or []) if str(mid).isdigit()]
         raw_count = int(payload.get("panel_count") or COLOR_BLOCK_COUNT)
@@ -1637,6 +1644,9 @@ class ColorRolesCog(commands.Cog):
             await reply("Esse painel só funciona dentro de um servidor.")
             return
         cfg = self._get_config(guild.id)
+        if not bool(cfg.get("enabled", False) and int(cfg.get("channel_id") or 0)):
+            await reply("A função de cargos de cor está desativada neste servidor.")
+            return
         message_ids = [int(mid) for mid in (cfg.get("message_ids") or []) if mid]
         interaction_message_id = int(getattr(interaction.message, "id", 0) or 0)
         if interaction_message_id not in message_ids:
@@ -1882,9 +1892,11 @@ class ColorRolesCog(commands.Cog):
         await self._delete_existing_panel_messages(ctx.guild.id)
         message_ids = await self._post_public_panel(ctx.channel, ctx.guild)
         cfg = self._get_config(ctx.guild.id)
+        cfg["enabled"] = True
         cfg["channel_id"] = int(ctx.channel.id)
         cfg["message_ids"] = message_ids
         await self._save_config(ctx.guild.id, cfg)
+        await self._refresh_public_panel_messages(ctx.guild.id)
         confirmation = await ctx.send(f"Painel de cores publicado com {self._get_panel_count(ctx.guild.id)} mensagem(ns).")
         asyncio.create_task(self._delete_message_after(confirmation))
         asyncio.create_task(self._delete_message_after(getattr(ctx, "message", None)))

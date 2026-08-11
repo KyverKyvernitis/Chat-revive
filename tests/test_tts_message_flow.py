@@ -89,6 +89,13 @@ def _install_runtime_stubs() -> None:
     if "google.cloud.texttospeech_v1" not in sys.modules:
         sys.modules["google.cloud.texttospeech_v1"] = types.ModuleType("google.cloud.texttospeech_v1")
 
+    if "aiohttp" not in sys.modules:
+        aiohttp = types.ModuleType("aiohttp")
+        aiohttp.ClientSession = type("ClientSession", (), {})
+        aiohttp.ClientTimeout = type("ClientTimeout", (), {})
+        aiohttp.TCPConnector = type("TCPConnector", (), {})
+        sys.modules["aiohttp"] = aiohttp
+
 
 _install_runtime_stubs()
 
@@ -164,6 +171,17 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(decision.should_dispatch_prefix_command)
         self.assertEqual(decision.reason, "prefix_command")
         self.assertEqual(decision.prefix_command.kind, "join")
+
+    async def test_disabled_guild_blocks_speech_but_keeps_control_commands(self):
+        cog = FakeCog(db=FakeDB(guild_defaults={"enabled": False, "bot_prefix": "_", "tts_prefix": "."}))
+
+        speech = await analyze_message_for_tts(cog, make_message(".olá"))
+        command = await analyze_message_for_tts(cog, make_message("_join"))
+
+        self.assertFalse(speech.should_process_tts)
+        self.assertEqual(speech.reason, "tts_guild_disabled")
+        self.assertTrue(command.should_dispatch_prefix_command)
+        self.assertEqual(command.reason, "prefix_command")
 
     async def test_tts_message_enqueues_through_dispatch(self):
         cog = FakeCog(db=FakeDB(guild_defaults={"tts_prefix": "."}, resolved={"engine": "edge", "voice": "pt-BR-FranciscaNeural", "rate": "+0%", "pitch": "+0Hz"}))

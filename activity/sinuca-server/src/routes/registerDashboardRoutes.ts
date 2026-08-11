@@ -1,5 +1,5 @@
 import type { Express, Request, Response } from "express";
-import type { DashboardConfigService } from "../services/dashboardConfigService.js";
+import { DashboardConfigValidationError, type DashboardConfigService } from "../services/dashboardConfigService.js";
 import type { DashboardOAuthTokenResult, DashboardSessionService } from "../services/dashboardSessionService.js";
 import {
   createDashboardInviteUrl,
@@ -444,6 +444,10 @@ export function registerDashboardRoutes({
         sendNoStoreJson(res, 200, { ...result, summary: null, summary_error: "summary_refresh_failed" });
       }
     } catch (error) {
+      if (error instanceof DashboardConfigValidationError) {
+        sendNoStoreJson(res, 400, { ok: false, error: error.code, message: error.message, section: error.sectionId, issues: error.issues });
+        return;
+      }
       sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "save_failed" });
     }
   });

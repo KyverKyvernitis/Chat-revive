@@ -155,14 +155,15 @@ def _select_value(select: discord.ui.Select, interaction: discord.Interaction) -
 
 
 class TicketPublicPanelView(discord.ui.LayoutView):
-    def __init__(self, cog: "TicketsCog", guild_id: int):
+    def __init__(self, cog: "TicketsCog", guild_id: int, *, feature_enabled: bool | None = None):
         super().__init__(timeout=None)
         self.cog = cog
         self.guild_id = int(guild_id)
         cfg = cog._get_config(self.guild_id)
         panel = cfg.get("panel") or {}
+        feature_enabled = cog._feature_active(cfg) if feature_enabled is None else bool(feature_enabled)
         options: list[discord.SelectOption] = []
-        for item in iter_ticket_options(cfg, include_disabled=False):
+        for item in iter_ticket_options(cfg, include_disabled=False) if feature_enabled else []:
             option_id = str(item.get("id") or "")
             if not option_id:
                 continue
@@ -193,8 +194,10 @@ class TicketPublicPanelView(discord.ui.LayoutView):
             select.callback = self._on_select
             self.select = select
             children.extend([discord.ui.Separator(), discord.ui.ActionRow(select)])
-        else:
+        elif feature_enabled:
             children.extend([discord.ui.Separator(), discord.ui.TextDisplay("_Nenhuma opção está ativa no momento._")])
+        else:
+            children.extend([discord.ui.Separator(), discord.ui.TextDisplay("_Esta função está desativada no momento._")])
 
         self.add_item(discord.ui.Container(
             *children,

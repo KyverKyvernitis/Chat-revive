@@ -115,6 +115,14 @@ class TicketsCog(commands.Cog):
             log.warning("[tickets] erro ao ler config gid=%s: %r", guild_id, exc)
             return sanitize_config(default_ticket_config())
 
+    @staticmethod
+    def _feature_active(cfg: dict[str, Any]) -> bool:
+        panel = (cfg or {}).get("panel") or {}
+        option_items = (cfg or {}).get("option_items")
+        option_items = option_items if isinstance(option_items, dict) else {}
+        has_flow = any(bool(item.get("enabled", True)) for item in option_items.values() if isinstance(item, dict))
+        return bool((cfg or {}).get("feature_enabled", False) and int(panel.get("channel_id") or 0) and has_flow)
+
     async def _save_config(self, guild_id: int, cfg: dict[str, Any]):
         cfg = sanitize_config(cfg)
         db = self.db
@@ -185,7 +193,7 @@ class TicketsCog(commands.Cog):
             pass
 
     async def _publish_panel(self, channel: discord.abc.Messageable, guild_id: int) -> discord.Message:
-        view = TicketPublicPanelView(self, guild_id)
+        view = TicketPublicPanelView(self, guild_id, feature_enabled=True)
         cfg = self._get_config(guild_id)
         message = await send_with_server_identity(cfg, channel, view=view, wait=True)
         if message is None:
@@ -196,6 +204,7 @@ class TicketsCog(commands.Cog):
             pass
         self._registered_panel_views.add((int(guild_id), int(message.id)))
         cfg = self._get_config(guild_id)
+        cfg["feature_enabled"] = True
         cfg["panel"]["channel_id"] = int(getattr(channel, "id", 0) or 0)
         cfg["panel"]["message_id"] = int(message.id)
         await self._save_config(guild_id, cfg)
@@ -263,6 +272,9 @@ class TicketsCog(commands.Cog):
             await interaction.response.send_message("Esse painel só funciona dentro de servidor.", ephemeral=True)
             return
         cfg = self._get_config(guild.id)
+        if not self._feature_active(cfg):
+            await self._reply_interaction(interaction, "A função de tickets está desativada neste servidor.")
+            return
         option = get_ticket_option(cfg, value)
         if not option:
             await interaction.response.send_message("Opção inválida ou desatualizada. Peça para a staff atualizar o painel.", ephemeral=True)
@@ -296,6 +308,9 @@ class TicketsCog(commands.Cog):
             await interaction.response.send_message("Servidor não encontrado.", ephemeral=True)
             return
         cfg = self._get_config(guild.id)
+        if not self._feature_active(cfg):
+            await self._reply_interaction(interaction, "A função de tickets está desativada neste servidor.")
+            return
         channel_id = int((cfg.get("channels") or {}).get("suggestions_channel_id") or 0)
         channel = self.bot.get_channel(channel_id)
         if channel is None or not hasattr(channel, "send"):
@@ -322,6 +337,9 @@ class TicketsCog(commands.Cog):
             await interaction.response.send_message("Servidor não encontrado.", ephemeral=True)
             return
         cfg = self._get_config(guild.id)
+        if not self._feature_active(cfg):
+            await self._reply_interaction(interaction, "A função de tickets está desativada neste servidor.")
+            return
         option = get_ticket_option(cfg, option_id) or {}
         channel_id = int(option.get("target_channel_id") or 0) or int((cfg.get("channels") or {}).get("suggestions_channel_id") or 0)
         channel = self.bot.get_channel(channel_id)
@@ -401,6 +419,9 @@ class TicketsCog(commands.Cog):
         lock = self._guild_locks.setdefault(guild_id, asyncio.Lock())
         async with lock:
             cfg = self._get_config(guild_id)
+            if not self._feature_active(cfg):
+                await self._reply_interaction(interaction, "A função de tickets está desativada neste servidor.")
+                return
             existing = self._find_user_open_ticket(cfg, int(interaction.user.id))
             if existing:
                 await self._reply_interaction(interaction, f"Você já tem um atendimento aberto: <#{int(existing.get('channel_id'))}>.", ephemeral=True)

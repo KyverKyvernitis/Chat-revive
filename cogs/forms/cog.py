@@ -213,9 +213,19 @@ class FormsCog(commands.Cog):
         if not isinstance(cfg, dict):
             return base
 
+        legacy_enabled = None
+        if "enabled" not in cfg:
+            legacy_enabled = bool(
+                int(cfg.get("form_channel_id") or 0)
+                and int(cfg.get("responses_channel_id") or 0)
+                and int(cfg.get("active_message_id") or 0)
+            )
+
         for key, value in base.items():
             if key not in cfg:
                 cfg[key] = deepcopy(value)
+
+        cfg["enabled"] = bool(legacy_enabled if legacy_enabled is not None else cfg.get("enabled", False))
 
         for section in ("panel", "modal", "response", "approval"):
             current = cfg.get(section)
@@ -245,6 +255,7 @@ class FormsCog(commands.Cog):
     @staticmethod
     def _default_config() -> dict[str, Any]:
         return {
+            "enabled": False,
             "form_channel_id": 0,
             "responses_channel_id": 0,
             "active_message_id": 0,
@@ -285,6 +296,14 @@ class FormsCog(commands.Cog):
 
     def _is_staff(self, member: discord.Member) -> bool:
         return _is_staff_member(member)
+
+    @staticmethod
+    def _feature_active(cfg: dict[str, Any]) -> bool:
+        return bool(
+            (cfg or {}).get("enabled", False)
+            and int((cfg or {}).get("form_channel_id") or 0)
+            and int((cfg or {}).get("responses_channel_id") or 0)
+        )
 
     # ===== Delete with fallback =====
 
@@ -403,6 +422,7 @@ class FormsCog(commands.Cog):
         """Salva config + posta form no canal escolhido + atualiza msg de setup."""
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
+        cfg["enabled"] = True
         cfg["form_channel_id"] = int(form_channel_id)
         cfg["responses_channel_id"] = int(resp_channel_id)
         await self._save_config(guild_id, cfg)
@@ -606,6 +626,9 @@ class FormsCog(commands.Cog):
 
     async def _handle_submit_click(self, interaction: discord.Interaction, guild_id: int):
         """Callback do botão do form: abre o modal de submissão."""
+        if not self._feature_active(self._get_config(int(guild_id))):
+            await self._safe_send_ephemeral(interaction, "A função de formulários está desativada neste servidor.")
+            return
         try:
             await interaction.response.send_modal(FormSubmissionModal(self, guild_id))
         except discord.HTTPException as e:
@@ -623,6 +646,9 @@ class FormsCog(commands.Cog):
         await self._safe_defer_ephemeral(interaction)
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
+        if not self._feature_active(cfg):
+            await self._safe_send_ephemeral(interaction, "A função de formulários está desativada neste servidor.")
+            return
         resp_ch_id = int(cfg.get("responses_channel_id") or 0)
 
         fields = self._get_form_fields_from_config(cfg)

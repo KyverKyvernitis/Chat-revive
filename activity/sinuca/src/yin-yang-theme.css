@@ -1323,7 +1323,8 @@ body { color: var(--osk-ink); }
 }
 
 .osk-message-editor__context-backdrop {
-  background: rgba(0,0,0,.34);
+  background: rgba(0,0,0,.14);
+  backdrop-filter: none;
 }
 
 .osk-message-editor__context-popover {
@@ -1383,23 +1384,29 @@ body { color: var(--osk-ink); }
   background: #080808;
 }
 
-.osk-message-context-options {
+.osk-message-context-select__trigger,
+.osk-message-context-select__menu {
   border-color: var(--osk-line-strong);
   background: #080808;
 }
 
-.osk-message-context-options > button {
+.osk-message-context-select__trigger {
+  color: var(--osk-ink);
+}
+
+.osk-message-context-select__menu > button {
   color: var(--osk-muted);
 }
 
-.osk-message-context-options > button:hover,
-.osk-message-context-options > button:focus-visible {
+.osk-message-context-select__menu > button:hover,
+.osk-message-context-select__menu > button:focus-visible,
+.osk-message-context-select__menu > button[data-active] {
   color: var(--osk-ink);
   border-color: var(--osk-line);
   background: rgba(255,255,255,.055);
 }
 
-.osk-message-context-options > button[data-selected] {
+.osk-message-context-select__menu > button[data-selected] {
   color: var(--osk-paper-pure);
   border-color: var(--osk-ink);
   background: var(--osk-ink);
@@ -1443,5 +1450,5 @@ body { color: var(--osk-ink); }
 .osk-message-editor__text-dock-tools button:focus-visible { color: var(--osk-paper-pure); background: rgba(255,255,255,.09); }
 
 @media (max-width: 899px) {
-  .osk-message-editor__context-backdrop { background: rgba(0,0,0,.48); }
+  .osk-message-editor__context-backdrop { background: rgba(0,0,0,.18); backdrop-filter: none; }
 }

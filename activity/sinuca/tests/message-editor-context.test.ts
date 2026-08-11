@@ -32,13 +32,14 @@ function renderEditor(contextual: boolean) {
   }));
 }
 
-test("abre escolhas curtas como dropdown contextual sem trocar a prévia", () => {
+test("mantém escolhas curtas fechadas até o usuário abrir o dropdown", () => {
   const html = renderEditor(true);
 
-  assert.match(html, /class="osk-message-context-options"/);
-  assert.match(html, /role="listbox"/);
+  assert.match(html, /class="osk-message-context-select__trigger"/);
   assert.match(html, /Avatar do membro/);
-  assert.match(html, /aria-selected="true"/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /role="listbox"/);
+  assert.doesNotMatch(html, /osk-message-context-options/);
   assert.doesNotMatch(html, /class="osk-select-trigger"/);
 });
 
@@ -56,6 +57,14 @@ test("mantém o canvas montado enquanto propriedades, variáveis ou JSON estão 
   assert.match(source, /view !== "canvas" && \(/);
   assert.match(source, /className="osk-message-editor__context-layer"/);
   assert.doesNotMatch(source, /\{view === "canvas" \? \(\s*<section className="osk-message-editor__canvas-pane"/);
+});
+
+test("mantém a prévia legível e limita o painel contextual no mobile", () => {
+  const css = readFileSync(new URL("../src/design-refresh.css", import.meta.url), "utf8");
+
+  assert.match(css, /\.osk-message-editor__context-backdrop\s*\{[^}]*backdrop-filter:\s*none/s);
+  assert.match(css, /max-height:\s*min\(50dvh,\s*430px\)/);
+  assert.match(css, /\.osk-message-context-select__menu\s*\{[^}]*position:\s*fixed[^}]*max-height:\s*var\(--osk-context-select-max-height/s);
 });
 
 test("o mesmo editor compartilhado continua atendendo todas as mensagens dos módulos", () => {

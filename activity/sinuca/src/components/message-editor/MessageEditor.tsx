@@ -533,9 +533,21 @@ export function MessageEditor(props: MessageEditorProps) {
 
     restoreHistoryMarker();
     window.setTimeout(() => dialogRef.current?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)")?.focus(), 0);
+    const closeOpenContextSelect = () => {
+      const trigger = dialogRef.current?.querySelector<HTMLButtonElement>(
+        ".osk-message-context-select[data-open] .osk-message-context-select__trigger",
+      );
+      if (!trigger) return false;
+      trigger.click();
+      return true;
+    };
     const onBackRequest = () => {
       if (closeIntent.current) {
         handleHistoryClose();
+        return;
+      }
+      if (closeOpenContextSelect()) {
+        restoreHistoryMarker();
         return;
       }
       if (viewRef.current !== "canvas") {
@@ -553,6 +565,10 @@ export function MessageEditor(props: MessageEditorProps) {
       }
       if (event.key === "Escape") {
         if (event.defaultPrevented) return;
+        if (closeOpenContextSelect()) {
+          event.preventDefault();
+          return;
+        }
         if (editingFieldIdRef.current) {
           event.preventDefault();
           setEditingFieldId(null);

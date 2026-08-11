@@ -3960,8 +3960,8 @@
   padding: 0;
   border: 0;
   border-radius: 0;
-  background: rgba(3, 5, 9, .24);
-  backdrop-filter: blur(1.5px);
+  background: rgba(3, 5, 9, .14);
+  backdrop-filter: none;
   pointer-events: auto;
 }
 
@@ -4067,43 +4067,122 @@
 .osk-message-editor__context-popover .osk-message-form__field:first-child { padding-top: 2px; }
 .osk-message-editor__context-popover .osk-message-form__field:last-child { padding-bottom: 2px; border-bottom: 0; }
 
-.osk-message-context-options {
-  display: grid;
-  gap: 4px;
-  max-height: min(320px, 42dvh);
-  overflow: auto;
-  padding: 4px;
-  border: 1px solid rgba(255, 255, 255, .075);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, .2);
-  overscroll-behavior: contain;
+.osk-message-form[data-contextual] .osk-message-form__field:first-child[data-type="select"]:not([data-has-description]) > header {
+  display: none;
 }
 
-.osk-message-context-options > button {
+.osk-message-context-select {
+  position: relative;
+  z-index: 1;
+}
+
+.osk-message-context-select[data-open] {
+  z-index: 12;
+}
+
+.osk-message-context-select__trigger {
   width: 100%;
-  min-height: 40px;
+  min-height: 42px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 0 11px;
+  border: 1px solid rgba(255, 255, 255, .075);
+  border-radius: 11px;
+  color: #e8ebf1;
+  background: rgba(0, 0, 0, .2);
+  text-align: left;
+  font-size: .68rem;
+}
+
+.osk-message-context-select__trigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.osk-message-context-select__trigger > svg {
+  flex: 0 0 auto;
+  color: #8d96a6;
+  transition: transform 150ms ease;
+}
+
+.osk-message-context-select[data-open] .osk-message-context-select__trigger > svg {
+  transform: rotate(180deg);
+}
+
+.osk-message-context-select__trigger:hover,
+.osk-message-context-select__trigger:focus-visible,
+.osk-message-context-select[data-open] .osk-message-context-select__trigger {
+  border-color: rgba(255, 255, 255, .2);
+  outline: none;
+}
+
+.osk-message-context-select__menu {
+  position: fixed;
+  top: var(--osk-context-select-top);
+  left: var(--osk-context-select-left);
+  z-index: 242;
+  width: var(--osk-context-select-width);
+  display: grid;
+  gap: 3px;
+  max-height: var(--osk-context-select-max-height, min(246px, 34dvh));
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 11px;
+  background: rgba(8, 10, 14, .995);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .62);
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  font-family: var(--osk-font);
+  animation: osk-context-drop 150ms cubic-bezier(.2, .8, .2, 1) both;
+}
+
+.osk-message-context-select__menu,
+.osk-message-context-select__menu * {
+  box-sizing: border-box;
+}
+
+.osk-message-context-select__menu[data-placement="above"] {
+  transform-origin: center bottom;
+}
+
+.osk-message-context-select__menu[data-placement="below"] {
+  transform-origin: center top;
+}
+
+.osk-message-context-select__menu > button {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: 8px;
   color: #a2aab8;
   background: transparent;
   text-align: left;
+  font-family: inherit;
   font-size: .66rem;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.osk-message-context-options > button:hover,
-.osk-message-context-options > button:focus-visible {
+.osk-message-context-select__menu > button:hover,
+.osk-message-context-select__menu > button:focus-visible,
+.osk-message-context-select__menu > button[data-active] {
   color: #f0f2f7;
   border-color: rgba(255, 255, 255, .09);
   background: rgba(255, 255, 255, .045);
   outline: none;
 }
 
-.osk-message-context-options > button[data-selected] {
+.osk-message-context-select__menu > button[data-selected] {
   color: #fff;
   border-color: rgba(255, 255, 255, .16);
   background: rgba(255, 255, 255, .09);
@@ -4120,8 +4199,8 @@
 
 @media (max-width: 899px) {
   .osk-message-editor__context-backdrop {
-    background: rgba(3, 5, 9, .36);
-    backdrop-filter: blur(2px);
+    background: rgba(3, 5, 9, .18);
+    backdrop-filter: none;
   }
 
   .osk-message-editor__context-popover,
@@ -4130,13 +4209,17 @@
   .osk-message-editor__context-layer[data-view="json"] .osk-message-editor__context-popover {
     top: auto;
     right: 8px;
-    bottom: 8px;
+    bottom: max(12px, env(safe-area-inset-bottom));
     left: 8px;
     width: auto;
     max-width: none;
-    max-height: min(58dvh, 520px);
+    max-height: min(50dvh, 430px);
     border-radius: 17px;
     animation-name: osk-context-rise;
+  }
+
+  .osk-message-editor__context-layer[data-view="variables"] .osk-message-editor__context-popover {
+    max-height: min(60dvh, 520px);
   }
 
   .osk-message-editor__context-layer[data-view="json"] .osk-message-editor__context-popover {
@@ -4146,6 +4229,7 @@
   .osk-message-editor__context-popover::before { display: none; }
   .osk-message-editor__context-popover .osk-message-editor__view-body { padding: 9px; }
   .osk-message-editor__context-popover .osk-message-form__field { padding-inline: 1px; }
+  .osk-message-context-select__menu { max-height: min(var(--osk-context-select-max-height, 232px), 232px, 29dvh); }
 }
 
 @keyframes osk-context-rise {

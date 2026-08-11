@@ -6,8 +6,8 @@ export function openDiscordLogin(returnTo = "/dashboard") {
   window.location.assign(`/api/auth/login?return_to=${encodeURIComponent(safeReturn)}`);
 }
 
-export async function fetchDashboardSession(): Promise<DashboardSessionPayload> {
-  return await fetchDashboardJson<DashboardSessionPayload>("/auth/session", { method: "GET" }, 10000);
+export async function fetchDashboardSession(signal?: AbortSignal): Promise<DashboardSessionPayload> {
+  return await fetchDashboardJson<DashboardSessionPayload>("/auth/session", { method: "GET", signal }, 10000);
 }
 
 export async function logoutDashboard(): Promise<void> {

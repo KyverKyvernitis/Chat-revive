@@ -9,7 +9,7 @@ import { SectionEditor } from "./components/SectionEditor";
 import { ServerPicker } from "./components/ServerPicker";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
-import { LoadingVisual } from "./components/VisualTemplates";
+import { LoadingProgress, LoadingVisual } from "./components/VisualTemplates";
 import { mergeDashboardModules, type DashboardVisualModule } from "./moduleCatalog";
 import {
   fetchDashboardFull,
@@ -40,6 +40,13 @@ type Route =
 
 type DashboardRoute = Extract<Route, { page: "dashboard" }>;
 type SessionState = "loading" | "authenticated" | "anonymous";
+type BootSessionResult = {
+  state: Exclude<SessionState, "loading">;
+  user: DashboardUserPayload | null;
+  notice?: { type: "error"; text: string };
+};
+
+const LOAD_COMPLETE_HOLD_MS = 140;
 
 function isSnowflake(value: string | undefined | null): value is string {
   return Boolean(value && /^\d{15,25}$/.test(value));
@@ -118,13 +125,16 @@ export default function App() {
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [draft, setDraft] = useState<Record<string, unknown>>({});
   const [guildOptions, setGuildOptions] = useState<DashboardOptionsPayload | null>(null);
+  const [bootProgress, setBootProgress] = useState(0);
   const [loadingDashboard, setLoadingDashboard] = useState(false);
+  const [dashboardProgress, setDashboardProgress] = useState(0);
   const [saving, setSaving] = useState(false);
   const [inviteBusy, setInviteBusy] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [messageEditorActive, setMessageEditorActive] = useState(false);
   const [notice, setNotice] = useState<{ type: "error" | "success" | "info"; text: string } | null>(null);
   const dashboardLoadRef = useRef<{ generation: number; controller: AbortController | null }>({ generation: 0, controller: null });
+  const loadedGuildRef = useRef<string | null>(null);
   const activeGuildRef = useRef<string | null>(null);
   const savingRef = useRef(false);
 
@@ -176,32 +186,54 @@ export default function App() {
   }, [hasUnsavedChanges, values]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    let disposed = false;
+    let sessionFinished = false;
+    let finishTimer: number | null = null;
     const authError = new URLSearchParams(window.location.search).get("auth_error");
     if (authError) {
       setNotice({ type: "error", text: `Não foi possível concluir o login (${authError}).` });
       window.history.replaceState({}, "", window.location.pathname);
     }
-    void fetchDashboardIdentity()
+    setBootProgress(0);
+    void fetchDashboardIdentity(controller.signal)
       .then((payload) => {
+        if (disposed) return;
         setBotIdentity(payload.bot || null);
         setSupportServer(payload.supportServer || null);
       })
-      .catch(() => undefined);
-    void (async () => {
-      try {
-        const session = await fetchDashboardSession();
-        setUser(session.user || null);
-        setSessionState(session.authenticated ? "authenticated" : "anonymous");
-      } catch (error) {
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed && !sessionFinished) setBootProgress(50);
+      });
+    void fetchDashboardSession(controller.signal)
+      .then((session): BootSessionResult => ({
+        state: session.authenticated ? "authenticated" : "anonymous",
+        user: session.user || null,
+      }))
+      .catch((error): BootSessionResult => {
         if (error instanceof DashboardHttpError && error.status === 401) {
-          setSessionState("anonymous");
-          setUser(null);
-        } else {
-          setSessionState("anonymous");
-          setNotice({ type: "error", text: errorText(error) });
+          return { state: "anonymous", user: null };
         }
-      }
-    })();
+        return { state: "anonymous", user: null, notice: { type: "error", text: errorText(error) } };
+      })
+      .then((session) => {
+        if (disposed) return;
+        sessionFinished = true;
+        setBootProgress(100);
+        finishTimer = window.setTimeout(() => {
+          if (disposed) return;
+          setUser(session.user);
+          if (session.notice) setNotice(session.notice);
+          setSessionState(session.state);
+        }, LOAD_COMPLETE_HOLD_MS);
+      });
+
+    return () => {
+      disposed = true;
+      controller.abort();
+      if (finishTimer !== null) window.clearTimeout(finishTimer);
+    };
   }, []);
 
   useEffect(() => {
@@ -258,6 +290,7 @@ export default function App() {
       if (error instanceof DashboardHttpError && error.status === 401) {
         setSessionState("anonymous");
         setUser(null);
+        loadedGuildRef.current = null;
       }
       setNotice({ type: "error", text: errorText(error) });
     } finally {
@@ -276,10 +309,26 @@ export default function App() {
     const controller = new AbortController();
     const generation = dashboardLoadRef.current.generation + 1;
     dashboardLoadRef.current = { generation, controller };
-    if (!quiet) setLoadingDashboard(true);
+    const changingGuild = loadedGuildRef.current !== guildId;
+    if (!quiet) {
+      setDashboardProgress(0);
+      setLoadingDashboard(true);
+      if (changingGuild) {
+        setSections([]);
+        setSummary([]);
+        setValues({});
+        setDraft({});
+        setGuildOptions(null);
+      }
+    }
+    let completedSuccessfully = false;
     try {
-      const payload = await fetchDashboardFull(guildId, controller.signal);
+      const payload = await fetchDashboardFull(guildId, controller.signal, (progress) => {
+        if (quiet || dashboardLoadRef.current.generation !== generation || activeGuildRef.current !== guildId) return;
+        setDashboardProgress((current) => Math.max(current, progress));
+      });
       if (dashboardLoadRef.current.generation !== generation || activeGuildRef.current !== guildId) return;
+      loadedGuildRef.current = guildId;
       if (payload.user) setUser(payload.user);
       if (payload.bot) setBotIdentity(payload.bot);
       setSections(payload.sections || []);
@@ -288,18 +337,26 @@ export default function App() {
       setSummary(payload.summary || []);
       setGuildOptions(payload.options || { ok: false, channels: [], roles: [], error: "options_unavailable" });
       setNotice(quiet ? { type: "success", text: "Dados atualizados com os valores persistidos." } : null);
+      completedSuccessfully = true;
+      if (!quiet) setDashboardProgress(100);
     } catch (error) {
       if (error instanceof DashboardHttpError && error.code === "aborted") return;
       if (dashboardLoadRef.current.generation !== generation) return;
       if (error instanceof DashboardHttpError && error.status === 401) {
         setSessionState("anonymous");
         setUser(null);
+        loadedGuildRef.current = null;
       }
       setNotice({ type: "error", text: errorText(error) });
     } finally {
       if (dashboardLoadRef.current.generation === generation) {
-        dashboardLoadRef.current.controller = null;
-        setLoadingDashboard(false);
+        if (!quiet && completedSuccessfully) {
+          await new Promise((resolve) => window.setTimeout(resolve, LOAD_COMPLETE_HOLD_MS));
+        }
+        if (dashboardLoadRef.current.generation === generation) {
+          dashboardLoadRef.current.controller = null;
+          setLoadingDashboard(false);
+        }
       }
     }
   }, [sessionState]);
@@ -332,6 +389,7 @@ export default function App() {
     setManageable([]);
     setNeedsInvite([]);
     setServersLoaded(false);
+    loadedGuildRef.current = null;
     navigate({ page: "landing" }, true, true);
   }, [hasUnsavedChanges, navigate]);
 
@@ -413,7 +471,7 @@ export default function App() {
     void loadDashboard(route.guildId, true);
   }, [hasUnsavedChanges, loadDashboard, route]);
 
-  if (sessionState === "loading") return <FullPageLoading />;
+  if (sessionState === "loading") return <FullPageLoading progress={bootProgress} />;
 
   const protectedRoute = route.page === "servers" || route.page === "invite" || route.page === "dashboard";
   if (protectedRoute && sessionState !== "authenticated") {
@@ -437,11 +495,12 @@ export default function App() {
       selectedSectionId={selectedSectionId}
       selectedSection={selectedSection}
       selectedModule={selectedModule}
-      sectionsLoaded={sections.length > 0}
+      sectionsLoaded={loadedGuildRef.current === route.guildId && sections.length > 0}
       values={values}
       draft={draft}
       guildOptions={guildOptions}
       loading={loadingDashboard}
+      loadingProgress={dashboardProgress}
       saving={saving}
       changedCount={changedFields.length}
       mobileMenuOpen={mobileMenuOpen}
@@ -476,6 +535,7 @@ interface DashboardShellProps {
   draft: Record<string, unknown>;
   guildOptions: DashboardOptionsPayload | null;
   loading: boolean;
+  loadingProgress: number;
   saving: boolean;
   changedCount: number;
   mobileMenuOpen: boolean;
@@ -508,6 +568,7 @@ function DashboardShell({
   draft,
   guildOptions,
   loading,
+  loadingProgress,
   saving,
   changedCount,
   mobileMenuOpen,
@@ -548,7 +609,7 @@ function DashboardShell({
       <Topbar guildName={guildName} guildIcon={guildIcon} user={user} supportServer={supportServer} busy={loading} onRefresh={onRefresh} onChangeServer={onChangeServer} onLogout={onLogout} onOpenMenu={onOpenMenu} />
       <main className="osk-dashboard-content">
         <div key={selectedSection?.id || "home"} className="osk-page-motion">
-          {loading && !sectionsLoaded ? <DashboardLoading /> : selectedSection ? (
+          {loading && !sectionsLoaded ? <DashboardLoading progress={loadingProgress} /> : selectedSection ? (
             <SectionEditor
               section={selectedSection}
               module={selectedModule}
@@ -571,12 +632,12 @@ function DashboardShell({
   </div>;
 }
 
-function FullPageLoading() {
-  return <div className="osk-full-loading"><LoadingVisual size={30} /><strong>Abrindo o painel</strong><span>Validando sua sessão...</span></div>;
+function FullPageLoading({ progress }: { progress: number }) {
+  return <div className="osk-full-loading" aria-busy="true"><LoadingVisual size={30} /><LoadingProgress progress={progress} label="Carregando o painel" /></div>;
 }
 
-function DashboardLoading() {
-  return <div className="osk-dashboard-loading"><LoadingVisual size={28} /><strong>Carregando configurações</strong><span>Buscando funções, canais e cargos do servidor.</span></div>;
+function DashboardLoading({ progress }: { progress: number }) {
+  return <div className="osk-dashboard-loading" aria-busy="true"><LoadingVisual size={28} /><LoadingProgress progress={progress} label="Carregando configurações do servidor" /></div>;
 }
 
 function LoginRequired({ onLogin, onHome }: { onLogin(): void; onHome(): void }) {

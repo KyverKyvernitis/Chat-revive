@@ -2027,7 +2027,7 @@
 }
 
 /* ============================================================
-   Conta compartilhada, suporte real e drawer gestual
+   Conta compartilhada, popover compacto e drawer gestual
    ============================================================ */
 .osk-minimal-login {
   min-height: 40px;
@@ -2130,6 +2130,11 @@
   font-family: var(--osk-font);
 }
 
+.osk-account-layer,
+.osk-account-layer * {
+  box-sizing: border-box;
+}
+
 .osk-account-layer[data-visible] {
   pointer-events: auto;
   opacity: 1;
@@ -2145,15 +2150,25 @@
   background: transparent;
 }
 
+.osk-account-layer button {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
 .osk-account-sheet {
   position: fixed;
   top: var(--osk-account-top);
   right: var(--osk-account-right);
-  width: min(290px, calc(100vw - 20px));
-  overflow: hidden;
-  padding: 7px;
+  width: min(282px, calc(100vw - 16px));
+  max-height: var(--osk-account-max-height, calc(100vh - var(--osk-account-top) - 8px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
   border: 1px solid rgba(255,255,255,.1);
-  border-radius: 17px;
+  border-radius: 15px;
   color: #e9ecf4;
   background: rgba(14,18,27,.985);
   box-shadow: 0 24px 70px rgba(0,0,0,.56);
@@ -2169,24 +2184,22 @@
   transform: translateY(0) scale(1);
 }
 
-.osk-account-sheet-handle { display: none; }
-
 .osk-account-profile {
   min-width: 0;
   display: grid;
-  grid-template-columns: 44px minmax(0,1fr) 34px;
+  grid-template-columns: 38px minmax(0,1fr);
   align-items: center;
-  gap: 10px;
-  padding: 8px 8px 10px;
+  gap: 9px;
+  padding: 7px 8px 9px;
   border-bottom: 1px solid rgba(255,255,255,.07);
 }
 
 .osk-account-profile-avatar {
-  width: 44px !important;
-  height: 44px !important;
+  width: 38px !important;
+  height: 38px !important;
   overflow: hidden;
   border: 1px solid rgba(159,137,255,.28);
-  border-radius: 14px;
+  border-radius: 12px;
   background: #151926;
 }
 
@@ -2203,27 +2216,17 @@
   white-space: nowrap;
 }
 
-.osk-account-profile strong { font-size: .78rem; }
-.osk-account-profile small { color: #7e889b; font-size: .62rem; }
-.osk-account-profile > button {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border-radius: 10px;
-  color: #8e98aa;
-  background: transparent;
-}
-.osk-account-profile > button:hover { color: #fff; background: rgba(255,255,255,.05); }
+.osk-account-profile strong { font-size: .74rem; }
+.osk-account-profile small { color: #7e889b; font-size: .59rem; }
 
 .osk-account-current-server {
   min-width: 0;
   display: grid;
   grid-template-columns: 30px minmax(0,1fr);
   align-items: center;
-  gap: 9px;
-  margin: 7px 5px 2px;
-  padding: 8px 9px;
+  gap: 8px;
+  margin: 6px 4px 1px;
+  padding: 7px 8px;
   border: 1px solid rgba(132,105,255,.13);
   border-radius: 11px;
   background: rgba(109,80,235,.055);
@@ -2242,23 +2245,23 @@
 .osk-account-actions {
   display: grid;
   gap: 2px;
-  padding: 5px 0 0;
+  padding: 4px 0 0;
 }
 
 .osk-account-actions > button,
 .osk-account-actions > a {
-  min-height: 42px;
+  min-height: 38px;
   display: grid;
   grid-template-columns: 19px minmax(0,1fr) auto;
   align-items: center;
   gap: 10px;
-  padding: 0 11px;
-  border-radius: 10px;
+  padding: 0 10px;
+  border-radius: 9px;
   color: #aab2c2;
   background: transparent;
   text-align: left;
   text-decoration: none;
-  font-size: .72rem;
+  font-size: .69rem;
 }
 
 .osk-account-actions > button:hover,
@@ -2353,34 +2356,6 @@
     border-radius: 9px;
   }
 
-  .osk-account-layer[data-visible] .osk-account-backdrop {
-    background: rgba(2,4,9,.68);
-    backdrop-filter: blur(2px);
-  }
-
-  .osk-account-sheet {
-    top: auto;
-    right: 10px;
-    bottom: max(10px, env(safe-area-inset-bottom));
-    left: 10px;
-    width: auto;
-    padding: 8px;
-    border-radius: 20px;
-    transform: translateY(18px);
-    transform-origin: bottom center;
-  }
-
-  .osk-account-layer[data-visible] .osk-account-sheet { transform: translateY(0); }
-  .osk-account-sheet-handle {
-    width: 38px;
-    height: 4px;
-    display: block;
-    margin: 1px auto 6px;
-    border-radius: 999px;
-    background: rgba(255,255,255,.15);
-  }
-
-  .osk-account-profile { padding-top: 6px; }
   .osk-support-card-avatar { width: 38px !important; height: 38px !important; border-radius: 11px; }
   .osk-support-card-action > span { display: none; }
   .osk-dashboard-topbar { gap: 8px; }
@@ -2391,10 +2366,35 @@
 .osk-account-trigger > svg {
   transition: transform 180ms cubic-bezier(.2,.8,.2,1);
 }
-.osk-account-trigger[aria-expanded="true"] > svg { transform: rotate(90deg); }
+.osk-account-trigger[aria-expanded="true"] > svg { transform: rotate(180deg); }
 
 @media (min-width: 721px) {
   .osk-dashboard-topbar .osk-topbar-server { max-width: calc(100% - 240px); }
+}
+
+.osk-full-loading,
+.osk-dashboard-loading {
+  gap: 13px;
+}
+
+.osk-loading-progress {
+  position: relative;
+  width: min(236px, calc(100vw - 56px));
+  height: 5px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 999px;
+  background: rgba(255,255,255,.07);
+}
+
+.osk-loading-progress > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--osk-loading-progress, 0%);
+  min-width: var(--osk-loading-progress, 0%);
+  border-radius: inherit;
+  background: #fff;
+  transition: width 220ms cubic-bezier(.2,.8,.2,1), min-width 220ms cubic-bezier(.2,.8,.2,1);
 }
 
 /* ========================================================================== */

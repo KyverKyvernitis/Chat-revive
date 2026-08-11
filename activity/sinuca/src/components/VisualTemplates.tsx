@@ -82,3 +82,23 @@ export function LoadingVisual({ size = 30 }: { size?: number }) {
     </span>
   );
 }
+
+export function LoadingProgress({ progress, label }: { progress: number; label: string }) {
+  const bounded = Math.min(100, Math.max(0, Number.isFinite(progress) ? progress : 0));
+  const rounded = Math.round(bounded);
+  const style: TemplateStyle = { "--osk-loading-progress": `${bounded}%` };
+
+  return (
+    <span
+      className="osk-loading-progress"
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={rounded}
+      aria-valuetext={`${rounded}% concluído`}
+    >
+      <span style={style} aria-hidden="true" />
+    </span>
+  );
+}

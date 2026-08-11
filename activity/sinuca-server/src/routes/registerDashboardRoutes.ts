@@ -34,6 +34,7 @@ type SessionAuth = {
 };
 
 type GuildAuth = SessionAuth & { guildId: string };
+type DashboardLoadStep = "settings" | "summary" | "options" | "bot";
 
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 const MAX_RATE_BUCKETS = 10_000;
@@ -175,6 +176,39 @@ export function registerDashboardRoutes({
   publicOrigin,
   allowedOrigins,
 }: RegisterDashboardRoutesOptions) {
+  const loadFullDashboard = async (
+    auth: GuildAuth,
+    onTaskCompleted?: (step: DashboardLoadStep) => void,
+  ) => {
+    const track = async <T>(step: DashboardLoadStep, task: Promise<T>): Promise<T> => {
+      const result = await task;
+      onTaskCompleted?.(step);
+      return result;
+    };
+    const [settings, summary, optionsResult, bot] = await Promise.all([
+      track("settings", configService.getSettings(auth.guildId)),
+      track("summary", configService.getSummary(auth.guildId)),
+      track("options", listGuildChannelsAndRoles(auth.guildId).catch(() => ({ ok: false, channels: [], roles: [], error: "options_failed" }))),
+      track("bot", getDiscordBotIdentity().catch(() => null)),
+    ]);
+    return {
+      ok: true as const,
+      guildId: auth.guildId,
+      user: auth.user,
+      bot,
+      sections: settings.sections,
+      values: settings.values,
+      summary: summary.sections,
+      options: {
+        ok: optionsResult.ok,
+        guildId: auth.guildId,
+        channels: optionsResult.channels,
+        roles: optionsResult.roles,
+        error: optionsResult.error ?? null,
+      },
+    };
+  };
+
   app.get(["/health", "/api/health"], (_req, res) => {
     sendNoStoreJson(res, 200, {
       ok: true,
@@ -313,30 +347,44 @@ export function registerDashboardRoutes({
     const auth = await requireDashboardAccess(req, res, sessionService);
     if (!auth) return;
     try {
-      const [settings, summary, optionsResult, bot] = await Promise.all([
-        configService.getSettings(auth.guildId),
-        configService.getSummary(auth.guildId),
-        listGuildChannelsAndRoles(auth.guildId).catch(() => ({ ok: false, channels: [], roles: [], error: "options_failed" })),
-        getDiscordBotIdentity().catch(() => null),
-      ]);
-      sendNoStoreJson(res, 200, {
-        ok: true,
-        guildId: auth.guildId,
-        user: auth.user,
-        bot,
-        sections: settings.sections,
-        values: settings.values,
-        summary: summary.sections,
-        options: {
-          ok: optionsResult.ok,
-          guildId: auth.guildId,
-          channels: optionsResult.channels,
-          roles: optionsResult.roles,
-          error: optionsResult.error ?? null,
-        },
-      });
+      sendNoStoreJson(res, 200, await loadFullDashboard(auth));
     } catch (error) {
       sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "dashboard_load_failed" });
+    }
+  });
+
+  app.get("/api/dashboard/guild/:guildId/full-progress", async (req, res) => {
+    const auth = await requireDashboardAccess(req, res, sessionService);
+    if (!auth) return;
+
+    res.status(200);
+    res.setHeader("Cache-Control", "no-store, max-age=0, no-transform");
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    const total = 5;
+    let completed = 1;
+    const writeEvent = (event: unknown) => {
+      if (res.destroyed || res.writableEnded) return;
+      res.write(`${JSON.stringify(event)}\n`);
+    };
+
+    writeEvent({ type: "progress", completed, total, step: "access" });
+    try {
+      const payload = await loadFullDashboard(auth, (step) => {
+        completed += 1;
+        writeEvent({ type: "progress", completed, total, step });
+      });
+      writeEvent({ type: "result", payload });
+    } catch (error) {
+      writeEvent({
+        type: "error",
+        status: 500,
+        error: error instanceof Error ? error.message : "dashboard_load_failed",
+      });
+    } finally {
+      if (!res.destroyed && !res.writableEnded) res.end();
     }
   });
 

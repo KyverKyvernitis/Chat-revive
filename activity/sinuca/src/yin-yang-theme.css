@@ -568,8 +568,9 @@ body { color: var(--osk-ink); }
 
 /* Portais */
 .osk-select-backdrop,
-.osk-account-backdrop,
 .osk-multi-sheet__backdrop { background: rgba(7,7,7,.56); backdrop-filter: blur(3px); }
+
+.osk-account-backdrop { background: transparent; backdrop-filter: none; }
 
 .osk-select-popover,
 .osk-account-sheet,
@@ -593,7 +594,8 @@ body { color: var(--osk-ink); }
 .osk-multi-sheet__panel > footer { border-color: var(--osk-line); background: var(--osk-paper-pure); }
 
 .osk-account-trigger { color: var(--osk-ink); border-color: var(--osk-line-strong); background: var(--osk-paper-pure); }
-.osk-account-trigger:hover { border-color: var(--osk-ink); background: var(--osk-paper-muted); }
+.osk-account-trigger:hover,
+.osk-account-trigger[aria-expanded="true"] { color: var(--osk-ink); border-color: var(--osk-ink); background: var(--osk-paper-muted); }
 .osk-account-trigger-copy small,
 .osk-account-profile small,
 .osk-account-current-server small { color: var(--osk-muted); }
@@ -691,6 +693,17 @@ body { color: var(--osk-ink); }
 .osk-loading-visual[data-ready] img {
   opacity: 1;
   transform: scale(1);
+}
+
+.osk-loading-progress {
+  border-color: var(--osk-line-strong);
+  background: var(--osk-paper-muted);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.45);
+}
+
+.osk-loading-progress > span {
+  background: linear-gradient(90deg, #bdbdbd, var(--osk-ink));
+  box-shadow: 0 0 12px rgba(255,255,255,.2);
 }
 
 @keyframes osk-page-enter {

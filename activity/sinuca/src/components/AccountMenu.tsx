@@ -1,14 +1,15 @@
 import {
+  ChevronDown,
   ChevronRight,
   LogOut,
   MessagesSquare,
   RefreshCw,
   Server,
-  X,
 } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -54,17 +55,20 @@ export function AccountMenu({
   const closeTimerRef = useRef<number | null>(null);
   const openFrameOneRef = useRef<number | null>(null);
   const openFrameTwoRef = useRef<number | null>(null);
+  const menuId = useId();
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
-  const [position, setPosition] = useState({ top: 0, right: 0 });
+  const [position, setPosition] = useState({ top: 0, right: 0, maxHeight: 320 });
   const name = identityName(user);
 
   const measure = useCallback(() => {
     const rect = triggerRef.current?.getBoundingClientRect();
     if (!rect) return;
+    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
     setPosition({
-      top: Math.round(rect.bottom + 9),
-      right: Math.max(10, Math.round(window.innerWidth - rect.right)),
+      top: Math.round(rect.bottom + 8),
+      right: Math.max(8, Math.round(window.innerWidth - rect.right)),
+      maxHeight: Math.max(152, Math.floor(viewportHeight - rect.bottom - 16)),
     });
   }, []);
 
@@ -92,7 +96,7 @@ export function AccountMenu({
     });
   }, [clearOpenFrames, measure]);
 
-  const close = useCallback(() => {
+  const close = useCallback((restoreFocus = true) => {
     clearOpenFrames();
     setVisible(false);
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
@@ -100,7 +104,9 @@ export function AccountMenu({
       setMounted(false);
       closeTimerRef.current = null;
     }, CLOSE_MS + 40);
-    window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+    }
   }, [clearOpenFrames]);
 
   const toggle = () => {
@@ -114,17 +120,15 @@ export function AccountMenu({
 
   useEffect(() => {
     if (!mounted) return;
-    const lockScroll = window.matchMedia("(max-width: 720px)").matches;
-    const previousOverflow = document.body.style.overflow;
-    if (lockScroll) document.body.style.overflow = "hidden";
-    const focusTimer = window.setTimeout(() => {
-      sheetRef.current?.querySelector<HTMLElement>("[role='menuitem']:not([disabled])")?.focus();
-    }, 60);
+    const focusTimer = visible
+      ? window.setTimeout(() => {
+        sheetRef.current?.querySelector<HTMLElement>("[role='menuitem']:not([disabled])")?.focus();
+      }, 60)
+      : null;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         close();
-        triggerRef.current?.focus();
         return;
       }
       const items = Array.from(sheetRef.current?.querySelectorAll<HTMLElement>("[role='menuitem']:not([disabled])") ?? []);
@@ -143,41 +147,49 @@ export function AccountMenu({
       } else if (event.key === "End") {
         event.preventDefault();
         items[items.length - 1]?.focus();
-      } else if (event.key === "Tab" && lockScroll && sheetRef.current) {
-        const focusable = Array.from(sheetRef.current.querySelectorAll<HTMLElement>(
-          "button:not(:disabled), a[href], [tabindex]:not([tabindex='-1'])",
-        ));
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (first && last && event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last.focus();
-        } else if (first && last && !event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first.focus();
-        }
+      } else if (event.key === "Tab") {
+        event.preventDefault();
+        const backwards = event.shiftKey;
+        close(false);
+        window.requestAnimationFrame(() => {
+          const trigger = triggerRef.current;
+          if (!trigger) return;
+          if (backwards) {
+            trigger.focus({ preventScroll: true });
+            return;
+          }
+          const focusable = Array.from(document.querySelectorAll<HTMLElement>(
+            "a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])",
+          )).filter((element) => !element.closest(".osk-account-layer") && (element === trigger || element.getClientRects().length > 0));
+          const triggerIndex = focusable.indexOf(trigger);
+          (focusable[triggerIndex + 1] || trigger).focus({ preventScroll: true });
+        });
       }
     };
     const onViewportChange = () => measure();
+    const visualViewport = window.visualViewport;
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", onViewportChange);
     window.addEventListener("scroll", onViewportChange, true);
+    visualViewport?.addEventListener("resize", onViewportChange);
+    visualViewport?.addEventListener("scroll", onViewportChange);
     return () => {
-      window.clearTimeout(focusTimer);
-      if (lockScroll) document.body.style.overflow = previousOverflow;
+      if (focusTimer !== null) window.clearTimeout(focusTimer);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", onViewportChange);
       window.removeEventListener("scroll", onViewportChange, true);
+      visualViewport?.removeEventListener("resize", onViewportChange);
+      visualViewport?.removeEventListener("scroll", onViewportChange);
     };
-  }, [close, measure, mounted]);
+  }, [close, measure, mounted, visible]);
 
   useEffect(() => () => {
     clearOpenFrames();
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
   }, [clearOpenFrames]);
 
-  const run = (action: () => void) => {
-    close();
+  const run = (action: () => void, restoreFocus = true) => {
+    close(restoreFocus);
     action();
   };
 
@@ -188,7 +200,8 @@ export function AccountMenu({
       className="osk-account-trigger"
       data-variant={variant}
       onClick={toggle}
-      aria-label={`Abrir menu da conta de ${name}`}
+      aria-label={`${visible ? "Fechar" : "Abrir"} menu da conta de ${name}`}
+      aria-controls={menuId}
       aria-expanded={visible}
       aria-haspopup="menu"
     >
@@ -204,27 +217,31 @@ export function AccountMenu({
         <small>Conta</small>
         <strong>{name}</strong>
       </span>
-      <ChevronRight size={15} aria-hidden="true" />
+      <ChevronDown size={15} aria-hidden="true" />
     </button>
 
     {mounted && createPortal(
       <div className="osk-account-layer" data-visible={visible || undefined}>
-        <button type="button" className="osk-account-backdrop" onClick={close} aria-label="Fechar menu da conta" />
+        <button type="button" className="osk-account-backdrop" onClick={() => close()} aria-label="Fechar menu da conta" />
         <section
+          id={menuId}
           ref={sheetRef}
           className="osk-account-sheet"
-          style={{ "--osk-account-top": `${position.top}px`, "--osk-account-right": `${position.right}px` } as CSSProperties}
+          style={{
+            "--osk-account-top": `${position.top}px`,
+            "--osk-account-right": `${position.right}px`,
+            "--osk-account-max-height": `${position.maxHeight}px`,
+          } as CSSProperties}
           role="menu"
           aria-label="Menu da conta"
+          aria-hidden={!visible}
         >
-          <div className="osk-account-sheet-handle" aria-hidden="true" />
           <header className="osk-account-profile">
-            <SmartAvatar className="osk-account-profile-avatar" src={user.avatarUrl} name={name} type="user" alt="" size={44} />
+            <SmartAvatar className="osk-account-profile-avatar" src={user.avatarUrl} name={name} type="user" alt="" size={38} />
             <span>
               <strong>{name}</strong>
               {user.username && <small>@{user.username}</small>}
             </span>
-            <button type="button" onClick={close} aria-label="Fechar menu"><X size={18} /></button>
           </header>
 
           {currentServer && <div className="osk-account-current-server">
@@ -233,16 +250,16 @@ export function AccountMenu({
           </div>}
 
           <nav className="osk-account-actions">
-            {showServersAction && <button type="button" role="menuitem" onClick={() => run(onServers)}>
+            {showServersAction && <button type="button" role="menuitem" onClick={() => run(onServers, false)}>
               <Server size={17} /><span>{serversLabel}</span><ChevronRight size={15} />
             </button>}
             <button type="button" role="menuitem" onClick={() => run(onRefresh)} disabled={busy}>
               <RefreshCw size={17} className={busy ? "osk-spin" : undefined} /><span>{busy ? "Atualizando..." : "Atualizar dados"}</span>
             </button>
-            <a role="menuitem" href={supportInviteUrl} target="_blank" rel="noreferrer noopener" onClick={close}>
+            <a role="menuitem" href={supportInviteUrl} target="_blank" rel="noreferrer noopener" onClick={() => close(false)}>
               <MessagesSquare size={17} /><span>Servidor de suporte</span><ChevronRight size={15} />
             </a>
-            <button type="button" role="menuitem" className="osk-account-logout" onClick={() => run(onLogout)}>
+            <button type="button" role="menuitem" className="osk-account-logout" onClick={() => run(onLogout, false)}>
               <LogOut size={17} /><span>Sair</span>
             </button>
           </nav>

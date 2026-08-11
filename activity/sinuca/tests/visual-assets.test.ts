@@ -11,7 +11,7 @@ const theme = readFileSync(join(projectRoot, "src/yin-yang-theme.css"), "utf8");
 
 test("usa os assets enviados como padrão dos templates visuais", () => {
   assert.match(source, /BUNDLED_DECORATIVE_IMAGE_URL = "\/assets\/osaka-landing-character\.jpg"/);
-  assert.match(source, /BUNDLED_LOADING_GIF_URL = "\/assets\/osaka-loading\.gif"/);
+  assert.match(source, /BUNDLED_LOADING_GIF_URL = "\/assets\/osaka-loading\.gif\?v=ba956b47"/);
 });
 
 test("mantém imagens válidas no diretório público", () => {
@@ -21,7 +21,8 @@ test("mantém imagens válidas no diretório público", () => {
   assert.deepEqual([...decorativeImage.subarray(0, 3)], [0xff, 0xd8, 0xff]);
   assert.equal(loadingGif.subarray(0, 6).toString("ascii"), "GIF89a");
   assert.ok(decorativeImage.byteLength > 50_000);
-  assert.ok(loadingGif.byteLength > 3_000_000);
+  assert.ok(loadingGif.byteLength > 100_000);
+  assert.ok(loadingGif.includes(Buffer.from("NETSCAPE2.0")), "o GIF deve preservar a animação em loop");
 });
 
 test("reconhece imediatamente imagens restauradas do cache", () => {

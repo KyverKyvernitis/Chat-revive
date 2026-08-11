@@ -42,7 +42,7 @@ function useImageState(src: string) {
 }
 
 export const BUNDLED_DECORATIVE_IMAGE_URL = "/assets/osaka-landing-character.jpg";
-export const BUNDLED_LOADING_GIF_URL = "/assets/osaka-loading.gif";
+export const BUNDLED_LOADING_GIF_URL = "/assets/osaka-loading.gif?v=ba956b47";
 
 const dashboardEnv = (import.meta as ImportMeta & { env?: Partial<ImportMetaEnv> }).env ?? {};
 const decorativeImageUrl = configuredValue(dashboardEnv.VITE_DASHBOARD_DECORATIVE_IMAGE_URL) || BUNDLED_DECORATIVE_IMAGE_URL;

@@ -59,6 +59,27 @@ test("mantém o canvas montado enquanto propriedades, variáveis ou JSON estão 
   assert.doesNotMatch(source, /\{view === "canvas" \? \(\s*<section className="osk-message-editor__canvas-pane"/);
 });
 
+test("mantém salvar e descartar visíveis junto da barra de formatação", () => {
+  const source = readFileSync(new URL("../src/components/message-editor/MessageEditor.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /\{activeEditingField && \(\s*<div className="osk-message-editor__text-dock"/);
+  assert.match(source, /\)\}\s*<footer className="osk-message-editor__footer"/);
+  assert.doesNotMatch(source, /\{activeEditingField \? \(/);
+});
+
+test("ancora o inspetor ao elemento tocado também no mobile", () => {
+  const source = readFileSync(new URL("../src/components/message-editor/MessageEditor.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../src/design-refresh.css", import.meta.url), "utf8");
+
+  assert.match(source, /const mobile = window\.matchMedia\("\(max-width: 899px\)"\)\.matches/);
+  assert.match(source, /setContextPlacement\(\{ left, top, width, side: "over" \}\)/);
+  assert.match(source, /data-anchored=\{view === "inspector" && contextAnchorFieldId \? true : undefined\}/);
+  assert.match(
+    css,
+    /data-view="inspector"\]\[data-anchored\][^{]*\{[^}]*top:\s*var\(--osk-message-context-top[^}]*bottom:\s*auto[^}]*left:\s*var\(--osk-message-context-left/s,
+  );
+});
+
 test("mantém a prévia legível e limita o painel contextual no mobile", () => {
   const css = readFileSync(new URL("../src/design-refresh.css", import.meta.url), "utf8");
 

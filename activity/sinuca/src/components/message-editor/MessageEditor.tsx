@@ -407,10 +407,6 @@ export function MessageEditor(props: MessageEditorProps) {
       setContextPlacement(null);
       return;
     }
-    if (window.matchMedia("(max-width: 899px)").matches) {
-      setContextPlacement(null);
-      return;
-    }
 
     const workspace = workspaceRef.current;
     const anchor = Array.from(workspace.querySelectorAll<HTMLElement>("[data-message-field-anchor]"))
@@ -422,9 +418,43 @@ export function MessageEditor(props: MessageEditorProps) {
 
     const workspaceRect = workspace.getBoundingClientRect();
     const anchorRect = anchor.getBoundingClientRect();
-    const gap = 10;
-    const edge = 12;
-    const width = Math.min(370, Math.max(280, workspaceRect.width - edge * 2));
+    const mobile = window.matchMedia("(max-width: 899px)").matches;
+    const gap = mobile ? 8 : 10;
+    const edge = mobile ? 8 : 12;
+    const availableWidth = Math.max(1, workspaceRect.width - edge * 2);
+    const width = mobile
+      ? Math.min(340, availableWidth)
+      : Math.min(370, Math.max(280, availableWidth));
+    const measuredHeight = Math.min(
+      contextPanelRef.current?.getBoundingClientRect().height || (mobile ? 150 : 300),
+      Math.max(120, workspaceRect.height - edge * 2),
+    );
+
+    if (mobile) {
+      const anchorLeft = anchorRect.left - workspaceRect.left;
+      const anchorTop = anchorRect.top - workspaceRect.top;
+      const anchorBottom = anchorRect.bottom - workspaceRect.top;
+      const left = Math.max(
+        edge,
+        Math.min(anchorLeft + anchorRect.width / 2 - width / 2, workspaceRect.width - width - edge),
+      );
+      const roomBelow = workspaceRect.height - anchorBottom - gap - edge;
+      const roomAbove = anchorTop - gap - edge;
+      let top: number;
+
+      if (roomBelow >= measuredHeight) top = anchorBottom + gap;
+      else if (roomAbove >= measuredHeight) top = anchorTop - measuredHeight - gap;
+      else {
+        top = Math.max(
+          edge,
+          Math.min(anchorTop - measuredHeight / 2, workspaceRect.height - measuredHeight - edge),
+        );
+      }
+
+      setContextPlacement({ left, top, width, side: "over" });
+      return;
+    }
+
     let side: ContextPlacement["side"] = "right";
     let left = anchorRect.right - workspaceRect.left + gap;
     if (left + width > workspaceRect.width - edge) {
@@ -436,10 +466,6 @@ export function MessageEditor(props: MessageEditorProps) {
       left = Math.max(edge, Math.min(anchorRect.left - workspaceRect.left, workspaceRect.width - width - edge));
     }
 
-    const measuredHeight = Math.min(
-      contextPanelRef.current?.getBoundingClientRect().height || 300,
-      Math.max(180, workspaceRect.height - edge * 2),
-    );
     const top = Math.max(
       edge,
       Math.min(anchorRect.top - workspaceRect.top, workspaceRect.height - measuredHeight - edge),
@@ -523,7 +549,12 @@ export function MessageEditor(props: MessageEditorProps) {
 
     const syncVisualViewport = () => {
       const viewport = window.visualViewport;
-      const height = Math.max(1, Math.round(viewport?.height ?? window.innerHeight));
+      const documentHeight = document.documentElement.clientHeight || Number.POSITIVE_INFINITY;
+      const height = Math.max(1, Math.round(Math.min(
+        viewport?.height ?? Number.POSITIVE_INFINITY,
+        window.innerHeight,
+        documentHeight,
+      )));
       dialogRef.current?.style.setProperty("--osk-message-editor-viewport-height", `${height}px`);
     };
     syncVisualViewport();
@@ -966,7 +997,11 @@ export function MessageEditor(props: MessageEditorProps) {
         </section>
 
         {view !== "canvas" && (
-          <div className="osk-message-editor__context-layer" data-view={view} data-anchored={Boolean(contextPlacement) || undefined}>
+          <div
+            className="osk-message-editor__context-layer"
+            data-view={view}
+            data-anchored={view === "inspector" && contextAnchorFieldId ? true : undefined}
+          >
             <button type="button" className="osk-message-editor__context-backdrop" onClick={leaveAuxiliaryView} disabled={Boolean(pendingJsonChanges)} aria-label="Fechar configurações" />
             <section
               ref={contextPanelRef}
@@ -1031,7 +1066,7 @@ export function MessageEditor(props: MessageEditorProps) {
         )}
       </div>
 
-      {activeEditingField ? (
+      {activeEditingField && (
         <div className="osk-message-editor__text-dock">
           <div className="osk-message-editor__text-dock-copy">
             <strong>{activeEditingField.label}</strong>
@@ -1051,12 +1086,11 @@ export function MessageEditor(props: MessageEditorProps) {
           </div>
           <button type="button" className="osk-message-editor__text-done" onPointerDown={preventToolbarBlur} onClick={() => setEditingFieldId(null)}><Check size={16} />Pronto</button>
         </div>
-      ) : (
-        <footer className="osk-message-editor__footer">
-          <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Descartar alterações</button>
-          <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>{pendingJsonChanges ? "Aplicando..." : localDirty || jsonDirty ? "Aplicar alterações" : "Concluir"}</button>
-        </footer>
       )}
+      <footer className="osk-message-editor__footer" data-text-editing={activeEditingField ? "true" : undefined}>
+        <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Descartar alterações</button>
+        <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>{pendingJsonChanges ? "Aplicando..." : localDirty || jsonDirty ? "Aplicar alterações" : "Concluir"}</button>
+      </footer>
     </div>
   </div>;
 

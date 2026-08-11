@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowRight, LoaderCircle, LogIn, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, LogIn, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserLanding } from "./components/BrowserLanding";
 import { HomePage } from "./components/HomePage";
@@ -9,6 +9,7 @@ import { SectionEditor } from "./components/SectionEditor";
 import { ServerPicker } from "./components/ServerPicker";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
+import { LoadingVisual } from "./components/VisualTemplates";
 import { mergeDashboardModules, type DashboardVisualModule } from "./moduleCatalog";
 import {
   fetchDashboardFull,
@@ -571,11 +572,11 @@ function DashboardShell({
 }
 
 function FullPageLoading() {
-  return <div className="osk-full-loading"><LoaderCircle size={30} className="osk-spin" /><strong>Abrindo o painel</strong><span>Validando sua sessão...</span></div>;
+  return <div className="osk-full-loading"><LoadingVisual size={30} /><strong>Abrindo o painel</strong><span>Validando sua sessão...</span></div>;
 }
 
 function DashboardLoading() {
-  return <div className="osk-dashboard-loading"><LoaderCircle size={28} className="osk-spin" /><strong>Carregando configurações</strong><span>Buscando funções, canais e cargos do servidor.</span></div>;
+  return <div className="osk-dashboard-loading"><LoadingVisual size={28} /><strong>Carregando configurações</strong><span>Buscando funções, canais e cargos do servidor.</span></div>;
 }
 
 function LoginRequired({ onLogin, onHome }: { onLogin(): void; onHome(): void }) {

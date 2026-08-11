@@ -12,6 +12,7 @@ import {
 import type { DashboardSupportServerPayload, DashboardUserPayload } from "../types/dashboard";
 import { AccountMenu } from "./AccountMenu";
 import { SmartAvatar } from "./SmartAvatar";
+import { DecorativeVisualTemplate } from "./VisualTemplates";
 
 interface BrowserLandingProps {
   loggedIn: boolean;
@@ -49,8 +50,16 @@ export function Brand({
   const botName = displayName(bot, "Osaka");
   return (
     <span className="osk-brand-lockup" data-compact={compact || undefined}>
-      <span className="osk-brand-symbol" aria-hidden="true"><span className="osk-yin-yang-mark" /></span>
-      <span className="osk-brand-copy"><strong>{botName}</strong><small>Painel</small></span>
+      <SmartAvatar
+        className="osk-brand-symbol osk-brand-bot-avatar"
+        src={bot?.avatarUrl}
+        name={botName}
+        type="user"
+        size={compact ? 34 : 42}
+        alt=""
+        loading="eager"
+      />
+      <span className="osk-brand-copy"><strong>{botName}</strong><small>Dashboard</small></span>
     </span>
   );
 }
@@ -95,12 +104,13 @@ export function BrowserLanding({
       </header>
 
       <main className="osk-minimal-main">
+        <DecorativeVisualTemplate />
         <section className="osk-minimal-hero">
-          <span className="osk-minimal-kicker">Controle com clareza</span>
-          <h1><span>Seu servidor,</span><strong>em equilíbrio.</strong></h1>
-          <p>Escolha um servidor, ajuste cada função e publique as mudanças com segurança.</p>
+          <span className="osk-minimal-kicker">Configuração centralizada</span>
+          <h1>Dashboard</h1>
+          <p>Aqui você pode editar todas as funções do bot de cada servidor que você tenha acesso de maneira rápida</p>
           <button className="osk-primary-button osk-minimal-primary-action" onClick={primaryAction}>
-            {loggedIn ? "Abrir painel" : "Entrar com Discord"}
+            {loggedIn ? "Abrir dashboard" : "Entrar com Discord"}
             <ArrowRight size={17} />
           </button>
         </section>

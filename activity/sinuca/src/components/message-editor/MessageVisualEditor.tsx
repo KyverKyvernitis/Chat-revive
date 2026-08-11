@@ -6,6 +6,7 @@ import { Check, ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { DashboardFieldControl } from "../DashboardFieldControl";
+import { discordAttachmentUrlInfo, isValidPreviewUrl } from "./messageEditorUtils";
 
 interface MessageVisualEditorProps {
   fields: DashboardFieldDefinition[];
@@ -25,6 +26,10 @@ interface MessageVisualEditorProps {
 function valuesEqual(a: unknown, b: unknown) {
   if (Object.is(a, b)) return true;
   try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
+function isPreviewImageUrlField(field: DashboardFieldDefinition): boolean {
+  return field.type === "url" && /(?:^|\.)(?:image|thumbnail|media|avatar|author_icon|footer_icon)_url$/i.test(field.id);
 }
 
 interface ContextualSelectProps {
@@ -248,6 +253,9 @@ export function MessageVisualEditor({
       const contextualOptions = currentText && !configuredOptions.some((option) => option.value === currentText)
         ? [{ value: currentText, label: `${currentText} — valor atual` }, ...configuredOptions]
         : configuredOptions;
+      const imageUrlField = isPreviewImageUrlField(field);
+      const validImageUrl = !currentText || isValidPreviewUrl(currentText);
+      const discordAttachment = imageUrlField ? discordAttachmentUrlInfo(currentText) : null;
       return <section key={field.id} className="osk-message-form__field" data-changed={changed || undefined} data-selected={selectedFieldId === field.id || undefined} data-type={field.type} data-has-description={field.description ? "true" : undefined} onFocusCapture={() => onFocusField?.(field)}>
         <header>
           <div><strong>{field.label}</strong>{field.description && <small>{field.description}</small>}</div>
@@ -263,6 +271,14 @@ export function MessageVisualEditor({
         ) : (
           <DashboardFieldControl field={field} value={draft[field.id]} guildOptions={guildOptions} onChange={onChange} onTextSelection={onTextSelection} selectedColorSlot={selectedColorSlot} colorSlotIds={colorSlotIds} onColorSlotSelect={onColorSlotSelect} />
         )}
+        {imageUrlField && currentText && !validImageUrl ? (
+          <small className="osk-message-url-hint" data-state="error">Cole um link HTTPS completo para carregar a imagem.</small>
+        ) : null}
+        {discordAttachment?.expired ? (
+          <small className="osk-message-url-hint" data-state="error">Este link temporário do Discord expirou. Copie um link novo ou use uma hospedagem permanente.</small>
+        ) : discordAttachment ? (
+          <small className="osk-message-url-hint" data-state="warning">Links de anexos do Discord expiram. A prévia usa uma rota de compatibilidade, mas vale trocar por um link permanente.</small>
+        ) : null}
       </section>;
     })}
   </div>;

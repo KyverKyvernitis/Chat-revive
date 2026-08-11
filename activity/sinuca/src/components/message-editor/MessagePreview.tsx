@@ -18,7 +18,7 @@ import {
 } from "../color-roles/colorRolesModel";
 import { DiscordRichText } from "./DiscordRichText";
 import { MessageInlineTextEditor } from "./MessageInlineTextEditor";
-import { isValidPreviewUrl, normalizePreviewUrl, previewImageCandidates, readableFieldLabel } from "./messageEditorUtils";
+import { discordAttachmentUrlInfo, isValidPreviewUrl, normalizePreviewUrl, previewImageCandidates, readableFieldLabel } from "./messageEditorUtils";
 
 interface MessagePreviewProps {
   sectionId?: string;
@@ -275,6 +275,7 @@ function FieldText({
 function MessageImage({ src, alt, className, placeholder }: { src: string; alt: string; className: string; placeholder: string }) {
   const normalizedSrc = normalizePreviewUrl(src);
   const candidates = useMemo(() => previewImageCandidates(normalizedSrc), [normalizedSrc]);
+  const discordInfo = useMemo(() => discordAttachmentUrlInfo(normalizedSrc), [normalizedSrc]);
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -287,7 +288,8 @@ function MessageImage({ src, alt, className, placeholder }: { src: string; alt: 
 
   const currentSrc = candidates[candidateIndex] || "";
   if (failed || !currentSrc) {
-    return <div className={`${className} osk-message-preview__image-placeholder`} data-error={failed || undefined}>{failed ? "Imagem indisponível" : placeholder}</div>;
+    const errorLabel = discordInfo?.expired ? "Link do Discord expirado" : "Imagem indisponível";
+    return <div className={`${className} osk-message-preview__image-placeholder`} data-error={failed || undefined}>{failed ? errorLabel : placeholder}</div>;
   }
 
   const handleError = () => {

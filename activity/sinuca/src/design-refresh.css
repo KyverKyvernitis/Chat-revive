@@ -2809,6 +2809,28 @@
   gap: 7px;
 }
 
+.osk-message-url-hint {
+  display: block;
+  margin-top: -2px;
+  padding: 7px 9px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 9px;
+  color: #a6adba;
+  background: rgba(255,255,255,.025);
+  font-size: .56rem;
+  line-height: 1.45;
+}
+.osk-message-url-hint[data-state="warning"] {
+  color: #d7b273;
+  border-color: rgba(217,154,61,.22);
+  background: rgba(217,154,61,.055);
+}
+.osk-message-url-hint[data-state="error"] {
+  color: #dc929d;
+  border-color: rgba(218,91,116,.24);
+  background: rgba(218,91,116,.055);
+}
+
 /* Painéis de cargos de cor no próprio canvas. */
 .osk-color-panel-canvas {
   display: grid;
@@ -4191,8 +4213,33 @@
   background: rgba(255, 255, 255, .09);
 }
 
+.osk-message-editor__context-layer[data-view="json"] .osk-message-editor__view-body {
+  overflow: hidden;
+}
+
+.osk-message-editor__context-layer[data-view="json"] .osk-message-json {
+  height: 100%;
+  min-height: 0;
+}
+
+.osk-message-editor__context-layer[data-view="json"] .osk-message-json__head,
+.osk-message-editor__context-layer[data-view="json"] .osk-message-json__actions,
+.osk-message-editor__context-layer[data-view="json"] .osk-message-json__error {
+  flex: 0 0 auto;
+}
+
 .osk-message-editor__context-layer[data-view="json"] .osk-message-editor__view-body .osk-message-json__textarea {
-  min-height: min(420px, calc(var(--osk-message-editor-viewport-height, 100dvh) - 260px));
+  flex: 1 1 220px;
+  min-height: 160px;
+  max-height: 360px;
+  resize: none;
+}
+
+.osk-root .osk-message-editor__context-layer[data-view="json"] .osk-message-json__textarea:focus,
+.osk-root .osk-message-editor__context-layer[data-view="json"] .osk-message-json__textarea:focus-visible {
+  outline: none;
+  border-color: rgba(255,255,255,.48);
+  box-shadow: 0 0 0 2px rgba(255,255,255,.08);
 }
 
 @keyframes osk-context-drop {
@@ -4226,7 +4273,7 @@
   }
 
   .osk-message-editor__context-layer[data-view="json"] .osk-message-editor__context-popover {
-    max-height: min(76dvh, 680px);
+    max-height: min(62svh, 540px, calc(100% - 16px));
   }
 
   .osk-message-editor__context-layer[data-view="inspector"][data-anchored] .osk-message-editor__context-popover {

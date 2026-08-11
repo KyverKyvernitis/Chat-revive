@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { DashboardConfigValidationError, DashboardConfigValueError, type DashboardConfigService } from "../services/dashboardConfigService.js";
 import { buildDashboardCommands } from "../services/dashboardCommandsService.js";
+import { fetchDiscordAttachmentPreview } from "../services/dashboardMediaPreviewService.js";
 import type { DashboardOAuthTokenResult, DashboardSessionService } from "../services/dashboardSessionService.js";
 import {
   createDashboardInviteUrl,
@@ -435,6 +436,24 @@ export function registerDashboardRoutes({
     } catch (error) {
       sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "commands_failed" });
     }
+  });
+
+  app.get("/api/dashboard/media-preview", async (req, res) => {
+    if (!takeRateLimit(req, "media-preview", 120, 10 * 60 * 1000)) {
+      sendNoStoreJson(res, 429, { ok: false, error: "rate_limited" });
+      return;
+    }
+    const session = await requireSession(req, res, sessionService);
+    if (!session) return;
+    const result = await fetchDiscordAttachmentPreview(firstString(req.query.url));
+    if (!result.ok) {
+      sendNoStoreJson(res, result.status, { ok: false, error: result.error });
+      return;
+    }
+    res.setHeader("Cache-Control", "private, max-age=300, stale-while-revalidate=300");
+    res.setHeader("Content-Type", result.contentType);
+    res.setHeader("Content-Length", String(result.body.byteLength));
+    res.status(200).end(result.body);
   });
 
   app.patch("/api/dashboard/guild/:guildId/settings", async (req, res) => {

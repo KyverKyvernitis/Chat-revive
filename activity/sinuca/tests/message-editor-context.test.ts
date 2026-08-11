@@ -5,6 +5,12 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DiscordRichText } from "../src/components/message-editor/DiscordRichText";
 import { MessageVisualEditor } from "../src/components/message-editor/MessageVisualEditor";
+import {
+  discordAttachmentPreviewProxyUrl,
+  discordAttachmentUrlInfo,
+  normalizePreviewUrl,
+  previewImageCandidates,
+} from "../src/components/message-editor/messageEditorUtils";
 import type { DashboardFieldDefinition } from "../src/types/dashboard";
 
 const imageModeField: DashboardFieldDefinition = {
@@ -65,6 +71,45 @@ test("mantém salvar e descartar visíveis junto da barra de formatação", () =
   assert.match(source, /\{activeEditingField && \(\s*<div className="osk-message-editor__text-dock"/);
   assert.match(source, /\)\}\s*<footer className="osk-message-editor__footer"/);
   assert.doesNotMatch(source, /\{activeEditingField \? \(/);
+});
+
+test("limita o editor à viewport pequena sem herdar a altura da página", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+
+  assert.match(css, /\.osk-message-editor\s*\{[^}]*min-height:\s*0\s*!important/s);
+  assert.match(css, /height:\s*min\(var\(--osk-message-editor-viewport-height,\s*100dvh\),\s*100svh\)\s*!important/);
+  assert.match(css, /max-height:\s*min\(var\(--osk-message-editor-viewport-height,\s*100dvh\),\s*100svh\)/);
+});
+
+test("mantém as ações do JSON dentro do painel compacto", () => {
+  const source = readFileSync(new URL("../src/components/message-editor/MessageJsonEditor.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../src/design-refresh.css", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /<strong>JSON avançado<\/strong>/);
+  assert.match(source, /className="osk-message-json__actions"/);
+  assert.match(css, /data-view="json"\][^{]*\.osk-message-json__textarea\s*\{[^}]*min-height:\s*160px[^}]*max-height:\s*360px/s);
+  assert.match(css, /data-view="json"\][^{]*\.osk-message-editor__context-popover\s*\{[^}]*max-height:\s*min\(62svh,\s*540px,\s*calc\(100% - 16px\)\)/s);
+});
+
+test("normaliza e cria fallback autenticado para anexos do Discord", () => {
+  const url = "https:\\/\\/cdn.discordapp.com\\/attachments\\/123456789012345\\/987654321098765\\/image.png?ex=ffffffff\\u0026is=eeeeeeee\\u0026hm=abc";
+  const normalized = normalizePreviewUrl(`\u200B<${url}>`);
+  const candidates = previewImageCandidates(normalized);
+
+  assert.equal(normalized, "https://cdn.discordapp.com/attachments/123456789012345/987654321098765/image.png?ex=ffffffff&is=eeeeeeee&hm=abc");
+  assert.equal(candidates[0], normalized);
+  assert.match(candidates[1], /^https:\/\/media\.discordapp\.net\/attachments\//);
+  assert.equal(candidates[2], discordAttachmentPreviewProxyUrl(normalized));
+  assert.match(candidates[2], /^\/api\/dashboard\/media-preview\?url=/);
+});
+
+test("identifica expiração de links assinados do Discord", () => {
+  const expired = "https://cdn.discordapp.com/attachments/123456789012345/987654321098765/image.png?ex=00000010&is=0&hm=abc";
+  const active = expired.replace("ex=00000010", "ex=ffffffff");
+
+  assert.deepEqual(discordAttachmentUrlInfo(expired, 20_000), { expiresAt: 16_000, expired: true });
+  assert.equal(discordAttachmentUrlInfo(active, 20_000)?.expired, false);
+  assert.equal(discordAttachmentUrlInfo("https://example.com/image.png", 20_000), null);
 });
 
 test("ancora o inspetor ao elemento tocado também no mobile", () => {

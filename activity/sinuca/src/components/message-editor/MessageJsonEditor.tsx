@@ -14,14 +14,12 @@ export function MessageJsonEditor({ value, error, dirty, applying, onChange, onA
   return (
     <div className="osk-message-json">
       <div className="osk-message-json__head">
-        <div>
-          <strong>JSON avançado</strong>
-          <small>Edite os IDs completos dos campos. A mensagem só muda depois de aplicar um JSON válido.</small>
-        </div>
+        <small>Edite os IDs completos dos campos. A prévia só muda depois de aplicar um JSON válido.</small>
         {dirty && <span className="osk-badge" data-state="changed">não aplicado</span>}
       </div>
       <textarea
         className="osk-message-json__textarea"
+        aria-label="JSON da mensagem"
         value={value}
         spellCheck={false}
         aria-invalid={Boolean(error)}

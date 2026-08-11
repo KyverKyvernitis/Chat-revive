@@ -1314,3 +1314,134 @@ body { color: var(--osk-ink); }
     transition-duration: .001ms !important;
   }
 }
+
+/* Editor visual: controles yin-yang sem retirar a fidelidade da prévia do Discord. */
+.osk-message-editor--unified .osk-message-editor__canvas-pane {
+  background:
+    radial-gradient(circle at 50% 0, rgba(255,255,255,.045), transparent 34%),
+    #101010;
+}
+
+.osk-message-editor__context-backdrop {
+  background: rgba(0,0,0,.34);
+}
+
+.osk-message-editor__context-popover {
+  color: var(--osk-ink);
+  border-color: var(--osk-line-bright);
+  background: #101010;
+  box-shadow: 0 24px 72px rgba(0,0,0,.68);
+}
+
+.osk-message-editor__context-popover[data-side="right"]::before,
+.osk-message-editor__context-popover[data-side="left"]::before {
+  border-color: var(--osk-line-bright);
+  background: #101010;
+}
+
+.osk-message-editor__context-popover .osk-message-editor__view-head {
+  color: var(--osk-ink);
+  border-color: var(--osk-line);
+  background: #090909;
+}
+
+.osk-message-editor__context-popover .osk-message-editor__view-head strong,
+.osk-message-editor__context-popover .osk-message-form__field strong,
+.osk-message-editor__context-popover .osk-message-sender-note strong {
+  color: var(--osk-ink);
+}
+
+.osk-message-editor__context-popover .osk-message-editor__view-head small,
+.osk-message-editor__context-popover .osk-message-form__field small,
+.osk-message-editor__context-popover .osk-message-sender-note span {
+  color: var(--osk-muted);
+}
+
+.osk-message-editor__context-popover .osk-message-editor__view-head > button {
+  color: var(--osk-ink);
+  border-color: var(--osk-line);
+  background: rgba(255,255,255,.035);
+}
+
+.osk-message-editor__context-popover .osk-message-editor__view-head > button:hover,
+.osk-message-editor__context-popover .osk-message-editor__view-head > button:focus-visible {
+  color: var(--osk-paper-pure);
+  border-color: var(--osk-ink);
+  background: var(--osk-ink);
+}
+
+.osk-message-editor__context-popover .osk-message-form__field {
+  border-color: var(--osk-line);
+  background: transparent;
+}
+
+.osk-message-editor__context-popover input:not([type="checkbox"]):not([type="color"]),
+.osk-message-editor__context-popover textarea,
+.osk-message-editor__context-popover .osk-select-trigger {
+  color: var(--osk-ink);
+  border-color: var(--osk-line-strong);
+  background: #080808;
+}
+
+.osk-message-context-options {
+  border-color: var(--osk-line-strong);
+  background: #080808;
+}
+
+.osk-message-context-options > button {
+  color: var(--osk-muted);
+}
+
+.osk-message-context-options > button:hover,
+.osk-message-context-options > button:focus-visible {
+  color: var(--osk-ink);
+  border-color: var(--osk-line);
+  background: rgba(255,255,255,.055);
+}
+
+.osk-message-context-options > button[data-selected] {
+  color: var(--osk-paper-pure);
+  border-color: var(--osk-ink);
+  background: var(--osk-ink);
+}
+
+.osk-message-editable:hover,
+.osk-message-editable:focus-visible {
+  background: rgba(255,255,255,.035);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.2);
+}
+
+.osk-message-editable[data-selected],
+.osk-message-sender[data-selected] {
+  background: rgba(255,255,255,.055);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.5);
+}
+
+.osk-message-editable__pencil,
+.osk-message-editable__options,
+.osk-message-sender__pencil,
+.osk-message-editor__text-done {
+  color: #080808;
+  background: var(--osk-ink);
+  box-shadow: 0 4px 14px rgba(0,0,0,.38);
+}
+
+.osk-message-inline-editor {
+  color: var(--osk-ink) !important;
+  background: rgba(5,5,5,.88) !important;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.48) !important;
+}
+
+.osk-message-editor__text-dock {
+  border-color: var(--osk-line);
+  background: rgba(8,8,8,.98);
+}
+
+.osk-message-editor__text-dock-copy strong { color: var(--osk-ink); }
+.osk-message-editor__text-dock-tools button { color: var(--osk-muted); }
+.osk-message-editor__text-dock-tools button:hover,
+.osk-message-editor__text-dock-tools button:focus-visible { color: var(--osk-paper-pure); background: rgba(255,255,255,.09); }
+
+@media (max-width: 899px) {
+  .osk-message-editor__context-backdrop { background: rgba(0,0,0,.48); }
+}

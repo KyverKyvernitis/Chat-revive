@@ -141,8 +141,8 @@ function EditableRegion({
 
   const selected = selectedFieldId === field.id;
   const selectOrEdit = () => {
-    if (selected && textEditable && onEditField) onEditField(field);
-    else onSelectField(field);
+    onSelectField(field);
+    if (textEditable && onEditField) onEditField(field);
   };
 
   return (
@@ -152,6 +152,7 @@ function EditableRegion({
       className={className ? `osk-message-editable ${className}` : "osk-message-editable"}
       data-selected={selected || undefined}
       data-text-editable={textEditable || undefined}
+      data-message-field-anchor={field.id}
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -169,7 +170,7 @@ function EditableRegion({
         event.preventDefault();
         selectOrEdit();
       }}
-      title={selected && textEditable ? `Editar ${field.label}` : `Selecionar ${field.label}`}
+      title={textEditable ? `Editar ${field.label}` : `Configurar ${field.label}`}
     >
       {children ?? <span className="osk-message-preview__ghost">+ {placeholder ?? readableFieldLabel(field)}</span>}
       {selected && textEditable && <span className="osk-message-editable__pencil" aria-hidden="true"><Pencil size={11} /></span>}
@@ -240,7 +241,7 @@ function FieldText({
 
   if (editing && field) {
     return (
-      <div className={className ? `osk-message-editable osk-message-editable--editing ${className}` : "osk-message-editable osk-message-editable--editing"} data-selected="true">
+      <div className={className ? `osk-message-editable osk-message-editable--editing ${className}` : "osk-message-editable osk-message-editable--editing"} data-selected="true" data-message-field-anchor={field.id}>
         <MessageInlineTextEditor
           field={field}
           value={value}
@@ -396,6 +397,7 @@ function AccentControl({ field, selectedFieldId, onSelectField, label = "Editar 
       type="button"
       className="osk-message-preview__accent-control"
       data-selected={selectedFieldId === field.id || undefined}
+      data-message-field-anchor={field.id}
       aria-label={label}
       onClick={(event) => { event.stopPropagation(); onSelectField(field); }}
     />
@@ -722,6 +724,7 @@ function ColorRolesPanelPreview(props: PreviewCoreProps) {
               key={slot.number}
               className="osk-color-panel-canvas__slot"
               data-selected={selected || undefined}
+              data-message-field-anchor={selected ? "color_roles.slots" : undefined}
               data-dark-color={needsLightOutline(color) || undefined}
               style={{
                 "--osk-slot-color": color,
@@ -792,6 +795,7 @@ function SenderHeader({
   selected,
   onSelect,
   onEdit,
+  fieldId,
 }: {
   senderFields: DashboardFieldDefinition[];
   draft: Record<string, unknown>;
@@ -803,6 +807,7 @@ function SenderHeader({
   selected?: boolean;
   onSelect?(): void;
   onEdit?(): void;
+  fieldId?: string;
 }) {
   const sender = useMemo(() => resolveSender({ senderFields, draft, botName, botAvatarUrl, guildName, guildAvatarUrl }), [senderFields, draft, botName, botAvatarUrl, guildName, guildAvatarUrl]);
   const enabled = interactive && senderFields.length > 0 && onSelect;
@@ -814,7 +819,7 @@ function SenderHeader({
   </>;
   if (!enabled) return <div className="osk-message-preview__header">{content}</div>;
   return (
-    <div role="button" tabIndex={0} className="osk-message-preview__header osk-message-sender" data-selected={selected || undefined} data-webhook={sender.enabled || undefined} onClick={(event) => { event.stopPropagation(); activate(); }} onDoubleClick={(event) => { event.stopPropagation(); onSelect?.(); onEdit?.(); }} onKeyDown={(event) => { if (event.key !== "Enter" && event.key !== " ") return; event.preventDefault(); activate(); }} aria-label="Editar remetente da mensagem" title={selected ? "Abrir identidade de envio" : "Selecionar remetente"}>
+    <div role="button" tabIndex={0} className="osk-message-preview__header osk-message-sender" data-selected={selected || undefined} data-webhook={sender.enabled || undefined} data-message-field-anchor={fieldId} onClick={(event) => { event.stopPropagation(); activate(); }} onDoubleClick={(event) => { event.stopPropagation(); onSelect?.(); onEdit?.(); }} onKeyDown={(event) => { if (event.key !== "Enter" && event.key !== " ") return; event.preventDefault(); activate(); }} aria-label="Editar remetente da mensagem" title="Configurar remetente">
       {content}
     </div>
   );
@@ -843,6 +848,8 @@ export function MessagePreview({
   onEditSender,
   onSelectField,
   onEditField,
+  hasFieldOptions,
+  onOpenFieldOptions,
   onFinishEdit,
   onChange,
   onTextSelection,
@@ -876,6 +883,8 @@ export function MessagePreview({
     textSelection,
     onSelectField,
     onEditField,
+    hasFieldOptions,
+    onOpenFieldOptions,
     onFinishEdit,
     onChange,
     onTextSelection,
@@ -884,7 +893,7 @@ export function MessagePreview({
 
   return (
     <div className="osk-message-preview" data-interactive={interactive ? "true" : "false"} data-editor-kind={renderKind}>
-      <SenderHeader senderFields={senderFields} draft={draft} botName={botName} botAvatarUrl={botAvatarUrl} guildName={guildName} guildAvatarUrl={guildAvatarUrl} interactive={interactive} selected={senderSelected} onSelect={onSelectSender} onEdit={onEditSender} />
+      <SenderHeader senderFields={senderFields} draft={draft} botName={botName} botAvatarUrl={botAvatarUrl} guildName={guildName} guildAvatarUrl={guildAvatarUrl} interactive={interactive} selected={senderSelected} onSelect={onSelectSender} onEdit={onEditSender} fieldId={senderFields.find((field) => field.id === "welcome.webhook.enabled")?.id ?? senderFields[0]?.id} />
       <div className="osk-message-preview__canvas" aria-label={`Mensagem editável de ${groupLabel}`}>
         {renderKind === "color-panel" ? <ColorRolesPanelPreview {...shared} />
           : isAdaptiveWelcome && welcomeMode === "components_v2" ? <WelcomeComponentsV2Preview {...shared} dm={isDm} />

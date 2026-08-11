@@ -4,14 +4,18 @@ import {
   Check,
   ChevronLeft,
   Code2,
+  EyeOff,
   Italic,
   Link2,
+  Quote,
   Redo2,
   Strikethrough,
   Undo2,
+  Underline,
   Variable,
+  X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type TransitionEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type TransitionEvent } from "react";
 import { createPortal } from "react-dom";
 import type { DashboardFieldDefinition } from "../../types/dashboard";
 import {
@@ -89,6 +93,13 @@ function editorVisualFieldVisible(editorId: string, fieldId: string, draft: Reco
 }
 
 type MessageEditorView = "canvas" | "inspector" | "variables" | "json";
+
+interface ContextPlacement {
+  left: number;
+  top: number;
+  width: number;
+  side: "left" | "right" | "over";
+}
 
 function relatedContextFields(
   selected: DashboardFieldDefinition | null,
@@ -182,8 +193,14 @@ export function MessageEditor(props: MessageEditorProps) {
   const [pendingJsonChanges, setPendingJsonChanges] = useState<JsonFieldChange[] | null>(null);
   const [activeTextFieldId, setActiveTextFieldId] = useState<string | null>(null);
   const [historyStatus, setHistoryStatus] = useState({ index: 0, length: 0 });
+  const [contextPlacement, setContextPlacement] = useState<ContextPlacement | null>(null);
+  const [contextAnchorFieldId, setContextAnchorFieldId] = useState<string | null>(null);
+  const [textToolNotice, setTextToolNotice] = useState<string | null>(null);
 
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const canvasPaneRef = useRef<HTMLElement | null>(null);
+  const contextPanelRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const closeIntent = useRef<"apply" | "discard" | null>(null);
   const finalIntent = useRef<"apply" | "discard" | null>(null);
@@ -335,6 +352,9 @@ export function MessageEditor(props: MessageEditorProps) {
 
   useEffect(() => {
     setSelectedFieldId(null);
+    setContextAnchorFieldId(null);
+    setTextToolNotice(null);
+    setContextPlacement(null);
     setEditingFieldId(null);
     setSelectedColorSlot(null);
     setView("canvas");
@@ -363,6 +383,8 @@ export function MessageEditor(props: MessageEditorProps) {
   useEffect(() => {
     if (!selectedFieldId || visualFields.some((field) => field.id === selectedFieldId)) return;
     setSelectedFieldId(null);
+    setContextAnchorFieldId(null);
+    setContextPlacement(null);
     setEditingFieldId(null);
     setView("canvas");
     setActiveTextFieldId(null);
@@ -371,6 +393,7 @@ export function MessageEditor(props: MessageEditorProps) {
 
   useEffect(() => {
     if (!editingFieldId) return;
+    setTextToolNotice(null);
     const frame = window.requestAnimationFrame(() => {
       const target = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>("[data-message-inline-field-id]") ?? [])
         .find((element) => element.dataset.messageInlineFieldId === editingFieldId);
@@ -378,6 +401,91 @@ export function MessageEditor(props: MessageEditorProps) {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [editingFieldId]);
+
+  const updateContextPlacement = useCallback(() => {
+    if (viewRef.current !== "inspector" || !contextAnchorFieldId || !workspaceRef.current) {
+      setContextPlacement(null);
+      return;
+    }
+    if (window.matchMedia("(max-width: 899px)").matches) {
+      setContextPlacement(null);
+      return;
+    }
+
+    const workspace = workspaceRef.current;
+    const anchor = Array.from(workspace.querySelectorAll<HTMLElement>("[data-message-field-anchor]"))
+      .find((element) => element.dataset.messageFieldAnchor === contextAnchorFieldId);
+    if (!anchor) {
+      setContextPlacement(null);
+      return;
+    }
+
+    const workspaceRect = workspace.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    const gap = 10;
+    const edge = 12;
+    const width = Math.min(370, Math.max(280, workspaceRect.width - edge * 2));
+    let side: ContextPlacement["side"] = "right";
+    let left = anchorRect.right - workspaceRect.left + gap;
+    if (left + width > workspaceRect.width - edge) {
+      side = "left";
+      left = anchorRect.left - workspaceRect.left - width - gap;
+    }
+    if (left < edge) {
+      side = "over";
+      left = Math.max(edge, Math.min(anchorRect.left - workspaceRect.left, workspaceRect.width - width - edge));
+    }
+
+    const measuredHeight = Math.min(
+      contextPanelRef.current?.getBoundingClientRect().height || 300,
+      Math.max(180, workspaceRect.height - edge * 2),
+    );
+    const top = Math.max(
+      edge,
+      Math.min(anchorRect.top - workspaceRect.top, workspaceRect.height - measuredHeight - edge),
+    );
+    setContextPlacement({ left, top, width, side });
+  }, [contextAnchorFieldId]);
+
+  useEffect(() => {
+    if (view !== "inspector") {
+      setContextPlacement(null);
+      return;
+    }
+    const firstFrame = window.requestAnimationFrame(() => {
+      updateContextPlacement();
+      window.requestAnimationFrame(updateContextPlacement);
+    });
+    const canvas = canvasPaneRef.current;
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateContextPlacement);
+    if (workspaceRef.current) observer?.observe(workspaceRef.current);
+    if (contextPanelRef.current) observer?.observe(contextPanelRef.current);
+    canvas?.addEventListener("scroll", updateContextPlacement, { passive: true });
+    window.addEventListener("resize", updateContextPlacement);
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      observer?.disconnect();
+      canvas?.removeEventListener("scroll", updateContextPlacement);
+      window.removeEventListener("resize", updateContextPlacement);
+    };
+  }, [contextAnchorFieldId, draft, updateContextPlacement, view]);
+
+  useEffect(() => {
+    if (view === "canvas") return;
+    const frame = window.requestAnimationFrame(() => {
+      const panel = contextPanelRef.current;
+      const target = panel?.querySelector<HTMLElement>(
+        ".osk-message-editor__view-body input:not(:disabled), .osk-message-editor__view-body textarea:not(:disabled), .osk-message-editor__view-body button:not(:disabled), .osk-message-editor__view-body select:not(:disabled)",
+      ) ?? panel?.querySelector<HTMLElement>("button:not(:disabled)");
+      target?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [view, selectedFieldId]);
+
+  useEffect(() => {
+    if (!canvasPaneRef.current) return;
+    (canvasPaneRef.current as HTMLElement & { inert: boolean }).inert = view !== "canvas";
+  }, [view]);
 
   useEffect(() => {
     if (!jsonDirty && pendingJsonChanges === null) {
@@ -426,6 +534,10 @@ export function MessageEditor(props: MessageEditorProps) {
     restoreHistoryMarker();
     window.setTimeout(() => dialogRef.current?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)")?.focus(), 0);
     const onBackRequest = () => {
+      if (closeIntent.current) {
+        handleHistoryClose();
+        return;
+      }
       if (viewRef.current !== "canvas") {
         auxiliaryBackRef.current();
         restoreHistoryMarker();
@@ -440,6 +552,7 @@ export function MessageEditor(props: MessageEditorProps) {
         return;
       }
       if (event.key === "Escape") {
+        if (event.defaultPrevented) return;
         if (editingFieldIdRef.current) {
           event.preventDefault();
           setEditingFieldId(null);
@@ -457,7 +570,7 @@ export function MessageEditor(props: MessageEditorProps) {
       if (event.key !== "Tab" || !dialogRef.current) return;
       const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
         'button:not(:disabled), [href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])',
-      )).filter((element) => element.offsetParent !== null);
+      )).filter((element) => element.offsetParent !== null && !element.closest("[inert]"));
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -548,14 +661,16 @@ export function MessageEditor(props: MessageEditorProps) {
   function handleSelectSender() {
     if (!senderPrimaryField || jsonDirty || pendingJsonChanges) return;
     setSelectedFieldId(senderPrimaryField.id);
+    setContextAnchorFieldId(senderPrimaryField.id);
     setEditingFieldId(null);
     setActiveTextFieldId(null);
-    setView("canvas");
+    setView("inspector");
   }
 
   function handleEditSender() {
     if (!senderPrimaryField || jsonDirty || pendingJsonChanges) return;
     setSelectedFieldId(senderPrimaryField.id);
+    setContextAnchorFieldId(senderPrimaryField.id);
     setEditingFieldId(null);
     setActiveTextFieldId(null);
     setView("inspector");
@@ -574,17 +689,22 @@ export function MessageEditor(props: MessageEditorProps) {
       return;
     }
     if (field.type === "text" || field.type === "textarea") {
+      setContextAnchorFieldId(null);
       setActiveTextFieldId(field.id);
       setView("canvas");
       if (textSelectionRef.current?.fieldId !== field.id) textSelectionRef.current = null;
       return;
     }
+    setActiveTextFieldId(null);
+    textSelectionRef.current = null;
+    setContextAnchorFieldId(field.id);
     setView("inspector");
   }
 
   function handleEditField(field: DashboardFieldDefinition) {
     if (jsonDirty || pendingJsonChanges || (field.type !== "text" && field.type !== "textarea")) return;
     setSelectedFieldId(field.id);
+    setContextAnchorFieldId(null);
     setActiveTextFieldId(field.id);
     setView("canvas");
     setEditingFieldId(field.id);
@@ -610,6 +730,16 @@ export function MessageEditor(props: MessageEditorProps) {
     });
   }
 
+  function textChangeAllowed(field: DashboardFieldDefinition, next: string): boolean {
+    if (field.maxLength !== undefined && next.length > field.maxLength) {
+      setTextToolNotice(`Limite de ${field.maxLength} caracteres`);
+      focusTextControl(field.id, textSelectionRef.current?.start ?? next.length, textSelectionRef.current?.end ?? next.length);
+      return false;
+    }
+    setTextToolNotice(null);
+    return true;
+  }
+
   function replaceTextSelection(insertion: string, selectInserted = false) {
     if (!activeTextField) return;
     const current = String(latestDraftRef.current[activeTextField.id] ?? "");
@@ -617,9 +747,10 @@ export function MessageEditor(props: MessageEditorProps) {
     const start = Math.max(0, Math.min(current.length, saved?.start ?? current.length));
     const end = Math.max(start, Math.min(current.length, saved?.end ?? start));
     const next = `${current.slice(0, start)}${insertion}${current.slice(end)}`;
+    if (!textChangeAllowed(activeTextField, next)) return;
     const nextStart = selectInserted ? start : start + insertion.length;
     const nextEnd = start + insertion.length;
-    recordChanges([{ field: activeTextField, raw: next }], true);
+    recordChanges([{ field: activeTextField, raw: next }], false);
     textSelectionRef.current = { fieldId: activeTextField.id, start: nextStart, end: nextEnd };
     setSelectedFieldId(activeTextField.id);
     focusTextControl(activeTextField.id, nextStart, nextEnd);
@@ -634,9 +765,28 @@ export function MessageEditor(props: MessageEditorProps) {
     const selected = current.slice(start, end) || placeholder;
     const insertion = `${prefix}${selected}${suffix}`;
     const next = `${current.slice(0, start)}${insertion}${current.slice(end)}`;
+    if (!textChangeAllowed(activeTextField, next)) return;
     const selectionStart = start + prefix.length;
     const selectionEnd = selectionStart + selected.length;
-    recordChanges([{ field: activeTextField, raw: next }], true);
+    recordChanges([{ field: activeTextField, raw: next }], false);
+    textSelectionRef.current = { fieldId: activeTextField.id, start: selectionStart, end: selectionEnd };
+    setSelectedFieldId(activeTextField.id);
+    focusTextControl(activeTextField.id, selectionStart, selectionEnd);
+  }
+
+  function prefixTextLines(prefix: string, placeholder: string) {
+    if (!activeTextField) return;
+    const current = String(latestDraftRef.current[activeTextField.id] ?? "");
+    const saved = textSelectionRef.current?.fieldId === activeTextField.id ? textSelectionRef.current : null;
+    const start = Math.max(0, Math.min(current.length, saved?.start ?? current.length));
+    const end = Math.max(start, Math.min(current.length, saved?.end ?? start));
+    const selected = current.slice(start, end) || placeholder;
+    const insertion = selected.split("\n").map((line) => `${prefix}${line}`).join("\n");
+    const next = `${current.slice(0, start)}${insertion}${current.slice(end)}`;
+    if (!textChangeAllowed(activeTextField, next)) return;
+    const selectionStart = start + prefix.length;
+    const selectionEnd = start + insertion.length;
+    recordChanges([{ field: activeTextField, raw: next }], false);
     textSelectionRef.current = { fieldId: activeTextField.id, start: selectionStart, end: selectionEnd };
     setSelectedFieldId(activeTextField.id);
     focusTextControl(activeTextField.id, selectionStart, selectionEnd);
@@ -661,20 +811,36 @@ export function MessageEditor(props: MessageEditorProps) {
   const activeEditingValue = activeEditingField ? String(draft[activeEditingField.id] ?? "") : "";
   const applyDisabled = Boolean(pendingJsonChanges);
   const canvasInteractive = !jsonDirty && !pendingJsonChanges;
+  const contextTitle = view === "variables" ? "Variáveis"
+    : view === "json" ? "JSON avançado"
+      : senderSelected ? "Remetente da mensagem"
+        : presentation === "color_panel" && selectedColorSlot
+          ? `Opção ${Math.max(1, (activeColorPanel?.slots.indexOf(selectedColorSlot) ?? 0) + 1)}`
+          : inspectorFields[0]?.label ?? selectedField?.label ?? "Propriedades";
+  const contextDescription = view === "variables"
+    ? (activeTextField ? `Inserir em ${activeTextField.label}` : "Toque em uma variável para copiar")
+    : view === "json" ? "Edição técnica da mensagem"
+      : senderSelected ? "Nome e avatar usados no envio"
+        : "Alterações aparecem imediatamente na prévia";
 
   function openVariables() {
     setEditingFieldId(null);
+    setContextPlacement(null);
+    setContextAnchorFieldId(null);
     setView("variables");
   }
 
   function openJson() {
     setEditingFieldId(null);
+    setContextPlacement(null);
+    setContextAnchorFieldId(null);
     setView("json");
   }
 
   function openInspector(field = selectedField) {
     if (!field || jsonDirty || pendingJsonChanges) return;
     setSelectedFieldId(field.id);
+    setContextAnchorFieldId(field.id);
     setEditingFieldId(null);
     setView("inspector");
   }
@@ -685,12 +851,14 @@ export function MessageEditor(props: MessageEditorProps) {
       if (!window.confirm("Descartar as alterações não aplicadas do JSON?")) return;
       discardJson();
     }
+    setContextPlacement(null);
+    setContextAnchorFieldId(null);
     setView("canvas");
   }
 
   auxiliaryBackRef.current = leaveAuxiliaryView;
 
-  function preventToolbarBlur(event: ReactMouseEvent<HTMLButtonElement>) {
+  function preventToolbarBlur(event: ReactPointerEvent<HTMLButtonElement>) {
     event.preventDefault();
   }
 
@@ -698,6 +866,12 @@ export function MessageEditor(props: MessageEditorProps) {
     if (event.target !== event.currentTarget || visible || !closing.current) return;
     if (event.propertyName === "opacity") finalizeClose();
   }
+
+  const contextStyle = contextPlacement ? ({
+    "--osk-message-context-left": `${contextPlacement.left}px`,
+    "--osk-message-context-top": `${contextPlacement.top}px`,
+    "--osk-message-context-width": `${contextPlacement.width}px`,
+  } as CSSProperties) : undefined;
 
   const editor = <div
     ref={dialogRef}
@@ -733,100 +907,111 @@ export function MessageEditor(props: MessageEditorProps) {
         </div>
       </header>
 
-      <div className="osk-message-editor__workspace">
-        {view === "canvas" ? (
-          <section className="osk-message-editor__canvas-pane">
-            <MessagePreview
-              sectionId={sectionId}
-              editorId={editorId}
-              groupLabel={groupLabel}
-              presentation={presentation}
-              fields={messageFields}
-              senderFields={senderFields}
-              draft={draft}
-              guildOptions={guildOptions}
-              botName={botName}
-              botAvatarUrl={botAvatarUrl}
-              guildName={guildName}
-              guildAvatarUrl={guildAvatarUrl}
-              interactive={canvasInteractive}
-              senderSelected={senderSelected}
-              onSelectSender={handleSelectSender}
-              onEditSender={handleEditSender}
-              selectedFieldId={selectedFieldId}
-              editingFieldId={editingFieldId}
-              selectedColorSlot={selectedColorSlot}
-              textSelection={textSelectionRef.current}
-              onSelectField={handleSelectField}
-              onEditField={handleEditField}
-              hasFieldOptions={(field) => relatedContextFields(field, visualFields).length > 1}
-              onOpenFieldOptions={openInspector}
-              onFinishEdit={() => setEditingFieldId(null)}
-              onChange={handleFieldChange}
-              onTextSelection={handleTextSelection}
-              onSelectColorSlot={(slotNumber, openInspector = false) => {
-                const repeated = selectedColorSlot === slotNumber && selectedFieldId === "color_roles.slots";
-                setSelectedColorSlot(slotNumber);
-                setSelectedFieldId("color_roles.slots");
-                setEditingFieldId(null);
-                setActiveTextFieldId(null);
-                setView(openInspector || repeated ? "inspector" : "canvas");
-              }}
-            />
-            {!canvasInteractive && <div className="osk-message-editor__canvas-lock"><Braces size={17} /><span>Aplique ou descarte o JSON pendente para voltar à edição visual.</span></div>}
-          </section>
-        ) : (
-          <section className="osk-message-editor__editor-view">
-            <div className="osk-message-editor__view-head">
-              <button type="button" onClick={leaveAuxiliaryView} disabled={Boolean(pendingJsonChanges)} aria-label="Voltar à mensagem"><ChevronLeft size={18} /></button>
-              <div>
-                <strong>{view === "variables" ? "Variáveis" : view === "json" ? "JSON avançado" : senderSelected ? "Remetente da mensagem" : presentation === "color_panel" && selectedColorSlot ? `Opção ${Math.max(1, (activeColorPanel?.slots.indexOf(selectedColorSlot) ?? 0) + 1)}` : selectedField?.label ?? "Propriedades"}</strong>
-                <small>{view === "variables" ? (activeTextField ? `Inserir em ${activeTextField.label}` : "Toque em uma variável para copiar") : view === "json" ? "Edição técnica da mensagem" : senderSelected ? "Nome e avatar usados no envio" : "Configurações do elemento selecionado"}</small>
+      <div ref={workspaceRef} className="osk-message-editor__workspace" data-context-open={view !== "canvas" || undefined}>
+        <section ref={canvasPaneRef} className="osk-message-editor__canvas-pane" aria-hidden={view !== "canvas" || undefined}>
+          <MessagePreview
+            sectionId={sectionId}
+            editorId={editorId}
+            groupLabel={groupLabel}
+            presentation={presentation}
+            fields={messageFields}
+            senderFields={senderFields}
+            draft={draft}
+            guildOptions={guildOptions}
+            botName={botName}
+            botAvatarUrl={botAvatarUrl}
+            guildName={guildName}
+            guildAvatarUrl={guildAvatarUrl}
+            interactive={canvasInteractive}
+            senderSelected={senderSelected}
+            onSelectSender={handleSelectSender}
+            onEditSender={handleEditSender}
+            selectedFieldId={selectedFieldId}
+            editingFieldId={editingFieldId}
+            selectedColorSlot={selectedColorSlot}
+            textSelection={textSelectionRef.current}
+            onSelectField={handleSelectField}
+            onEditField={handleEditField}
+            hasFieldOptions={(field) => relatedContextFields(field, visualFields).length > 1}
+            onOpenFieldOptions={openInspector}
+            onFinishEdit={() => setEditingFieldId(null)}
+            onChange={handleFieldChange}
+            onTextSelection={handleTextSelection}
+            onSelectColorSlot={(slotNumber) => {
+              setSelectedColorSlot(slotNumber);
+              setSelectedFieldId("color_roles.slots");
+              setContextAnchorFieldId("color_roles.slots");
+              setEditingFieldId(null);
+              setActiveTextFieldId(null);
+              setView("inspector");
+            }}
+          />
+          {!canvasInteractive && <div className="osk-message-editor__canvas-lock"><Braces size={17} /><span>Aplique ou descarte o JSON pendente para voltar à edição visual.</span></div>}
+        </section>
+
+        {view !== "canvas" && (
+          <div className="osk-message-editor__context-layer" data-view={view} data-anchored={Boolean(contextPlacement) || undefined}>
+            <button type="button" className="osk-message-editor__context-backdrop" onClick={leaveAuxiliaryView} disabled={Boolean(pendingJsonChanges)} aria-label="Fechar configurações" />
+            <section
+              ref={contextPanelRef}
+              className="osk-message-editor__context-popover osk-message-editor__editor-view"
+              data-side={contextPlacement?.side}
+              style={contextStyle}
+              role="dialog"
+              aria-label={contextTitle}
+            >
+              <div className="osk-message-editor__view-head">
+                <div>
+                  <strong>{contextTitle}</strong>
+                  <small>{contextDescription}</small>
+                </div>
+                <button type="button" onClick={leaveAuxiliaryView} disabled={Boolean(pendingJsonChanges)} aria-label="Fechar"><X size={17} /></button>
               </div>
-            </div>
-            <div className="osk-message-editor__view-body">
-              {view === "variables" ? (
-                <MessageVariablesPanel variables={variables} insertTargetLabel={activeTextField?.label} onInsert={activeTextField ? handleInsertVariable : undefined} />
-              ) : view === "json" ? (
-                <MessageJsonEditor
-                  value={jsonText}
-                  error={jsonError}
-                  dirty={jsonDirty}
-                  applying={Boolean(pendingJsonChanges)}
-                  onChange={handleJsonChange}
-                  onApply={() => applyJson(false)}
-                  onDiscard={() => { discardJson(); setView("canvas"); }}
-                />
-              ) : selectedField ? (
-                <>
-                  {senderSelected && <div className="osk-message-sender-note" data-enabled={senderEnabled || undefined}>
-                    <strong>{senderEnabled ? "Webhook ativado" : "Enviado pela Osaka"}</strong>
-                    <span>{senderEnabled ? "A identidade abaixo será usada apenas nesta mensagem." : "Ative o webhook para escolher outro nome e avatar."}</span>
-                  </div>}
-                  <MessageVisualEditor
-                  fields={inspectorFields}
-                  baseline={baseline}
-                  draft={draft}
-                  guildOptions={guildOptions}
-                  onChange={handleFieldChange}
-                  selectedFieldId={selectedFieldId}
-                  selectedColorSlot={selectedColorSlot}
-                  colorSlotIds={colorSlotIds}
-                  onColorSlotSelect={(slotNumber) => setSelectedColorSlot(slotNumber)}
-                  onFocusField={(field) => {
-                    setSelectedFieldId(field.id);
-                    if (field.type !== "text" && field.type !== "textarea") return;
-                    setActiveTextFieldId(field.id);
-                    if (textSelectionRef.current?.fieldId !== field.id) textSelectionRef.current = null;
-                  }}
-                  onTextSelection={handleTextSelection}
-                />
-                </>
-              ) : (
-                <div className="osk-message-empty">Selecione um elemento da mensagem para abrir suas propriedades.</div>
-              )}
-            </div>
-          </section>
+              <div className="osk-message-editor__view-body">
+                {view === "variables" ? (
+                  <MessageVariablesPanel variables={variables} insertTargetLabel={activeTextField?.label} onInsert={activeTextField ? handleInsertVariable : undefined} />
+                ) : view === "json" ? (
+                  <MessageJsonEditor
+                    value={jsonText}
+                    error={jsonError}
+                    dirty={jsonDirty}
+                    applying={Boolean(pendingJsonChanges)}
+                    onChange={handleJsonChange}
+                    onApply={() => applyJson(false)}
+                    onDiscard={() => { discardJson(); setView("canvas"); }}
+                  />
+                ) : selectedField ? (
+                  <>
+                    {senderSelected && <div className="osk-message-sender-note" data-enabled={senderEnabled || undefined}>
+                      <strong>{senderEnabled ? "Webhook ativado" : "Enviado pela Osaka"}</strong>
+                      <span>{senderEnabled ? "A identidade abaixo será usada apenas nesta mensagem." : "Ative o webhook para escolher outro nome e avatar."}</span>
+                    </div>}
+                    <MessageVisualEditor
+                      fields={inspectorFields}
+                      baseline={baseline}
+                      draft={draft}
+                      guildOptions={guildOptions}
+                      onChange={handleFieldChange}
+                      selectedFieldId={selectedFieldId}
+                      selectedColorSlot={selectedColorSlot}
+                      colorSlotIds={colorSlotIds}
+                      onColorSlotSelect={(slotNumber) => setSelectedColorSlot(slotNumber)}
+                      onFocusField={(field) => {
+                        setSelectedFieldId(field.id);
+                        if (field.type !== "text" && field.type !== "textarea") return;
+                        setActiveTextFieldId(field.id);
+                        if (textSelectionRef.current?.fieldId !== field.id) textSelectionRef.current = null;
+                      }}
+                      onTextSelection={handleTextSelection}
+                      contextual
+                    />
+                  </>
+                ) : (
+                  <div className="osk-message-empty">Selecione um elemento da mensagem para abrir suas propriedades.</div>
+                )}
+              </div>
+            </section>
+          </div>
         )}
       </div>
 
@@ -835,21 +1020,25 @@ export function MessageEditor(props: MessageEditorProps) {
           <div className="osk-message-editor__text-dock-copy">
             <strong>{activeEditingField.label}</strong>
             {activeEditingField.maxLength ? <span>{activeEditingValue.length}/{activeEditingField.maxLength}</span> : null}
+            {textToolNotice && <em role="status">{textToolNotice}</em>}
           </div>
           <div className="osk-message-editor__text-dock-tools" aria-label="Formatação de texto">
-            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("**", "**", "texto")} title="Negrito"><Bold size={16} /></button>
-            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("*", "*", "texto")} title="Itálico"><Italic size={16} /></button>
-            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("~~", "~~", "texto")} title="Tachado"><Strikethrough size={16} /></button>
-            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("`", "`", "código")} title="Código"><Code2 size={16} /></button>
-            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("[", "](https://)", "texto do link")} title="Link"><Link2 size={16} /></button>
-            {variables?.items.length ? <button type="button" onMouseDown={preventToolbarBlur} onClick={openVariables} title="Inserir variável"><Variable size={16} /></button> : null}
+            <button type="button" onPointerDown={preventToolbarBlur} onClick={() => wrapText("**", "**", "texto")} aria-label="Negrito" title="Negrito"><Bold size={16} /></button>
+            <button type="button" onPointerDown={preventToolbarBlur} onClick={() => wrapText("*", "*", "texto")} aria-label="Itálico" title="Itálico"><Italic size={16} /></button>
+            <button type="button" onPointerDown={preventToolbarBlur} onClick={() => wrapText("__", "__", "texto")} aria-label="Sublinhado" title="Sublinhado"><Underline size={16} /></button>
+            <button type="button" onPointerDown={preventToolbarBlur} onClick={() => wrapText("~~", "~~", "texto")} aria-label="Tachado" title="Tachado"><Strikethrough size={16} /></button>
+            <button type="button" onPointerDown={preventToolbarBlur} onClick={() => wrapText("||", "||", "texto")} aria-label="Spoiler" title="Spoiler"><EyeOff size={16} /></button>
+            <button type="button" onPointerDown={preventToolbarBlur} onClick={() => prefixTextLines("> ", "texto")} aria-label="Citação" title="Citação"><Quote size={16} /></button>
+            <button type="button" onPointerDown={preventToolbarBlur} onClick={() => wrapText("`", "`", "código")} aria-label="Código" title="Código"><Code2 size={16} /></button>
+            <button type="button" onPointerDown={preventToolbarBlur} onClick={() => wrapText("[", "](https://)", "texto do link")} aria-label="Link" title="Link"><Link2 size={16} /></button>
+            {variables?.items.length ? <button type="button" onPointerDown={preventToolbarBlur} onClick={openVariables} aria-label="Inserir variável" title="Inserir variável"><Variable size={16} /></button> : null}
           </div>
-          <button type="button" className="osk-message-editor__text-done" onClick={() => setEditingFieldId(null)}><Check size={16} />Concluir</button>
+          <button type="button" className="osk-message-editor__text-done" onPointerDown={preventToolbarBlur} onClick={() => setEditingFieldId(null)}><Check size={16} />Pronto</button>
         </div>
       ) : (
         <footer className="osk-message-editor__footer">
-          <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Descartar</button>
-          <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>{pendingJsonChanges ? "Aplicando..." : localDirty || jsonDirty ? "Aplicar ao rascunho" : "Concluir"}</button>
+          <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Descartar alterações</button>
+          <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>{pendingJsonChanges ? "Aplicando..." : localDirty || jsonDirty ? "Aplicar alterações" : "Concluir"}</button>
         </footer>
       )}
     </div>

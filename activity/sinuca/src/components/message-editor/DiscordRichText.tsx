@@ -18,7 +18,7 @@ type InlineToken =
   | { type: "templateVariable"; raw: string; key: string; mentionKind?: "user" | "channel" };
 
 const DISCORD_TOKEN_RE = /(<a?:[^:\s>]+:\d{15,25}>|<@!?\d{15,25}>|<@&\d{15,25}>|<#\d{15,25}>|\$\{[A-Za-z0-9_]+\}|\{[A-Za-z0-9_]+\})/g;
-const INLINE_MARKDOWN_RE = /(\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|`[^`]+`|\*[^*]+\*|https?:\/\/[^\s<]+)/g;
+const INLINE_MARKDOWN_RE = /(\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\|\|[^|]+\|\||`[^`]+`|\*[^*]+\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s<]+)/g;
 
 function tokenizeDiscordText(text: string): InlineToken[] {
   const tokens: InlineToken[] = [];
@@ -59,10 +59,17 @@ function renderInlineMarkdown(text: string, prefix: string): ReactNode[] {
       nodes.push(<u key={key}>{match.slice(2, -2)}</u>);
     } else if (match.startsWith("~~") && match.endsWith("~~")) {
       nodes.push(<s key={key}>{match.slice(2, -2)}</s>);
+    } else if (match.startsWith("||") && match.endsWith("||")) {
+      nodes.push(<span key={key} className="osk-discord-spoiler" title="Spoiler">{match.slice(2, -2)}</span>);
     } else if (match.startsWith("`") && match.endsWith("`")) {
       nodes.push(<code key={key}>{match.slice(1, -1)}</code>);
     } else if (match.startsWith("*") && match.endsWith("*")) {
       nodes.push(<em key={key}>{match.slice(1, -1)}</em>);
+    } else if (match.startsWith("[") && match.includes("](http")) {
+      const parsedLink = /^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/.exec(match);
+      nodes.push(parsedLink
+        ? <span key={key} className="osk-discord-link" title={parsedLink[2]}>{parsedLink[1]}</span>
+        : match);
     } else if (match.startsWith("http://") || match.startsWith("https://")) {
       nodes.push(<span key={key} className="osk-discord-link">{match}</span>);
     } else {
@@ -130,7 +137,11 @@ function renderTextToken(value: string, keyPrefix: string): ReactNode[] {
     }
     const lines = block.split("\n");
     lines.forEach((line, lineIndex) => {
-      result.push(...renderInlineMarkdown(line, `${blockKey}-${lineIndex}`));
+      const quoted = line.startsWith("> ");
+      const lineContent = quoted ? line.slice(2) : line;
+      const renderedLine = renderInlineMarkdown(lineContent, `${blockKey}-${lineIndex}`);
+      if (quoted) result.push(<span key={`${blockKey}-quote-${lineIndex}`} className="osk-discord-quote">{renderedLine}</span>);
+      else result.push(...renderedLine);
       if (lineIndex < lines.length - 1) result.push(<br key={`${blockKey}-br-${lineIndex}`} />);
     });
   });

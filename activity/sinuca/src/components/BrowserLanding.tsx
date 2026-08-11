@@ -1,14 +1,9 @@
 import {
   ArrowRight,
-  Cake,
-  ClipboardList,
-  DoorOpen,
   LogIn,
   MessagesSquare,
-  Palette,
-  Ticket,
-  Volume2,
 } from "lucide-react";
+import { MODULE_CATALOG, type ModuleVisualMeta } from "../moduleCatalog";
 import type { DashboardSupportServerPayload, DashboardUserPayload } from "../types/dashboard";
 import { AccountMenu } from "./AccountMenu";
 import { SmartAvatar } from "./SmartAvatar";
@@ -27,14 +22,10 @@ interface BrowserLandingProps {
   onNavigate(path: string): void;
 }
 
-const features = [
-  { icon: DoorOpen, title: "Boas-vindas" },
-  { icon: Ticket, title: "Tickets" },
-  { icon: ClipboardList, title: "Formulários" },
-  { icon: Palette, title: "Cargos de cor" },
-  { icon: Cake, title: "Aniversários" },
-  { icon: Volume2, title: "TTS" },
-];
+const landingFeatureIds = ["welcome", "tickets", "forms", "color_roles", "birthday", "tts"] as const;
+const features = landingFeatureIds
+  .map((id) => MODULE_CATALOG.find((module) => module.id === id))
+  .filter((module): module is ModuleVisualMeta => Boolean(module));
 
 function displayName(identity: DashboardUserPayload | null, fallback: string) {
   return identity?.global_name?.trim() || identity?.username?.trim() || fallback;
@@ -119,9 +110,12 @@ export function BrowserLanding({
           <h2 id="landing-features-title">Funções</h2>
           <div className="osk-minimal-feature-grid">
             {features.map((feature) => (
-              <article key={feature.title}>
-                <span aria-hidden="true"><feature.icon size={20} /></span>
-                <h3>{feature.title}</h3>
+              <article key={feature.id}>
+                <div className="osk-minimal-feature-heading">
+                  <span className="osk-minimal-feature-icon" aria-hidden="true"><feature.icon size={20} /></span>
+                  <h3>{feature.label}</h3>
+                </div>
+                <p>{feature.description}</p>
               </article>
             ))}
           </div>

@@ -1546,17 +1546,25 @@
 }
 
 .osk-minimal-feature-grid article {
-  min-height: 76px;
+  min-height: 112px;
   display: flex;
-  align-items: center;
-  gap: 13px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 11px;
   padding: 14px;
   border: 1px solid var(--osk-line);
   border-radius: 15px;
   background: rgba(255, 255, 255, .022);
 }
 
-.osk-minimal-feature-grid article > span {
+.osk-minimal-feature-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.osk-minimal-feature-icon {
   width: 40px;
   height: 40px;
   flex: 0 0 auto;
@@ -1572,6 +1580,13 @@
   color: var(--osk-text);
   font-size: .86rem;
   line-height: 1.2;
+}
+
+.osk-minimal-feature-grid p {
+  margin: 0;
+  color: var(--osk-text-soft);
+  font-size: .73rem;
+  line-height: 1.42;
 }
 
 
@@ -1590,7 +1605,7 @@
   }
 
   .osk-minimal-hero {
-    padding: 42px 0 46px;
+    padding: 32px 0 36px;
   }
 
   .osk-minimal-hero h1 {
@@ -1612,7 +1627,7 @@
   }
 
   .osk-minimal-features {
-    padding: 31px 0 18px;
+    padding: 24px 0 18px;
   }
 
   .osk-minimal-features > h2 {
@@ -1626,25 +1641,34 @@
   }
 
   .osk-minimal-feature-grid article {
-    min-height: 68px;
-    gap: 10px;
+    min-height: 108px;
+    gap: 9px;
     padding: 10px;
     border-radius: 13px;
   }
 
-  .osk-minimal-feature-grid article > span {
+  .osk-minimal-feature-heading {
+    gap: 10px;
+  }
+
+  .osk-minimal-feature-icon {
     width: 35px;
     height: 35px;
     border-radius: 10px;
   }
 
-  .osk-minimal-feature-grid article > span svg {
+  .osk-minimal-feature-icon svg {
     width: 18px;
     height: 18px;
   }
 
   .osk-minimal-feature-grid h3 {
     font-size: .75rem;
+  }
+
+  .osk-minimal-feature-grid p {
+    font-size: .69rem;
+    line-height: 1.38;
   }
 
 }
@@ -1656,6 +1680,10 @@
 
   .osk-minimal-feature-grid h3 {
     font-size: .7rem;
+  }
+
+  .osk-minimal-feature-grid p {
+    font-size: .67rem;
   }
 }
 

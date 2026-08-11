@@ -14,12 +14,12 @@ export interface ModuleVisualMeta {
 }
 
 export const MODULE_CATALOG: ModuleVisualMeta[] = [
-  { id: "welcome", label: "Boas-vindas", description: "Mensagens, cargos automáticos e aparência.", icon: DoorOpen, group: "main" },
-  { id: "forms", label: "Formulários", description: "Perguntas, respostas e fluxo de aprovação.", icon: ClipboardList, group: "main", aliases: ["form", "formularios"] },
-  { id: "tickets", label: "Tickets", description: "Atendimento, equipe e permissões.", icon: Ticket, group: "main", aliases: ["ticket"] },
-  { id: "color_roles", label: "Cargos de cor", description: "Painéis e cargos personalizados.", icon: Palette, group: "main", aliases: ["colors", "colorroles", "color-roles"] },
-  { id: "birthday", label: "Aniversários", description: "Cadastro, calendário e anúncios.", icon: Cake, group: "main", aliases: ["birthdays"] },
-  { id: "tts", label: "TTS", description: "Voz, idioma, canais e regras de leitura.", icon: Volume2, group: "main" },
+  { id: "welcome", label: "Boas-vindas", description: "Mensagens, cargos automáticos e aparência", icon: DoorOpen, group: "main" },
+  { id: "forms", label: "Formulários", description: "Perguntas, respostas e fluxo de aprovação", icon: ClipboardList, group: "main", aliases: ["form", "formularios"] },
+  { id: "tickets", label: "Tickets", description: "Painéis, atendimento e permissões da equipe", icon: Ticket, group: "main", aliases: ["ticket"] },
+  { id: "color_roles", label: "Cargos de cor", description: "Painéis para escolher e organizar cores", icon: Palette, group: "main", aliases: ["colors", "colorroles", "color-roles"] },
+  { id: "birthday", label: "Aniversários", description: "Cadastro, calendário e avisos automáticos", icon: Cake, group: "main", aliases: ["birthdays"] },
+  { id: "tts", label: "Texto pra Voz", description: "Vozes, idiomas e regras de leitura", icon: Volume2, group: "main" },
   { id: "general", label: "Geral", description: "Preferências básicas do bot neste servidor.", icon: Settings, group: "system", aliases: ["guild"] },
 ];
 

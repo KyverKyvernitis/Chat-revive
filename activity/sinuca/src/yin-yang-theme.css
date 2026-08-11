@@ -226,9 +226,9 @@ body { color: var(--osk-ink); }
 .osk-minimal-hero {
   position: relative;
   max-width: 760px;
-  min-height: 560px;
-  align-content: center;
-  padding-block: clamp(5rem, 10vw, 9rem);
+  min-height: 0;
+  align-content: start;
+  padding-block: clamp(3.5rem, 7vw, 5.5rem) clamp(3rem, 6vw, 4.5rem);
 }
 
 .osk-minimal-kicker,
@@ -292,13 +292,13 @@ body { color: var(--osk-ink); }
   transform: translateY(-3px);
 }
 
-.osk-minimal-feature-grid article > span,
+.osk-minimal-feature-icon,
 .osk-support-card-icon {
   color: var(--osk-paper-pure);
   background: var(--osk-ink);
 }
 
-.osk-minimal-feature-grid article:hover > span,
+.osk-minimal-feature-grid article:hover .osk-minimal-feature-icon,
 .osk-support-card:hover .osk-support-card-icon {
   color: var(--osk-ink);
   background: var(--osk-paper-pure);
@@ -306,6 +306,9 @@ body { color: var(--osk-ink); }
 
 .osk-support-card-copy small,
 .osk-support-card-action { color: var(--osk-muted); }
+.osk-minimal-feature-grid p { color: var(--osk-muted); }
+.osk-minimal-feature-grid article:hover h3,
+.osk-minimal-feature-grid article:hover p { color: #4b4b4b; }
 .osk-support-card:hover small,
 .osk-support-card:hover .osk-support-card-action { color: #4b4b4b; }
 
@@ -729,14 +732,13 @@ body { color: var(--osk-ink); }
 @media (max-width: 980px) {
   .osk-dashboard-sidebar { box-shadow: 20px 0 70px rgba(7,7,7,.3); }
   .osk-decorative-template { right: max(-3rem, var(--osk-decorative-right)); max-width: 40vw; }
-  .osk-minimal-hero { min-height: 500px; }
 }
 
 @media (max-width: 720px) {
   .osk-minimal-nav { background: rgba(7,7,7,.94); }
   .osk-decorative-template { top: 7rem; right: -3rem; width: min(var(--osk-decorative-size), 15rem); max-width: 58vw; }
   .osk-decorative-template[data-ready] { opacity: calc(var(--osk-decorative-opacity) * .34); }
-  .osk-minimal-hero { min-height: 480px; padding-block: 5rem 4rem; }
+  .osk-minimal-hero { min-height: 0; padding-block: 2rem 2.25rem; }
   .osk-minimal-hero h1 { font-size: clamp(3.2rem, 17vw, 5.2rem); }
   .osk-function-title { align-items: flex-start; flex-direction: column; gap: .35rem; }
   .osk-save-dock { border-radius: 18px 18px 0 0; }

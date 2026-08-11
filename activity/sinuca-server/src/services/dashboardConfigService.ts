@@ -834,7 +834,7 @@ const sections: DashboardSectionDefinition[] = [
     ],
   },
   {
-    id: "tts", label: "TTS", emoji: "🔊", description: "Engine, voz, idioma, prefixos e comportamento do leitor.",
+    id: "tts", label: "Texto pra Voz", emoji: "🔊", description: "Engine, voz, idioma, prefixos e comportamento do leitor.",
     groups: ["Voz", "Prefixos", "Comportamento"],
     fields: [
       { id: "tts.engine", label: "Mecanismo de voz", type: "select", scope: "guild", path: "tts_defaults.engine", options: TTS_ENGINE_OPTIONS, group: "Voz" },

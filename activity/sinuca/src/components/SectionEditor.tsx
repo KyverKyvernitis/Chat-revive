@@ -245,18 +245,6 @@ export function SectionEditor({
       <div><h1>{section.label}</h1><p>{module?.description || section.description}</p></div>
     </header>
 
-    {module?.group === "main" && <aside className="osk-function-runtime" data-state={module.state === "active" ? "active" : "inactive"} aria-label={`Estado da função: ${module.state === "active" ? "Ativa" : "Desativada"}`}>
-      <span className="osk-function-runtime__icon" aria-hidden="true">{module.state === "active" ? <Check size={17} /> : <X size={17} />}</span>
-      <span>
-        <strong>{module.state === "active" ? "Função ativa" : "Função desativada"}</strong>
-        <small>{module.state === "active"
-          ? "Novas ações estão liberadas para este servidor."
-          : module.issues?.length
-            ? module.issues.join(" ")
-            : "As configurações estão preservadas e podem ser editadas normalmente."}</small>
-      </span>
-    </aside>}
-
     {groups && groups.length > 3 && <nav className="osk-section-jump-nav" aria-label={`Áreas de ${section.label}`}>
       {groups.map((group) => <button key={group} type="button" data-active={openGroup === group || undefined} onClick={() => toggleGroup(group, true)}>{group}</button>)}
     </nav>}

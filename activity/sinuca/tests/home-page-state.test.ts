@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -24,7 +25,7 @@ function module(id: string, state: "active" | "inactive", group: "main" | "syste
   };
 }
 
-test("mostra contagem de ativas e omite estado de Geral", () => {
+test("omite contagem de ativas e mantém os estados individuais", () => {
   const modules = [
     module("welcome", "active"),
     module("forms", "active"),
@@ -36,10 +37,18 @@ test("mostra contagem de ativas e omite estado de Geral", () => {
   ];
   const html = renderToStaticMarkup(React.createElement(HomePage, { modules, onOpen() {} }));
 
-  assert.match(html, />4\/6</);
+  assert.doesNotMatch(html, />4\/6</);
+  assert.doesNotMatch(html, /funções ativas/);
+  assert.match(html, /aria-label="1 configuração">1<\/small>/);
   assert.equal((html.match(/>Ativa</g) || []).length, 4);
   assert.equal((html.match(/>Desativada</g) || []).length, 2);
   assert.doesNotMatch(html, /Configuração parcial|Disponível|Não configurada/);
   assert.match(html, /aria-label="Geral"/);
   assert.doesNotMatch(html, /Geral: Desativada/);
+});
+
+test("não repete o estado da função em um cartão dentro do editor", () => {
+  const source = readFileSync(new URL("../src/components/SectionEditor.tsx", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /Função ativa|Função desativada|osk-function-runtime/);
 });

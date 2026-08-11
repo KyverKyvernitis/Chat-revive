@@ -35,12 +35,11 @@ function FunctionGroup({
 }) {
   if (!items.length) return null;
   const showsState = title === "Funções";
-  const activeCount = items.filter((item) => item.state === "active").length;
 
   return <section className="osk-function-group">
     <header>
       <span><GroupIcon size={15} /><h2>{title}</h2></span>
-      <small aria-label={showsState ? `${activeCount} de ${items.length} funções ativas` : `${items.length} configuração`}>{showsState ? `${activeCount}/${items.length}` : items.length}</small>
+      {!showsState && <small aria-label={`${items.length} ${items.length === 1 ? "configuração" : "configurações"}`}>{items.length}</small>}
     </header>
     <div className="osk-function-grid">
       {items.map((item) => {

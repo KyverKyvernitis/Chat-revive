@@ -25,12 +25,15 @@ function useImageState(src: string) {
   return { state, setState };
 }
 
-const decorativeImageUrl = configuredValue(import.meta.env.VITE_DASHBOARD_DECORATIVE_IMAGE_URL);
-const loadingGifUrl = configuredValue(import.meta.env.VITE_DASHBOARD_LOADING_GIF_URL);
+export const BUNDLED_DECORATIVE_IMAGE_URL = "/assets/osaka-landing-character.jpg";
+export const BUNDLED_LOADING_GIF_URL = "/assets/osaka-loading.gif";
+
+const decorativeImageUrl = configuredValue(import.meta.env.VITE_DASHBOARD_DECORATIVE_IMAGE_URL) || BUNDLED_DECORATIVE_IMAGE_URL;
+const loadingGifUrl = configuredValue(import.meta.env.VITE_DASHBOARD_LOADING_GIF_URL) || BUNDLED_LOADING_GIF_URL;
 
 /**
- * Ponto de troca para uma arte transparente da landing page.
- * Aceita PNG, WebP, GIF ou SVG por caminho local ou URL e desaparece se falhar.
+ * Arte decorativa da landing page com possibilidade de substituição por ambiente.
+ * Aceita PNG, JPG, WebP, GIF ou SVG por caminho local ou URL e desaparece se falhar.
  */
 export function DecorativeVisualTemplate() {
   const { state, setState } = useImageState(decorativeImageUrl);
@@ -41,11 +44,17 @@ export function DecorativeVisualTemplate() {
     "--osk-decorative-size": configuredValue(import.meta.env.VITE_DASHBOARD_DECORATIVE_IMAGE_SIZE) || "clamp(16rem, 31vw, 29rem)",
     "--osk-decorative-top": configuredValue(import.meta.env.VITE_DASHBOARD_DECORATIVE_IMAGE_TOP) || "clamp(6rem, 10vw, 9rem)",
     "--osk-decorative-right": configuredValue(import.meta.env.VITE_DASHBOARD_DECORATIVE_IMAGE_RIGHT) || "clamp(1rem, 7vw, 7rem)",
-    "--osk-decorative-opacity": boundedOpacity(import.meta.env.VITE_DASHBOARD_DECORATIVE_IMAGE_OPACITY, "0.9"),
+    "--osk-decorative-opacity": boundedOpacity(import.meta.env.VITE_DASHBOARD_DECORATIVE_IMAGE_OPACITY, "0.36"),
   };
 
   return (
-    <span className="osk-decorative-template" style={style} aria-hidden="true" data-ready={state === "ready" || undefined}>
+    <span
+      className="osk-decorative-template"
+      style={style}
+      aria-hidden="true"
+      data-ready={state === "ready" || undefined}
+      data-opaque-source={decorativeImageUrl === BUNDLED_DECORATIVE_IMAGE_URL || undefined}
+    >
       <img
         src={decorativeImageUrl}
         alt=""
@@ -59,7 +68,7 @@ export function DecorativeVisualTemplate() {
   );
 }
 
-/** GIF transparente opcional com fallback para o spinner nativo do painel. */
+/** GIF do projeto com fallback imediato para o spinner nativo do painel. */
 export function LoadingVisual({ size = 30 }: { size?: number }) {
   const { state, setState } = useImageState(loadingGifUrl);
   const style: TemplateStyle = {
@@ -67,7 +76,13 @@ export function LoadingVisual({ size = 30 }: { size?: number }) {
   };
 
   return (
-    <span className="osk-loading-visual" style={style} aria-hidden="true" data-ready={state === "ready" || undefined}>
+    <span
+      className="osk-loading-visual"
+      style={style}
+      aria-hidden="true"
+      data-ready={state === "ready" || undefined}
+      data-bundled-gif={loadingGifUrl === BUNDLED_LOADING_GIF_URL || undefined}
+    >
       {loadingGifUrl && state !== "failed" ? (
         <img
           src={loadingGifUrl}

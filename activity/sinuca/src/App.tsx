@@ -11,6 +11,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { LoadingProgress, LoadingVisual } from "./components/VisualTemplates";
 import { mergeDashboardModules, type DashboardVisualModule } from "./moduleCatalog";
+import { syncSiteIcon } from "./siteIcon";
 import {
   fetchDashboardFull,
   fetchDashboardIdentity,
@@ -161,6 +162,10 @@ export default function App() {
     window.history.scrollRestoration = "manual";
     return () => { window.history.scrollRestoration = previous; };
   }, []);
+
+  useEffect(() => {
+    syncSiteIcon(botIdentity?.avatarUrl);
+  }, [botIdentity?.avatarUrl]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {

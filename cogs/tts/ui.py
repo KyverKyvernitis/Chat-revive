@@ -823,8 +823,17 @@ def _modal_label_available() -> bool:
     return bool(hasattr(discord.ui, "Label"))
 
 
-def _make_modal_text_input(*, label: str, placeholder: str, current: str = "", max_length: int = 80, required: bool = False):
-    item = discord.ui.TextInput(label=label, placeholder=placeholder, required=required, max_length=max_length)
+def _make_modal_text_input(*, label: str | None, placeholder: str, current: str = "", max_length: int = 80, required: bool = False):
+    kwargs = {
+        "placeholder": placeholder,
+        "required": required,
+        "max_length": max_length,
+    }
+    # Components V2 proíbe label duplicado: quando o TextInput é filho de um
+    # discord.ui.Label, somente o contêiner pode fornecer o texto do rótulo.
+    if label is not None:
+        kwargs["label"] = label
+    item = discord.ui.TextInput(**kwargs)
     try:
         item.default = str(current or "")[:max_length]
     except Exception:
@@ -1743,7 +1752,7 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
                 component=language_select,
             )
             manual_input = _make_modal_text_input(
-                label="Outro idioma",
+                label=None,
                 placeholder="Opcional: pt-br, en, es, ja",
                 current="",
                 max_length=10,
@@ -1965,7 +1974,7 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
                 ],
             )
             custom_values = _make_modal_text_input(
-                label="Valores custom",
+                label=None,
                 placeholder="Velocidade / tom — ex.: 1.0 / 1.0",
                 current=f"{self.current_rate or '1.0'} / {self.current_pitch or '1.0'}",
                 max_length=32,
@@ -2276,7 +2285,7 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                 )
             else:
                 role_input = _make_modal_text_input(
-                    label="Cargo ignorado",
+                    label=None,
                     placeholder="ID/nome. Vazio mantém; off desliga sem apagar.",
                     current=self.current_ignored_role,
                     max_length=80,

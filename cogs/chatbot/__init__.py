@@ -6,11 +6,11 @@ do discord.py extension.
 Carregamento: este pacote é automaticamente importado pelo bot.py como
 `cogs.chatbot` (por ter __init__.py e estar em cogs/).
 
-Filtro de log de voz: instalamos um logging.Filter no setup pra suprimir
-tracebacks ruidosos de `ConnectionClosed` com códigos 1000/1001/1006 —
-esses são desconexões transitórias que o discord.py JÁ trata via reconexão
-automática, mas que a biblioteca ainda registra como ERROR com traceback
-completo, poluindo os logs sem motivo.
+Filtro de log de voz: instalamos um logging.Filter no setup para trocar
+tracebacks ruidosos de `ConnectionClosed` com códigos 1000/1001/1006 por um
+registro compacto. O primeiro 1006 continua visível (com cooldown no filtro
+global), e a recuperação fica sob responsabilidade do controlador de voz do
+bot, sem uma segunda rotina concorrente dentro do discord.py.
 """
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ from discord import errors
 #   1000 = normal closure (desconexão limpa)
 #   1001 = going away (servidor reiniciou ou cliente fechou)
 #   1006 = abnormal closure (queda de rede transitória)
-# A reconexão automática do discord.py cuida de todos esses. O traceback
-# associado é só ruído — o bot vai voltar sozinho em segundos.
+# O controlador de voz do bot cuida da recuperação. O traceback completo é
+# ruidoso, mas o evento compacto deve continuar visível para diagnóstico.
 _RECOVERABLE_VOICE_CLOSE_CODES = frozenset({1000, 1001, 1006})
 
 # Loggers do discord.py que emitem ConnectionClosed em desconexões de voz.
@@ -54,13 +54,17 @@ class VoiceConnectionFilter(logging.Filter):
         code = getattr(exc_value, "code", None)
         if code not in _RECOVERABLE_VOICE_CLOSE_CODES:
             return True
-        # É um close recuperável — emite INFO no lugar do ERROR original
-        # e suprime o registro original (com traceback completo).
-        logging.getLogger(record.name).info(
-            "Voice WS close recuperável (code=%s): %s — discord.py vai reconectar automaticamente",
-            code, exc_value,
-        )
-        return False
+        # Rebaixa o próprio registro, em vez de emitir outro. Alguns loggers do
+        # discord.py têm nível WARNING; um logger.info() criado aqui seria
+        # descartado antes de chegar ao handler e esconderia novamente o 1006.
+        record.levelno = logging.INFO
+        record.levelname = logging.getLevelName(logging.INFO)
+        record.msg = "Voice WS close recuperável (code=%s): %s — controlador do bot tratará a recuperação"
+        record.args = (code, exc_value)
+        record.exc_info = None
+        record.exc_text = None
+        record.stack_info = None
+        return True
 
 
 def _install_voice_filter() -> None:

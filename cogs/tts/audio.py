@@ -150,6 +150,16 @@ _TTS_CACHE_SUFFIXES = (".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw
 logger = logging.getLogger(__name__)
 
 
+def _has_speakable_tts_text(text: str) -> bool:
+    """Return whether a TTS engine receives at least one speakable character.
+
+    gTTS and Edge can reject inputs made only of punctuation, whitespace or
+    emoji. Mentions, links, custom emoji and attachments are converted to words
+    before this check, so a Unicode letter/number is a safe minimum.
+    """
+    return any(character.isalnum() for character in str(text or ""))
+
+
 def _ensure_tts_temp_dirs() -> dict[str, bool]:
     """Ensure local TTS runtime/cache directories exist.
 
@@ -264,6 +274,16 @@ class TTSAudioMixin:
         return True
 
     async def _enqueue_tts_item(self, guild_id: int, item: QueueItem) -> tuple[bool, int, bool]:
+        if not _has_speakable_tts_text(getattr(item, "text", "")):
+            logger.info(
+                "[tts_voice] item descartado antes da fila | texto sem caracteres faláveis | guild=%s channel=%s user=%s engine=%s",
+                guild_id,
+                getattr(item, "channel_id", None),
+                getattr(item, "author_id", None),
+                getattr(item, "engine", None),
+            )
+            return False, 0, False
+
         state = self._get_state(guild_id)
         dropped = 0
         deduplicated = False
@@ -3509,6 +3529,9 @@ class TTSAudioMixin:
         return True, "worker_ready"
 
     async def _generate_audio_file(self, item: QueueItem) -> str:
+        if not _has_speakable_tts_text(getattr(item, "text", "")):
+            raise ValueError("texto TTS sem caracteres faláveis")
+
         agent_available = self._tts_agent_route_available()
         use_agent, agent_decision = self._tts_agent_should_try_worker(item) if agent_available else (False, "worker_offline_or_not_ready")
         self._record_tts_agent_route_sample(use_agent)
@@ -3721,6 +3744,20 @@ class TTSAudioMixin:
     def _is_already_playing_audio_error(self, exc: Exception | str) -> bool:
         return "already playing audio" in str(exc or "").lower()
 
+    def _is_voice_disconnected_error(self, exc: Exception | str) -> bool:
+        message = str(exc or "").lower()
+        return any(
+            marker in message
+            for marker in (
+                "not connected to voice",
+                "voice client desconectou",
+                "voice websocket",
+                "websocket closed",
+                "connection closed",
+                "closing transport",
+            )
+        )
+
     def _is_music_active_for_guild(self, guild_id: int) -> bool:
         router = getattr(getattr(self, "bot", None), "audio_router", None)
         is_music_active = getattr(router, "is_music_active", None)
@@ -3750,7 +3787,13 @@ class TTSAudioMixin:
                 await vc.disconnect(force=True)
                 self._schedule_worker_voice_agent_clear_session(guild.id, reason=f"reset:{reason}")
             except Exception as exc:
-                logger.warning("[tts_voice] Falha ao resetar voice client | guild=%s reason=%s erro=%s", guild.id, reason, exc)
+                logger.warning(
+                    "[tts_voice] Falha ao resetar voice client | guild=%s reason=%s erro_tipo=%s erro=%r",
+                    guild.id,
+                    reason,
+                    type(exc).__name__,
+                    exc,
+                )
             state = self.guild_states.get(guild.id)
             if state is not None:
                 state.last_channel_id = None
@@ -3775,9 +3818,10 @@ class TTSAudioMixin:
                 music_active = self._is_music_active_for_guild(guild.id)
                 if music_active:
                     logger.warning(
-                        "[tts_voice] Falha no playback do TTS com música ativa; descartando só este TTS sem resetar a call | guild=%s channel=%s erro=%s",
+                        "[tts_voice] Falha no playback do TTS com música ativa; descartando só este TTS sem resetar a call | guild=%s channel=%s erro_tipo=%s erro=%r",
                         guild.id,
                         item.channel_id,
+                        type(exc).__name__,
                         exc,
                     )
                     now = time.monotonic()
@@ -3801,29 +3845,40 @@ class TTSAudioMixin:
                     continue
 
                 logger.warning(
-                    "[tts_voice] Falha no playback, tentando recuperar | guild=%s channel=%s tentativa=%s erro=%s",
+                    "[tts_voice] Falha no playback, tentando recuperar | guild=%s channel=%s tentativa=%s erro_tipo=%s erro=%r",
                     guild.id,
                     item.channel_id,
                     attempt + 1,
+                    type(exc).__name__,
                     exc,
                 )
                 if attempt >= 1:
                     break
 
-                last_hard_reset_at = float(getattr(state, "last_hard_reset_at", 0.0) or 0.0) if state is not None else 0.0
-                time_since_reset = time.monotonic() - last_hard_reset_at if last_hard_reset_at > 0.0 else TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS
-                should_suppress_hard_reset = time_since_reset < TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS
-
-                if should_suppress_hard_reset:
-                    logger.warning(
-                        "[tts_voice] Hard reset suprimido para evitar reconexão em loop | guild=%s channel=%s cooldown_restante=%.2fs",
+                if self._is_voice_disconnected_error(exc):
+                    # _ensure_connected_fast -> _ensure_connected já limpa o
+                    # cliente obsoleto sob a trava da guild. Um reset separado
+                    # aqui iniciava uma segunda desconexão sobre a mesma sessão.
+                    logger.info(
+                        "[tts_voice] cliente desconectado; recuperação delegada ao controlador único | guild=%s channel=%s",
                         guild.id,
                         item.channel_id,
-                        max(0.0, TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS - time_since_reset),
                     )
                 else:
-                    await self._reset_voice_client(guild, reason=f"playback_failure:{type(exc).__name__}")
-                    await asyncio.sleep(0.25)
+                    last_hard_reset_at = float(getattr(state, "last_hard_reset_at", 0.0) or 0.0) if state is not None else 0.0
+                    time_since_reset = time.monotonic() - last_hard_reset_at if last_hard_reset_at > 0.0 else TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS
+                    should_suppress_hard_reset = time_since_reset < TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS
+
+                    if should_suppress_hard_reset:
+                        logger.warning(
+                            "[tts_voice] Hard reset suprimido para evitar reconexão em loop | guild=%s channel=%s cooldown_restante=%.2fs",
+                            guild.id,
+                            item.channel_id,
+                            max(0.0, TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS - time_since_reset),
+                        )
+                    else:
+                        await self._reset_voice_client(guild, reason=f"playback_failure:{type(exc).__name__}")
+                        await asyncio.sleep(0.25)
 
                 current_vc = await self._ensure_connected_fast(guild, item)
                 if current_vc is None:

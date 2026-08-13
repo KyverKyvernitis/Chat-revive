@@ -7,11 +7,15 @@ prefixo de autor se ligado) e devolve o `QueueItem` pronto pro dispatcher.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 import config
 
-from ..audio import QueueItem
+from ..audio import QueueItem, _has_speakable_tts_text
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -88,8 +92,12 @@ async def build_message_tts_payload(
         text,
         enabled=cog._guild_announce_author_enabled(guild_defaults),
     )
-    if not text:
-        print("[tts_voice] ignorado | texto vazio após prefixo")
+    if not _has_speakable_tts_text(text):
+        logger.info(
+            "[tts_voice] mensagem ignorada | texto sem caracteres faláveis após renderização | guild=%s user=%s",
+            message.guild.id,
+            message.author.id,
+        )
         return None
 
     # Sem voice channel não tem onde tocar — descarta cedo.

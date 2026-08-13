@@ -19,4 +19,6 @@ set +a
 
 # A VPS não inicia nem aguarda Lavalink local. Música pesada pertence ao phone worker/Music Agent.
 
-exec python3 bot.py
+# Mantém prints legados de diagnóstico em ordem cronológica no journald. Sem
+# unbuffered, várias linhas de voz podiam aparecer juntas minutos depois.
+exec python3 -u bot.py

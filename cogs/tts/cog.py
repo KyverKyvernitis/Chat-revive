@@ -489,7 +489,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         vc_channel = getattr(vc, "channel", None)
         if not connected:
-            return vc_channel is not None or actual_channel is not None
+            # Um VoiceClient ainda registrado, mas desconectado, sempre é
+            # obsoleto. Mesmo com ambos os canais em None ele pode continuar em
+            # bot.voice_clients por alguns instantes e bloquear a conexão nova
+            # com "Already connected".
+            return True
 
         if actual_channel is not None and vc_channel is not None:
             return getattr(vc_channel, "id", None) != getattr(actual_channel, "id", None)
@@ -1926,7 +1930,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         async def _build_connect_kwargs() -> dict:
             should_self_deaf = await _desired_self_deaf()
-            return {"self_deaf": should_self_deaf}
+            # Existe apenas um dono de reconexão por guild: este cog, protegido
+            # por _voice_connect_locks. Se o loop interno do discord.py também
+            # ficar ativo, uma tentativa antiga pode encerrar uma sessão nova
+            # cerca de 30 s depois e iniciar um ciclo de desconexões forçadas.
+            return {"self_deaf": should_self_deaf, "reconnect": False}
 
         lock = self._get_voice_connect_lock(guild.id)
         async with lock:

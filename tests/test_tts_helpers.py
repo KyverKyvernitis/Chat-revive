@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import types
 import unittest
@@ -70,6 +71,19 @@ def _install_runtime_stubs() -> None:
         sys.modules["discord.ext"] = ext
         sys.modules["discord.ext.commands"] = commands
 
+    discord = sys.modules["discord"]
+    if "discord.errors" not in sys.modules:
+        discord_errors = types.ModuleType("discord.errors")
+
+        class ConnectionClosed(Exception):
+            def __init__(self, code: int, message: str = "closed"):
+                super().__init__(message)
+                self.code = code
+
+        discord_errors.ConnectionClosed = ConnectionClosed
+        sys.modules["discord.errors"] = discord_errors
+    discord.errors = sys.modules["discord.errors"]
+
     if "edge_tts" not in sys.modules:
         edge_tts = types.ModuleType("edge_tts")
         edge_tts.Communicate = object
@@ -115,10 +129,18 @@ def _install_runtime_stubs() -> None:
         tts = types.ModuleType("google.cloud.texttospeech_v1")
         sys.modules["google.cloud.texttospeech_v1"] = tts
 
+    if "aiohttp" not in sys.modules:
+        aiohttp = types.ModuleType("aiohttp")
+        aiohttp.ClientSession = type("ClientSession", (), {})
+        aiohttp.ClientTimeout = type("ClientTimeout", (), {})
+        aiohttp.TCPConnector = type("TCPConnector", (), {})
+        sys.modules["aiohttp"] = aiohttp
+
 
 _install_runtime_stubs()
 
-from cogs.tts.audio import QueueItem
+from cogs.tts.audio import QueueItem, TTSAudioMixin, _has_speakable_tts_text
+from cogs.chatbot import VoiceConnectionFilter
 from cogs.tts.utils.message_dispatch import dispatch_message_tts
 from cogs.tts.utils.message_gate import analyze_message_for_tts
 from cogs.tts.utils.message_payload import MessageTTSPayload, build_message_tts_payload
@@ -315,6 +337,40 @@ class MessageRenderTests(unittest.TestCase):
         self.assertIn("link do example", result)
 
 
+class SpeakableTextTests(unittest.TestCase):
+    def test_rejects_inputs_that_cannot_produce_speech(self):
+        for text in ("", "   ", "!!!", "... ???", "😀🔥"):
+            with self.subTest(text=text):
+                self.assertFalse(_has_speakable_tts_text(text))
+
+    def test_accepts_unicode_letters_and_numbers(self):
+        for text in ("olá", "東京", "123", "oi 😀"):
+            with self.subTest(text=text):
+                self.assertTrue(_has_speakable_tts_text(text))
+
+
+class VoiceConnectionLogFilterTests(unittest.TestCase):
+    def test_recoverable_close_is_kept_as_compact_info_record(self):
+        exc = sys.modules["discord.errors"].ConnectionClosed(1006, "abnormal closure")
+        record = logging.LogRecord(
+            name="discord.voice_client",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="voice websocket closed",
+            args=(),
+            exc_info=(type(exc), exc, None),
+        )
+
+        allowed = VoiceConnectionFilter().filter(record)
+
+        self.assertTrue(allowed)
+        self.assertEqual(record.levelno, logging.INFO)
+        self.assertIsNone(record.exc_info)
+        self.assertIn("code=1006", record.getMessage())
+        self.assertIn("controlador do bot", record.getMessage())
+
+
 class MessagePayloadTests(unittest.IsolatedAsyncioTestCase):
     async def test_builds_payload_and_queue_item_with_author_prefix(self):
         db = FakeDB(resolved={"engine": "edge", "voice": "", "rate": "", "pitch": ""})
@@ -353,6 +409,60 @@ class MessagePayloadTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(payload)
+
+    async def test_returns_none_for_punctuation_only_text(self):
+        db = FakeDB(resolved={"engine": "gtts", "language": "pt-br"})
+        cog = FakeCog(db=db)
+        author = SimpleNamespace(id=22, display_name="Dilma", voice=SimpleNamespace(channel=SimpleNamespace(id=555)))
+        message = SimpleNamespace(guild=SimpleNamespace(id=111), author=author, content=".!!!")
+
+        payload = await build_message_tts_payload(
+            cog,
+            message,
+            guild_defaults={},
+            active_prefix=".",
+            forced_engine="gtts",
+        )
+
+        self.assertIsNone(payload)
+
+
+class PlaybackRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disconnected_playback_uses_single_controller_without_hard_reset(self):
+        recovered_voice_client = object()
+
+        class Probe(TTSAudioMixin):
+            def __init__(self):
+                self.guild_states = {}
+                self.play_calls = 0
+                self.ensure_calls = 0
+                self.reset_calls = 0
+
+            async def _play_file(self, vc, path, *, item=None):
+                self.play_calls += 1
+                if self.play_calls == 1:
+                    raise RuntimeError("Not connected to voice")
+                self.asserted_voice_client = vc
+                return {"playback_ms": 1.0}
+
+            async def _ensure_connected_fast(self, guild, item):
+                self.ensure_calls += 1
+                return recovered_voice_client
+
+            async def _reset_voice_client(self, guild, *, reason="unknown"):
+                self.reset_calls += 1
+
+        probe = Probe()
+        guild = SimpleNamespace(id=77)
+        item = QueueItem(77, 55, 66, "teste", "gtts", "", "pt", "+0%", "+0Hz")
+
+        result = await probe._play_file_with_recovery(guild, item, object(), "/tmp/audio.mp3")
+
+        self.assertEqual(result["playback_ms"], 1.0)
+        self.assertEqual(probe.play_calls, 2)
+        self.assertEqual(probe.ensure_calls, 1)
+        self.assertEqual(probe.reset_calls, 0)
+        self.assertIs(probe.asserted_voice_client, recovered_voice_client)
 
 
 class MessageDispatchTests(unittest.IsolatedAsyncioTestCase):

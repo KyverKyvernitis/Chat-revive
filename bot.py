@@ -81,7 +81,8 @@ class _LowValueNoiseFilter(logging.Filter):
                     exc_text = "".join(traceback.format_exception_only(record.exc_info[0], record.exc_info[1]))
                 combined = f"{message}\n{exc_text}".lower()
                 if "1006" in combined and ("websocket" in combined or "voice" in combined or "closed" in combined):
-                    return False
+                    cooldown = max(5.0, float(os.getenv("DISCORD_VOICE_1006_LOG_COOLDOWN_SECONDS", "60") or 60))
+                    return self._allow_every("discord.voice.close_1006", cooldown)
 
             if logger_name == "asyncio" and "exception was never retrieved" in lowered:
                 exc_text = ""

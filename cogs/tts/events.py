@@ -144,7 +144,9 @@ class TTSVoiceEventsMixin:
                     pass
 
         try:
-            connected = await voice_channel.connect(self_deaf=True)
+            # Mantém o mesmo contrato do cog principal: somente o controlador
+            # do bot pode reconectar; o loop interno do discord.py fica inativo.
+            connected = await voice_channel.connect(self_deaf=True, reconnect=False)
             print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
             return connected
         except Exception as e:
@@ -271,4 +273,3 @@ class TTSVoiceEventsMixin:
             raw_text=raw_text,
             resolved=resolved,
         )
-

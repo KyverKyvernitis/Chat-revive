@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import random
 import time
 from datetime import datetime, timedelta
@@ -9,7 +8,7 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands
 
-from config import CALLKEEPER_BOT_TOKENS, OFF_COLOR, ON_COLOR
+from config import OFF_COLOR, ON_COLOR
 from ..constants import (
     CHIPS_DEFAULT,
     CHIPS_INITIAL,
@@ -2661,40 +2660,8 @@ class GincanaBase:
             role_id = 0
         return guild.get_role(role_id) if role_id else None
 
-    def _get_callkeeper_bot_ids(self) -> set[int]:
-        cached = getattr(self, "_gincana_callkeeper_bot_ids_cache", None)
-        if cached is not None:
-            return set(cached)
-
-        ids: set[int] = set()
-        for raw_token in CALLKEEPER_BOT_TOKENS or []:
-            token = str(raw_token or "").strip()
-            if not token or "." not in token:
-                continue
-            head = token.split(".", 1)[0].strip()
-            if not head:
-                continue
-            try:
-                padded = head + ("=" * (-len(head) % 4))
-                decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("ascii", "ignore").strip()
-                bot_id = int(decoded)
-            except Exception:
-                continue
-            if bot_id > 0:
-                ids.add(bot_id)
-
-        frozen = frozenset(ids)
-        setattr(self, "_gincana_callkeeper_bot_ids_cache", frozen)
-        return set(frozen)
-
-    def _is_callkeeper_bot(self, member: discord.Member | None) -> bool:
-        if member is None:
-            return False
-        try:
-            member_id = int(getattr(member, "id", 0) or 0)
-        except Exception:
-            return False
-        return member_id in self._get_callkeeper_bot_ids()
+    def _is_bot_member(self, member: discord.Member | None) -> bool:
+        return bool(member is not None and getattr(member, "bot", False))
 
     def _is_staff_member(self, member: discord.Member) -> bool:
         perms = getattr(member, "guild_permissions", None)
@@ -2762,7 +2729,7 @@ class GincanaBase:
         seed_ids: list[int] = []
         own_bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
         for member in members or []:
-            if member is None or self._is_callkeeper_bot(member):
+            if member is None or self._is_bot_member(member):
                 continue
             if own_bot_id and int(getattr(member, "id", 0) or 0) == own_bot_id:
                 continue
@@ -2773,7 +2740,7 @@ class GincanaBase:
             if uid in result:
                 continue
             member = guild.get_member(int(uid))
-            if member is None or self._is_callkeeper_bot(member):
+            if member is None or self._is_bot_member(member):
                 continue
             if own_bot_id and int(getattr(member, "id", 0) or 0) == own_bot_id:
                 continue
@@ -2782,7 +2749,7 @@ class GincanaBase:
 
     def _is_focused_non_staff_member(self, member: discord.Member) -> bool:
         guild = getattr(member, "guild", None)
-        if guild is None or self._is_staff_member(member) or self._is_callkeeper_bot(member):
+        if guild is None or self._is_staff_member(member) or self._is_bot_member(member):
             return False
         focus_map = self.db.get_gincana_focus_map(guild.id)
         if not focus_map:
@@ -2820,7 +2787,7 @@ class GincanaBase:
             return []
 
         for member in voice_channel.members:
-            if self._is_callkeeper_bot(member):
+            if self._is_bot_member(member):
                 continue
             member_role_ids = {role.id for role in getattr(member, "roles", [])}
             if member_role_ids & role_ids:
@@ -2836,7 +2803,7 @@ class GincanaBase:
         focused_ids = set(self._expand_gincana_focus_ids(guild.id, focus_map.keys()))
         targets: dict[int, discord.Member] = {}
         for member in voice_channel.members:
-            if self._is_callkeeper_bot(member):
+            if self._is_bot_member(member):
                 continue
             if member.id in focused_ids:
                 targets[member.id] = member

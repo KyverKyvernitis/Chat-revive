@@ -179,9 +179,6 @@ REMOVED_SLASH_COMMANDS = {
     "form_repostar",
     "form_reset",
     "form_status",
-    # Mantido por uma atualização para limpar o grupo legado antes da retirada
-    # definitiva deste tombstone no patch de finalização.
-    "callkeeper",
     # O painel técnico de TTS foi movido para /vps > TTS.
     "health",
     # Core Workers agora é comando privado de prefixo: workers/worker/w.
@@ -650,16 +647,6 @@ class BotLocal(commands.Bot):
         health_guild_id = 927002914449424404
         guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
         guild_ids.add(health_guild_id)
-
-        # A configuração pública já foi removida, mas o ID ainda pode existir na
-        # .env da VPS. Incluí-lo neste último boot garante a limpeza do slash
-        # legado antes que o patch final elimine também esta ponte.
-        try:
-            legacy_callkeeper_guild_id = int(os.getenv("CALLKEEPER_GUILD_ID", "0") or 0)
-        except Exception:
-            legacy_callkeeper_guild_id = 0
-        if legacy_callkeeper_guild_id > 0:
-            guild_ids.add(legacy_callkeeper_guild_id)
 
         return guild_ids
 

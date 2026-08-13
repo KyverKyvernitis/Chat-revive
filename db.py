@@ -98,8 +98,8 @@ class SettingsDB:
                 if existing:
                     # Bases antigas podem ter um documento legado sem `type` e um
                     # documento novo `type=guild` para a mesma guild. O Mongo não
-                    # garante qual vem primeiro no cursor; o merge preserva os
-                    # campos do documento tipado sem perder configurações legadas.
+                    # garante qual vem primeiro no cursor; sem merge, o cache pode
+                    # ficar com o legado e o CallKeeper ler enabled/channel_id velho.
                     if doc_type == "guild":
                         merged = {**existing, **normalized}
                     else:
@@ -184,6 +184,39 @@ class SettingsDB:
         else:
             doc.pop("tts_voice_channel_id", None)
         await self._save_guild_doc(guild_id, doc)
+
+    def get_callkeeper_enabled(self, guild_id: int) -> bool:
+        g = self.guild_cache.get(int(guild_id), {})
+        return bool(g.get("callkeeper_enabled", False))
+
+    async def set_callkeeper_enabled(self, guild_id: int, value: bool):
+        doc = self._get_guild_doc(int(guild_id))
+        doc["callkeeper_enabled"] = bool(value)
+        doc["callkeeper_updated_at"] = time.time()
+        doc["callkeeper_revision"] = int(doc.get("callkeeper_revision", 0) or 0) + 1
+        await self._save_guild_doc(int(guild_id), doc)
+
+    def get_callkeeper_channel_id(self, guild_id: int) -> int:
+        g = self.guild_cache.get(int(guild_id), {})
+        raw = g.get("callkeeper_channel_id", 0)
+        try:
+            return max(0, int(raw or 0))
+        except Exception:
+            return 0
+
+    async def set_callkeeper_channel_id(self, guild_id: int, channel_id: int | None):
+        doc = self._get_guild_doc(int(guild_id))
+        try:
+            parsed = max(0, int(channel_id or 0))
+        except Exception:
+            parsed = 0
+        if parsed > 0:
+            doc["callkeeper_channel_id"] = parsed
+        else:
+            doc.pop("callkeeper_channel_id", None)
+        doc["callkeeper_updated_at"] = time.time()
+        doc["callkeeper_revision"] = int(doc.get("callkeeper_revision", 0) or 0) + 1
+        await self._save_guild_doc(int(guild_id), doc)
 
     def _invalidate_resolved_tts_cache(self, *, guild_id: int | None = None, user_id: int | None = None):
         if guild_id is None and user_id is None:

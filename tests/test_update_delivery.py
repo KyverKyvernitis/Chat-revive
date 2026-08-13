@@ -677,10 +677,22 @@ CALLKEEPER_UNIT_BACKUP=''
 CALLKEEPER_LIVE_UNIT={live_unit!s}
 CALLKEEPER_PROCESS_PATTERN='no-process'
 CALLKEEPER_STATUS='não alterado'
+mkdir -p "$REPO_DIR/callkeeper_runtime/__pycache__"
+printf 'bytecode residual\n' > "$REPO_DIR/callkeeper_runtime/__pycache__/runtime.cpython-311.pyc"
 deploy_callkeeper
 [[ "$CALLKEEPER_STATUS" == 'removido' ]]
 [[ ! -e "$CALLKEEPER_LIVE_UNIT" ]]
+[[ ! -e "$REPO_DIR/callkeeper_runtime" ]]
 [[ ! -e {state!s}/active && ! -e {state!s}/enabled ]]
+
+mkdir -p "$REPO_DIR/callkeeper_runtime"
+printf 'preservar\n' > "$REPO_DIR/callkeeper_runtime/manual.txt"
+if deploy_callkeeper; then
+  exit 42
+fi
+[[ "$CALLKEEPER_STATUS" == 'falhou: arquivos residuais não gerados em callkeeper_runtime' ]]
+rm "$REPO_DIR/callkeeper_runtime/manual.txt"
+rmdir "$REPO_DIR/callkeeper_runtime"
 
 mkdir -p \
   "$REPO_DIR/callkeeper_runtime" \
@@ -689,6 +701,11 @@ mkdir -p \
 touch \
   "$REPO_DIR/callkeeper_service.py" \
   "$REPO_DIR/callkeeper_runtime/__init__.py" \
+  "$REPO_DIR/callkeeper_runtime/rescue_cmd.py" \
+  "$REPO_DIR/callkeeper_runtime/rescue_shell.py" \
+  "$REPO_DIR/callkeeper_runtime/runtime.py" \
+  "$REPO_DIR/callkeeper_runtime/settings.py" \
+  "$REPO_DIR/callkeeper_runtime/store.py" \
   "$REPO_DIR/cogs/call_keeper.py"
 printf '%s\n' restored-unit > "$REPO_DIR/deploy/systemd/callkeeper.service"
 cp "$REPO_DIR/deploy/systemd/callkeeper.service" "$REPO_DIR/deploy/systemd/vps/callkeeper.service"
@@ -698,23 +715,6 @@ deploy_callkeeper
 [[ -f {state!s}/active && -f {state!s}/enabled ]]
 """
     _run_bash(harness)
-
-
-def test_terminal_refuses_self_stop_without_spawning_a_shutdown_process() -> None:
-    source = (ROOT / "cogs" / "terminal_cmd.py").read_text(encoding="utf-8")
-    start = source.index("    async def _refuse_primary_bot_stop")
-    end = source.index("\n    @commands.command", start)
-    block = source[start:end]
-    assert "Parar o bot pelo Discord está desativado" in block
-    assert "create_subprocess_shell" not in block
-    assert "systemctl stop" not in block
-
-
-def test_game_bot_filter_uses_member_metadata_instead_of_decoding_tokens() -> None:
-    source = (ROOT / "cogs" / "games" / "services" / "base.py").read_text(encoding="utf-8")
-    assert "def _is_bot_member" in source
-    assert 'getattr(member, "bot", False)' in source
-    assert "urlsafe_b64decode" not in source
 
 
 def test_installer_dynamically_keeps_disabled_updater_timer_disabled(tmp_path: Path) -> None:
@@ -818,7 +818,8 @@ def test_update_presence_and_short_user_notice_are_connected_to_runtime_state() 
     assert '"candidates" / "runtime-state.json"' in bot_source
     assert '"⚠️ Atualização em andamento. A resposta pode demorar."' in bot_source
     assert "UPDATE_NOTICE_COOLDOWN_SECONDS" in bot_source
-    assert 'self._build_custom_activity("Atualizando")' in presence_source
+    assert 'await self._apply_presence("Atualizando", discord.Status.idle' in presence_source
+    assert "self._build_custom_activity(text)" in presence_source
     assert "discord.Status.idle" in presence_source
     assert "heartbeat_epoch" in presence_source
     assert "APPLICATION_PRESENCE_UPDATE_STALE_SECONDS" in presence_source

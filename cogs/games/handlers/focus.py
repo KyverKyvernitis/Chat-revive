@@ -28,7 +28,9 @@ class GincanaFocusMixin:
         lines = []
         for uid in sorted(self._expand_gincana_focus_ids(guild.id, focus_map.keys())):
             member = guild.get_member(int(uid))
-            if member is not None and self._is_bot_member(member):
+            if member is not None and self._is_callkeeper_bot(member):
+                continue
+            if int(uid) in self._get_callkeeper_bot_ids():
                 continue
             if self.bot.user is not None and int(uid) == int(self.bot.user.id):
                 continue
@@ -186,7 +188,7 @@ class GincanaFocusMixin:
             return False
         if self.bot.user is not None and int(member.id) == int(self.bot.user.id):
             return False
-        if self._is_bot_member(member):
+        if self._is_callkeeper_bot(member):
             return False
         return True
 

@@ -136,6 +136,7 @@ LABEL_MAP = {
     "phone-worker sync": "Phone-worker sync",
     "análise phone-worker": "Análise phone-worker",
     "analise phone-worker": "Análise phone-worker",
+    "callkeeper": "CallKeeper",
     "validações": "Validações",
     "validacoes": "Validações",
     "cogs": "Cogs",
@@ -178,7 +179,7 @@ HEADER_FIELDS = {
     "Identificador",
     "Tentativa",
 }
-STATUS_FIELDS = {"Bot health", "Health", "Serviços de áudio", "Limpeza de áudio", "Watcher Lavalink celular", "Phone-worker", "Phone-worker sync", "Frontend", "Backend", "Activity", "Cogs", "Avisos"}
+STATUS_FIELDS = {"Bot health", "Health", "Serviços de áudio", "Limpeza de áudio", "Watcher Lavalink celular", "Phone-worker", "Phone-worker sync", "CallKeeper", "Frontend", "Backend", "Activity", "Cogs", "Avisos"}
 DETAIL_FIELDS = {"Etapa", "Motivo", "URL", "Diagnóstico", "Análise phone-worker", "Validações", "Verificações", "Tempos", "Serviços", "Core Worker"}
 BULLET_FIELDS = {"Arquivos"}
 CHECK_FIELDS = {"Verificações", "Validações"}

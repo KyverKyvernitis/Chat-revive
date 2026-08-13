@@ -82,6 +82,24 @@ BOT_EVENT_LOOP_LAG_WARNING_COOLDOWN_SECONDS = _parse_float(os.getenv("BOT_EVENT_
 BOT_EVENT_LOOP_LAG_SEVERE_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_SEVERE_SECONDS", "8.0"), 8.0)
 BOT_EVENT_LOOP_LAG_DIAGNOSTIC_COOLDOWN_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_DIAGNOSTIC_COOLDOWN_SECONDS", "90.0"), 90.0)
 
+# -----------------------------------------------------------------------------
+# CallKeeper — bots auxiliares que mantêm uma call ocupada em 1 servidor
+# -----------------------------------------------------------------------------
+CALLKEEPER_GUILD_ID = _parse_int(os.getenv("CALLKEEPER_GUILD_ID", "0"), 0)
+CALLKEEPER_CHANNEL_ID = _parse_int(os.getenv("CALLKEEPER_CHANNEL_ID", "0"), 0)
+CALLKEEPER_BOT_TOKENS = [
+    token
+    for token in (
+        (os.getenv("CALLKEEPER_BOT_1_TOKEN", "") or "").strip(),
+        (os.getenv("CALLKEEPER_BOT_2_TOKEN", "") or "").strip(),
+        (os.getenv("CALLKEEPER_BOT_3_TOKEN", "") or "").strip(),
+    )
+    if token
+]
+CALLKEEPER_WATCHDOG_INTERVAL_SECONDS = _parse_float(os.getenv("CALLKEEPER_WATCHDOG_INTERVAL_SECONDS", "1.0"), 1.0)
+CALLKEEPER_EVENT_DEBOUNCE_SECONDS = _parse_float(os.getenv("CALLKEEPER_EVENT_DEBOUNCE_SECONDS", "0.20"), 0.20)
+CALLKEEPER_DISCONNECTED_BOT_COOLDOWN_SECONDS = _parse_float(os.getenv("CALLKEEPER_DISCONNECTED_BOT_COOLDOWN_SECONDS", "3.0"), 3.0)
+
 ON_COLOR = 0x57F287
 OFF_COLOR = 0xED4245
 

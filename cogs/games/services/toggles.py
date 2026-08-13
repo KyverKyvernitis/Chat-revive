@@ -153,7 +153,7 @@ class GincanaToggleMixin:
                 except Exception:
                     fetched = None
                 member = fetched if isinstance(fetched, discord.Member) else None
-            if member is None or self._is_bot_member(member):
+            if member is None or self._is_callkeeper_bot(member):
                 continue
             if own_bot_id and int(getattr(member, "id", 0) or 0) == own_bot_id:
                 continue
@@ -814,7 +814,7 @@ class GincanaToggleMixin:
     async def _handle_gincana_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         guild = getattr(member, "guild", None)
         own_bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
-        if guild is None or self._is_bot_member(member):
+        if guild is None or self._is_callkeeper_bot(member):
             return
         if own_bot_id and int(getattr(member, "id", 0) or 0) == own_bot_id:
             return
@@ -864,7 +864,7 @@ class GincanaToggleMixin:
     async def _handle_gincana_member_update(self, before: discord.Member, after: discord.Member):
         guild = getattr(after, "guild", None)
         own_bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
-        if guild is None or self._is_bot_member(after):
+        if guild is None or self._is_callkeeper_bot(after):
             return
         if own_bot_id and int(getattr(after, "id", 0) or 0) == own_bot_id:
             return

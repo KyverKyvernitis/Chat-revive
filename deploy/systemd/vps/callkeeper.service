@@ -1,0 +1,16 @@
+[Unit]
+Description=CallKeeper standalone service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bot
+EnvironmentFile=/home/ubuntu/bot/.env
+ExecStart=/home/ubuntu/bot/.venv/bin/python /home/ubuntu/bot/callkeeper_service.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -3663,7 +3663,12 @@ callkeeper_paths_exist_in_commit() {
   local path
   for path in \
     callkeeper_service.py \
-    callkeeper_runtime \
+    callkeeper_runtime/__init__.py \
+    callkeeper_runtime/rescue_cmd.py \
+    callkeeper_runtime/rescue_shell.py \
+    callkeeper_runtime/runtime.py \
+    callkeeper_runtime/settings.py \
+    callkeeper_runtime/store.py \
     cogs/call_keeper.py \
     deploy/systemd/callkeeper.service \
     deploy/systemd/vps/callkeeper.service; do
@@ -4612,7 +4617,12 @@ callkeeper_transition_target_mode() {
   local path
   for path in \
     callkeeper_service.py \
-    callkeeper_runtime \
+    callkeeper_runtime/__init__.py \
+    callkeeper_runtime/rescue_cmd.py \
+    callkeeper_runtime/rescue_shell.py \
+    callkeeper_runtime/runtime.py \
+    callkeeper_runtime/settings.py \
+    callkeeper_runtime/store.py \
     cogs/call_keeper.py \
     deploy/systemd/callkeeper.service \
     deploy/systemd/vps/callkeeper.service; do
@@ -4663,8 +4673,8 @@ capture_callkeeper_live_state() {
 }
 
 retire_callkeeper_service() {
-  capture_callkeeper_live_state 0
   STAGE="desativação definitiva do CallKeeper"
+  capture_callkeeper_live_state 0
 
   systemctl stop "$CALLKEEPER_SERVICE" >/dev/null 2>&1 || true
   local attempt
@@ -4681,6 +4691,19 @@ retire_callkeeper_service() {
   rm -f "$CALLKEEPER_LIVE_UNIT"
   systemctl daemon-reload
   systemctl reset-failed "$CALLKEEPER_SERVICE" >/dev/null 2>&1 || true
+
+  local runtime_dir="$REPO_DIR/callkeeper_runtime"
+  if [[ -d "$runtime_dir" ]]; then
+    # O Git remove os fontes rastreados, mas diretórios ignorados como
+    # __pycache__ podem permanecer. Limpe somente bytecode gerado e diretórios
+    # vazios; qualquer arquivo inesperado mantém a retirada em modo de falha.
+    find "$runtime_dir" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+    find "$runtime_dir" -depth -type d -empty -delete
+  fi
+  if [[ -e "$runtime_dir" ]]; then
+    CALLKEEPER_STATUS="falhou: arquivos residuais não gerados em callkeeper_runtime"
+    return 1
+  fi
 
   if systemctl is-enabled --quiet "$CALLKEEPER_SERVICE" 2>/dev/null; then
     CALLKEEPER_STATUS="falhou: serviço continuou habilitado"

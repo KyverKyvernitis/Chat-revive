@@ -179,8 +179,7 @@ REMOVED_SLASH_COMMANDS = {
     "form_repostar",
     "form_reset",
     "form_status",
-    # Mantido por uma atualização para limpar o grupo legado antes da retirada
-    # definitiva deste tombstone no patch de finalização.
+    # O CallKeeper agora é apenas comando de prefixo; remove o grupo slash antigo.
     "callkeeper",
     # O painel técnico de TTS foi movido para /vps > TTS.
     "health",
@@ -651,16 +650,12 @@ class BotLocal(commands.Bot):
         guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
         guild_ids.add(health_guild_id)
 
-        # A configuração pública já foi removida, mas o ID ainda pode existir na
-        # .env da VPS. Incluí-lo neste último boot garante a limpeza do slash
-        # legado antes que o patch final elimine também esta ponte.
         try:
-            legacy_callkeeper_guild_id = int(os.getenv("CALLKEEPER_GUILD_ID", "0") or 0)
+            callkeeper_guild_id = int(getattr(config, "CALLKEEPER_GUILD_ID", 0) or 0)
         except Exception:
-            legacy_callkeeper_guild_id = 0
-        if legacy_callkeeper_guild_id > 0:
-            guild_ids.add(legacy_callkeeper_guild_id)
-
+            callkeeper_guild_id = 0
+        if callkeeper_guild_id > 0:
+            guild_ids.add(callkeeper_guild_id)
         return guild_ids
 
     def _app_command_sync_enabled(self) -> bool:
@@ -1756,6 +1751,21 @@ class BotLocal(commands.Bot):
                 return True
         return False
 
+    def _zip_update_is_callkeeper_protected_path(self, rel_path: Path | str) -> bool:
+        parts = tuple(Path(str(rel_path)).parts)
+        if not parts:
+            return False
+        first = parts[0]
+        if first == "callkeeper_runtime":
+            return True
+        if first in {"callkeeper_service.py"}:
+            return True
+        if len(parts) >= 2 and parts[0] == "cogs" and parts[1] == "call_keeper.py":
+            return True
+        if len(parts) >= 3 and parts[0] == "deploy" and parts[1] == "systemd" and parts[-1] == "callkeeper.service":
+            return True
+        return False
+
     def _zip_update_is_forbidden_path(self, rel_path: Path | str) -> bool:
         return is_forbidden_update_path(rel_path)
 
@@ -1854,6 +1864,8 @@ class BotLocal(commands.Bot):
                 rel_posix = rel_path.as_posix()
                 if rel_posix not in expected_changed:
                     continue
+                if self._zip_update_is_callkeeper_protected_path(rel_path):
+                    raise RuntimeError(f"Arquivo protegido do CallKeeper não pode ser alterado pelo updater comum: {rel_posix}")
                 if self._zip_update_is_forbidden_path(rel_path):
                     raise RuntimeError(f"Caminho protegido não pode ser alterado: {rel_posix}")
                 target = files_dir / rel_path
@@ -2251,6 +2263,8 @@ class BotLocal(commands.Bot):
             data = extracted_path.read_bytes()
             if before == data:
                 continue
+            if self._zip_update_is_callkeeper_protected_path(rel_path):
+                raise RuntimeError(f"Arquivo protegido do CallKeeper não pode ser alterado pelo updater comum: {rel_path.as_posix()}")
             destination.write_bytes(data)
             changed_files.append(rel_path.as_posix())
         return changed_files
@@ -2377,6 +2391,9 @@ class BotLocal(commands.Bot):
                 raise RuntimeError(f"Falha ao gerar patch de fila. {err}")
             patch_diff_text = patch_result.stdout or ""
             changed_files = [str(item.get("path")) for item in diff_stats.get("entries", []) if item.get("path")] or changed_files
+            protected_changed = [path for path in changed_files if self._zip_update_is_callkeeper_protected_path(path)]
+            if protected_changed:
+                raise RuntimeError("Patch bloqueado: arquivos do CallKeeper são protegidos pelo updater comum: " + ", ".join(protected_changed[:5]))
             elapsed = mark("diff_ms")
             publish_progress("Montando candidato seguro", "Alterações calculadas", elapsed)
 
@@ -2439,6 +2456,9 @@ class BotLocal(commands.Bot):
         modules = [str(item).strip() for item in modules_raw if str(item).strip()]
         if not modules:
             return {"ok": False, "error": "nenhuma cog para recarregar"}
+        if any(module == "cogs.call_keeper" for module in modules):
+            return {"ok": False, "error": "CallKeeper é protegido e não pode ser recarregado pelo updater comum"}
+
         check_app_commands = bool(payload.get("check_app_commands")) if isinstance(payload, dict) else False
         future = asyncio.run_coroutine_threadsafe(
             self._reload_cogs_for_update(modules, check_app_commands=check_app_commands),
@@ -3023,6 +3043,8 @@ class BotLocal(commands.Bot):
         results: list[dict[str, str]] = []
         for module in modules:
             module = _normalize_extension_name(module)
+            if module == "cogs.call_keeper":
+                return {"ok": False, "error": "CallKeeper é protegido", "results": results}
             try:
                 if module in self.extensions:
                     await self.reload_extension(module)

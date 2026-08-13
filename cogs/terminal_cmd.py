@@ -35,6 +35,22 @@ EDITOR_MAX_FILE_BYTES = 1024 * 1024
 EDITOR_TIMEOUT_SECONDS = 30 * 60
 DISCORD_MESSAGE_MAX_CHARS = 2000
 BOT_SERVICE = "tts-bot.service"
+CALLKEEPER_TERMS = (
+    "callkeeper",
+    "call_keeper",
+    "call-keeper",
+    "call keeper",
+    "callkeeper_runtime",
+    "callkeeper_service.py",
+    "cogs/call_keeper.py",
+)
+CALLKEEPER_RESCUE_MARKERS = (
+    "uso rescue",
+    "_cmd start bot",
+    "_cmd restart bot",
+    "_cmd status bot",
+    "_cmd logs bot",
+)
 INTERACTIVE_EDITORS = {"nano", "vim", "vi", "micro", "edit"}
 
 
@@ -96,6 +112,21 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _collapse_shell_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _touches_callkeeper(value: str | Path) -> bool:
+    text = str(value or "").replace("\\", "/")
+    lowered = _collapse_shell_text(text)
+    compact = lowered.replace(" ", "")
+    for term in CALLKEEPER_TERMS:
+        normalized = _collapse_shell_text(term)
+        if normalized in lowered or normalized.replace(" ", "") in compact:
+            return True
+    return False
+
+
 def _looks_like_discord_token(value: str) -> bool:
     return bool(re.search(r"[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{20,}", value or ""))
 
@@ -110,8 +141,13 @@ def redact_text(text: str) -> str:
         result,
     )
     result = re.sub(
-        r"(?i)\b([a-z0-9_]*(?:token|api[_-]?key|secret|password|passwd|webhook(?:_url)?|database_url)[a-z0-9_]*)\b\s*([:=])\s*([^\s'\"`]+)",
+        r"(?i)\b((?:discord_)?(?:bot_)?token|github_token|api[_-]?key|secret|password|passwd|webhook(?:_url)?|database_url)\b\s*([:=])\s*([^\s'\"`]+)",
         r"\1\2***redacted***",
+        result,
+    )
+    result = re.sub(
+        r"(?i)(CALLKEEPER_BOT_\d+_TOKEN\s*[:=]\s*)([^\s'\"`]+)",
+        r"\1***redacted***",
         result,
     )
     result = re.sub(
@@ -625,6 +661,31 @@ class TerminalCommandCog(commands.Cog):
             await self._send_channel_message(ctx, target_id, content)
         return True
 
+    def _is_callkeeper_rescue_hint(self, message: discord.Message) -> bool:
+        author = getattr(message, "author", None)
+        if not getattr(author, "bot", False):
+            return False
+        text = _collapse_shell_text(getattr(message, "content", ""))
+        if not text:
+            return False
+        return all(marker in text for marker in CALLKEEPER_RESCUE_MARKERS)
+
+    async def _suppress_callkeeper_rescue_hints(self, ctx: commands.Context) -> None:
+        channel = getattr(ctx, "channel", None)
+        command_message = getattr(ctx, "message", None)
+        if channel is None or command_message is None or not hasattr(channel, "history"):
+            return
+        # Os CallKeepers também escutam `_cmd` para rescue. Como o updater comum
+        # protege callkeeper_runtime, a cog principal limpa apenas os avisos de uso
+        # gerados por comandos `_cmd` que pertencem ao terminal do bot principal.
+        for _ in range(10):
+            with contextlib.suppress(Exception):
+                async for message in channel.history(limit=30, after=command_message):
+                    if self._is_callkeeper_rescue_hint(message):
+                        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                            await message.delete()
+            await asyncio.sleep(0.5)
+
     def resolve_edit_path(self, raw_path: str) -> Path:
         raw = str(raw_path or "").strip()
         if not raw:
@@ -638,6 +699,8 @@ class TerminalCommandCog(commands.Cog):
             resolved = path.resolve(strict=False)
         except Exception:
             resolved = path.absolute()
+        if _touches_callkeeper(resolved):
+            raise PermissionError("Bloqueado: CallKeeper é protegido para recuperação do bot.")
         return resolved
 
     def file_hash(self, path: Path) -> str | None:
@@ -708,6 +771,8 @@ class TerminalCommandCog(commands.Cog):
         view.message = message
 
     async def save_editor_session(self, session: EditorSession) -> tuple[bool, str]:
+        if _touches_callkeeper(session.path):
+            return False, "Bloqueado: CallKeeper é protegido para recuperação do bot."
         path = session.path
         current_hash = self.file_hash(path)
         if current_hash != session.original_hash:
@@ -922,12 +987,17 @@ class TerminalCommandCog(commands.Cog):
             return False
         return not (result.stdout or b"").strip() and not (result.stderr or b"").strip()
 
-    async def _refuse_primary_bot_stop(self, ctx: commands.Context) -> None:
+    async def _stop_primary_bot(self, ctx: commands.Context) -> None:
         await self._reply_notice(
             ctx,
             "Terminal",
-            "Parar o bot pelo Discord está desativado. Use SSH ou o console da VPS para evitar ficar sem acesso ao processo.",
-            ok=False,
+            "Bot principal será parado. Para religar, mencione um dos CallKeepers no chat.",
+            ok=True,
+        )
+        await asyncio.create_subprocess_shell(
+            f"nohup /bin/bash -lc 'sleep 1; sudo systemctl stop {BOT_SERVICE}' >/dev/null 2>&1 &",
+            cwd=str(REPO_ROOT),
+            executable="/bin/bash",
         )
 
     @commands.command(name="cmd")
@@ -939,10 +1009,16 @@ class TerminalCommandCog(commands.Cog):
         if not command:
             await self._reply_notice(ctx, "Terminal", self._usage_text(), ok=False)
             return
+        self.bot.loop.create_task(self._suppress_callkeeper_rescue_hints(ctx))
+
         if await self._handle_message_subcommand(ctx, command):
             return
 
         if await self._fun_router.handle(ctx, command):
+            return
+
+        if _touches_callkeeper(command):
+            await self._reply_notice(ctx, "Terminal", "Bloqueado: CallKeeper é protegido para recuperação do bot.", ok=False)
             return
 
         is_editor, raw_path, editor_error = _editor_request(command)
@@ -954,7 +1030,7 @@ class TerminalCommandCog(commands.Cog):
             return
 
         if _is_primary_bot_stop_request(command):
-            await self._refuse_primary_bot_stop(ctx)
+            await self._stop_primary_bot(ctx)
             return
 
         if self._run_lock.locked():

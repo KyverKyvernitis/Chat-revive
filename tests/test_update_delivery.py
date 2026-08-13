@@ -585,6 +585,121 @@ printf '%s %s %s %s %s\n' \
     assert result.stdout.strip() == "1 0 0 0 0"
 
 
+def test_callkeeper_bridge_accepts_only_complete_remote_retirement(tmp_path: Path) -> None:
+    repo = tmp_path / "git-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Updater Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "updater@test.local"], cwd=repo, check=True)
+
+    protected = (
+        "callkeeper_service.py",
+        "callkeeper_runtime/__init__.py",
+        "cogs/call_keeper.py",
+        "deploy/systemd/callkeeper.service",
+        "deploy/systemd/vps/callkeeper.service",
+    )
+    for relative in protected:
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("legacy\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "legacy"], cwd=repo, check=True)
+    current = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    for relative in protected:
+        (repo / relative).unlink()
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "retire"], cwd=repo, check=True)
+    retired = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    partial_path = repo / "callkeeper_service.py"
+    partial_path.write_text("partial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "partial"], cwd=repo, check=True)
+    partial = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    harness = f"""
+source <(awk '/^callkeeper_paths_exist_in_commit[(][)]/{{flag=1}} /^fast_reload_modules_for_changed_files[(][)]/{{flag=0}} flag' {UPDATER!s})
+sudo() {{
+  if [[ "${{1:-}}" == "-u" ]]; then shift 2; fi
+  if [[ "${{1:-}}" == "-H" ]]; then shift; fi
+  command "$@"
+}}
+REPO_DIR={repo!s}
+CALLKEEPER_CHANGED=1
+remote_commit_is_callkeeper_retirement {current} {retired}
+if remote_commit_is_callkeeper_retirement {current} {partial}; then
+  exit 41
+fi
+"""
+    _run_bash(harness)
+
+
+def test_callkeeper_bridge_retires_and_restores_service_state(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    live_unit = tmp_path / "systemd" / "callkeeper.service"
+    state = tmp_path / "state"
+    repo.mkdir()
+    live_unit.parent.mkdir()
+    state.mkdir()
+    live_unit.write_text("legacy-unit\n", encoding="utf-8")
+    (state / "active").touch()
+    (state / "enabled").touch()
+
+    harness = f"""
+source <(awk '/^callkeeper_transition_target_mode[(][)]/{{flag=1}} /^frontend_publication_is_healthy[(][)]/{{flag=0}} flag' {UPDATER!s})
+systemctl() {{
+  local action="${{1:-}}"
+  shift || true
+  case "$action" in
+    is-active) [[ -f {state!s}/active ]] ;;
+    is-enabled) [[ -f {state!s}/enabled ]] ;;
+    stop) rm -f {state!s}/active ;;
+    disable) rm -f {state!s}/enabled ;;
+    enable) touch {state!s}/enabled ;;
+    restart) touch {state!s}/active ;;
+    daemon-reload|reset-failed) return 0 ;;
+    *) return 0 ;;
+  esac
+}}
+pgrep() {{ return 1; }}
+sleep() {{ :; }}
+REPO_DIR={repo!s}
+CALLKEEPER_SERVICE=callkeeper
+CALLKEEPER_CHANGED=1
+CALLKEEPER_TRANSITION_ALLOWED=1
+CALLKEEPER_TRANSITION_CAPTURED=0
+CALLKEEPER_TRANSITION_APPLIED=0
+CALLKEEPER_PREVIOUS_ACTIVE=0
+CALLKEEPER_PREVIOUS_ENABLED=0
+CALLKEEPER_UNIT_BACKUP=''
+CALLKEEPER_LIVE_UNIT={live_unit!s}
+CALLKEEPER_PROCESS_PATTERN='no-process'
+CALLKEEPER_STATUS='não alterado'
+deploy_callkeeper
+[[ "$CALLKEEPER_STATUS" == 'removido' ]]
+[[ ! -e "$CALLKEEPER_LIVE_UNIT" ]]
+[[ ! -e {state!s}/active && ! -e {state!s}/enabled ]]
+
+mkdir -p \
+  "$REPO_DIR/callkeeper_runtime" \
+  "$REPO_DIR/cogs" \
+  "$REPO_DIR/deploy/systemd/vps"
+touch \
+  "$REPO_DIR/callkeeper_service.py" \
+  "$REPO_DIR/callkeeper_runtime/__init__.py" \
+  "$REPO_DIR/cogs/call_keeper.py"
+printf '%s\n' restored-unit > "$REPO_DIR/deploy/systemd/callkeeper.service"
+cp "$REPO_DIR/deploy/systemd/callkeeper.service" "$REPO_DIR/deploy/systemd/vps/callkeeper.service"
+deploy_callkeeper
+[[ "$CALLKEEPER_STATUS" == 'restaurado' ]]
+[[ -f "$CALLKEEPER_LIVE_UNIT" ]]
+[[ -f {state!s}/active && -f {state!s}/enabled ]]
+"""
+    _run_bash(harness)
+
+
 def test_installer_dynamically_keeps_disabled_updater_timer_disabled(tmp_path: Path) -> None:
     installer = ROOT / "scripts" / "install-vps-systemd-units.sh"
     calls = tmp_path / "systemctl.log"

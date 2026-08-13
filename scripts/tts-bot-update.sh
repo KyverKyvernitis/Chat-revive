@@ -133,6 +133,14 @@ FRONT_CHANGED=0
 BACK_CHANGED=0
 BOT_CHANGED=0
 CALLKEEPER_CHANGED=0
+CALLKEEPER_TRANSITION_ALLOWED=0
+CALLKEEPER_TRANSITION_CAPTURED=0
+CALLKEEPER_TRANSITION_APPLIED=0
+CALLKEEPER_PREVIOUS_ACTIVE=0
+CALLKEEPER_PREVIOUS_ENABLED=0
+CALLKEEPER_UNIT_BACKUP=""
+CALLKEEPER_LIVE_UNIT="${CALLKEEPER_LIVE_UNIT:-/etc/systemd/system/callkeeper.service}"
+CALLKEEPER_PROCESS_PATTERN="${CALLKEEPER_PROCESS_PATTERN:-/home/ubuntu/bot/[c]allkeeper_service.py}"
 REQUIREMENTS_CHANGED=0
 AUDIO_SYSTEMD_CHANGED=0
 CLEANUP_CHANGED=0
@@ -282,6 +290,9 @@ PYCLEARUPDATESTATE
 cleanup_runtime_artifacts() {
   clear_update_runtime_state || true
   rm -f "$RUN_LOG_FILE"
+  if [[ -n "${CALLKEEPER_UNIT_BACKUP:-}" && -f "$CALLKEEPER_UNIT_BACKUP" ]]; then
+    rm -f "$CALLKEEPER_UNIT_BACKUP" 2>/dev/null || true
+  fi
   if [[ -n "${REMOTE_WORKTREE_DIR:-}" && -d "$REMOTE_WORKTREE_DIR" ]]; then
     sudo -u ubuntu -H git -C "$REPO_DIR" worktree remove --force "$REMOTE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
   fi
@@ -630,7 +641,7 @@ format_changed_processes() {
   if (( VPS_SYSTEMD_UNITS_CHANGED == 1 )); then
     items+=("sistema VPS")
   fi
-  if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" == "1" && "${CALLKEEPER_UPDATE_ALLOWED:-}" == "1" ]]; then
+  if (( CALLKEEPER_CHANGED == 1 && CALLKEEPER_TRANSITION_ALLOWED == 1 )); then
     items+=("CallKeeper")
   fi
   if ((${#items[@]} == 0)); then
@@ -3001,13 +3012,11 @@ prepare_rollback_request_update() {
     exit 0
   fi
   classify_changed_files
-  if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
-    sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
-    local retry_control
-    retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Atualização bloqueada" "CallKeeper é protegido e não foi tocado." "$retry_control" || true
-    archive_rollback_request "failed"
-    exit 0
+  if (( CALLKEEPER_CHANGED == 1 )); then
+    # Rollback/redo só chega aqui depois de validar o token e os commits do
+    # controle persistente. Permitir a transição mantém a retirada reversível:
+    # arquivos restaurados reinstalam o serviço; arquivos ausentes o aposentam.
+    CALLKEEPER_TRANSITION_ALLOWED=1
   fi
   COMMIT_SUBJECT="${ROLLBACK_REQUEST_ACTION} discord zip update"
   mark_update_timing "rollback_apply"
@@ -3397,7 +3406,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   fi
 
   classify_changed_files
-  if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
+  if (( CALLKEEPER_CHANGED == 1 )); then
     CHANGED_FILES="$(format_changed_files)"
     notify_zip_status_message "error" "Atualização bloqueada" "O pacote contém arquivos protegidos do CallKeeper. Nenhuma alteração foi aplicada." || true
     archive_local_candidate "failed"
@@ -3405,7 +3414,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 Branch: $BRANCH
 Arquivos:
 $CHANGED_FILES
-Ação sugerida: remova arquivos do CallKeeper deste patch ou faça um patch CallKeeper explícito e isolado.
+Ação sugerida: use o commit Git de retirada completa depois de aplicar o patch-ponte.
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     exit 1
   fi
@@ -3646,6 +3655,33 @@ classify_changed_files() {
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|cogs/call_keeper\.py|deploy/systemd(/vps)?/callkeeper\.service)$'; then
     CALLKEEPER_CHANGED=1
   fi
+}
+
+callkeeper_paths_exist_in_commit() {
+  local commit="${1:-}"
+  [[ -n "$commit" ]] || return 1
+  local path
+  for path in \
+    callkeeper_service.py \
+    callkeeper_runtime \
+    cogs/call_keeper.py \
+    deploy/systemd/callkeeper.service \
+    deploy/systemd/vps/callkeeper.service; do
+    if sudo -u ubuntu -H git -C "$REPO_DIR" cat-file -e "${commit}:${path}" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+remote_commit_is_callkeeper_retirement() {
+  local current_commit="${1:-}"
+  local target_commit="${2:-}"
+  (( CALLKEEPER_CHANGED == 1 )) || return 1
+  # A ponte não libera edições arbitrárias: o estado atual precisa conter o
+  # recurso e o commit alvo precisa remover todos os seus caminhos protegidos.
+  callkeeper_paths_exist_in_commit "$current_commit" || return 1
+  ! callkeeper_paths_exist_in_commit "$target_commit"
 }
 
 fast_reload_modules_for_changed_files() {
@@ -4570,40 +4606,159 @@ deploy_bot() {
 }
 
 
+callkeeper_transition_target_mode() {
+  local present=0
+  local missing=0
+  local path
+  for path in \
+    callkeeper_service.py \
+    callkeeper_runtime \
+    cogs/call_keeper.py \
+    deploy/systemd/callkeeper.service \
+    deploy/systemd/vps/callkeeper.service; do
+    if [[ -e "$REPO_DIR/$path" ]]; then
+      present=$((present + 1))
+    else
+      missing=$((missing + 1))
+    fi
+  done
+  if (( present == 0 )); then
+    printf 'retired'
+    return 0
+  fi
+  if (( missing == 0 )); then
+    printf 'installed'
+    return 0
+  fi
+  printf 'partial'
+  return 1
+}
+
+capture_callkeeper_live_state() {
+  local default_enabled_if_missing="${1:-0}"
+  (( CALLKEEPER_TRANSITION_CAPTURED == 0 )) || return 0
+
+  local found_live_state=0
+  if systemctl is-active --quiet "$CALLKEEPER_SERVICE" 2>/dev/null; then
+    CALLKEEPER_PREVIOUS_ACTIVE=1
+    found_live_state=1
+  fi
+  if systemctl is-enabled --quiet "$CALLKEEPER_SERVICE" 2>/dev/null; then
+    CALLKEEPER_PREVIOUS_ENABLED=1
+    found_live_state=1
+  fi
+  if [[ -f "$CALLKEEPER_LIVE_UNIT" ]]; then
+    found_live_state=1
+    CALLKEEPER_UNIT_BACKUP="${TMPDIR:-/tmp}/callkeeper-unit.$$.backup"
+    cp -a "$CALLKEEPER_LIVE_UNIT" "$CALLKEEPER_UNIT_BACKUP"
+  fi
+  if (( found_live_state == 0 && default_enabled_if_missing == 1 )); then
+    # Um rollback executado em outro ciclo encontra a unit já aposentada. Como
+    # os arquivos protegidos reapareceram, restaurar ativo+habilitado é o estado
+    # seguro e equivalente ao funcionamento anterior à retirada.
+    CALLKEEPER_PREVIOUS_ACTIVE=1
+    CALLKEEPER_PREVIOUS_ENABLED=1
+  fi
+  CALLKEEPER_TRANSITION_CAPTURED=1
+}
+
+retire_callkeeper_service() {
+  capture_callkeeper_live_state 0
+  STAGE="desativação definitiva do CallKeeper"
+
+  systemctl stop "$CALLKEEPER_SERVICE" >/dev/null 2>&1 || true
+  local attempt
+  for attempt in {1..20}; do
+    systemctl is-active --quiet "$CALLKEEPER_SERVICE" 2>/dev/null || break
+    sleep 0.25
+  done
+  if systemctl is-active --quiet "$CALLKEEPER_SERVICE" 2>/dev/null; then
+    CALLKEEPER_STATUS="falhou: serviço continuou ativo"
+    return 1
+  fi
+
+  systemctl disable "$CALLKEEPER_SERVICE" >/dev/null 2>&1 || true
+  rm -f "$CALLKEEPER_LIVE_UNIT"
+  systemctl daemon-reload
+  systemctl reset-failed "$CALLKEEPER_SERVICE" >/dev/null 2>&1 || true
+
+  if systemctl is-enabled --quiet "$CALLKEEPER_SERVICE" 2>/dev/null; then
+    CALLKEEPER_STATUS="falhou: serviço continuou habilitado"
+    return 1
+  fi
+  if pgrep -f "$CALLKEEPER_PROCESS_PATTERN" >/dev/null 2>&1; then
+    CALLKEEPER_STATUS="falhou: processo residual detectado"
+    return 1
+  fi
+
+  CALLKEEPER_TRANSITION_APPLIED=1
+  CALLKEEPER_STATUS="removido"
+}
+
+restore_callkeeper_service() {
+  capture_callkeeper_live_state 1
+  STAGE="restauração do CallKeeper"
+
+  local source_unit=""
+  if [[ -f "$CALLKEEPER_UNIT_BACKUP" ]]; then
+    source_unit="$CALLKEEPER_UNIT_BACKUP"
+  elif [[ -f "$REPO_DIR/deploy/systemd/vps/callkeeper.service" ]]; then
+    source_unit="$REPO_DIR/deploy/systemd/vps/callkeeper.service"
+  elif [[ -f "$REPO_DIR/deploy/systemd/callkeeper.service" ]]; then
+    source_unit="$REPO_DIR/deploy/systemd/callkeeper.service"
+  fi
+  if [[ -z "$source_unit" ]]; then
+    CALLKEEPER_STATUS="falhou: unit de restauração ausente"
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$CALLKEEPER_LIVE_UNIT")"
+  install -m 0644 "$source_unit" "$CALLKEEPER_LIVE_UNIT"
+  systemctl daemon-reload
+
+  if (( CALLKEEPER_PREVIOUS_ENABLED == 1 )); then
+    systemctl enable "$CALLKEEPER_SERVICE" >/dev/null
+  else
+    systemctl disable "$CALLKEEPER_SERVICE" >/dev/null 2>&1 || true
+  fi
+  if (( CALLKEEPER_PREVIOUS_ACTIVE == 1 )); then
+    systemctl restart "$CALLKEEPER_SERVICE"
+    sleep 2
+    if ! systemctl is-active --quiet "$CALLKEEPER_SERVICE"; then
+      CALLKEEPER_STATUS="falhou: serviço não voltou após rollback"
+      return 1
+    fi
+    CALLKEEPER_STATUS="restaurado"
+  else
+    systemctl stop "$CALLKEEPER_SERVICE" >/dev/null 2>&1 || true
+    CALLKEEPER_STATUS="restaurado; mantido inativo"
+  fi
+  CALLKEEPER_TRANSITION_APPLIED=1
+}
+
 deploy_callkeeper() {
-  # Regra de isolamento: updates comuns do bot/música/worker NÃO tocam nos
-  # CallKeepers. Eles rodam separados e devem permanecer na call. Mesmo que
-  # arquivos relacionados apareçam no diff, o updater só pode reinstalar ou
-  # reiniciar CallKeeper com opt-in explícito para um patch de CallKeeper.
   if (( CALLKEEPER_CHANGED == 0 )); then
     CALLKEEPER_STATUS="não alterado"
     return 0
   fi
-  if [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" && "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
-    CALLKEEPER_STATUS="não alterado; isolado do updater"
-    logger -t "$LOG_TAG" "CallKeeper não alterado: update sem opt-in UPDATE_TOUCH_CALLKEEPER=1"
-    return 0
+  if (( CALLKEEPER_TRANSITION_ALLOWED != 1 )); then
+    CALLKEEPER_STATUS="falhou: transição não autorizada"
+    return 1
   fi
 
-  STAGE="configuração do CallKeeper"
-  if [[ -f "$REPO_DIR/deploy/systemd/callkeeper.service" ]]; then
-    cp "$REPO_DIR/deploy/systemd/callkeeper.service" /etc/systemd/system/callkeeper.service
-    systemctl daemon-reload
-    systemctl enable "$CALLKEEPER_SERVICE" >/dev/null 2>&1 || true
+  local target_mode
+  if ! target_mode="$(callkeeper_transition_target_mode)"; then
+    CALLKEEPER_STATUS="falhou: arquivos em estado parcial"
+    return 1
   fi
-
-  STAGE="reinício do CallKeeper"
-  systemctl restart "$CALLKEEPER_SERVICE"
-  sleep 2
-
-  STAGE="healthcheck do CallKeeper"
-  if systemctl is-active --quiet "$CALLKEEPER_SERVICE"; then
-    CALLKEEPER_STATUS="OK"
-    return 0
-  fi
-
-  CALLKEEPER_STATUS="falhou"
-  return 1
+  case "$target_mode" in
+    retired) retire_callkeeper_service ;;
+    installed) restore_callkeeper_service ;;
+    *)
+      CALLKEEPER_STATUS="falhou: estado de destino desconhecido"
+      return 1
+      ;;
+  esac
 }
 
 frontend_publication_is_healthy() {
@@ -4930,8 +5085,17 @@ rollback_after_failure() {
       rollback_bot_status="falhou: $BOT_HEALTHCHECK_STATUS"
     fi
 
-    # CallKeeper é isolado: rollback/update geral não pode reiniciar nem reconciliar.
-    rollback_callkeeper_status="protegido; não tocado"
+    if (( CALLKEEPER_CHANGED == 1 )); then
+      CALLKEEPER_TRANSITION_ALLOWED=1
+      if deploy_callkeeper; then
+        rollback_callkeeper_status="$CALLKEEPER_STATUS"
+      else
+        rollback_success=0
+        rollback_callkeeper_status="falhou: $CALLKEEPER_STATUS"
+      fi
+    else
+      rollback_callkeeper_status="não precisou restaurar"
+    fi
   else
     rollback_front_status="não executado porque o git reset falhou"
     rollback_back_status="não executado porque o git reset falhou"
@@ -5195,18 +5359,23 @@ else
 
   classify_changed_files
 
-  if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
-    CHANGED_FILES="$(format_changed_files)"
-    body="Resumo: Update do GitHub bloqueado porque contém arquivo protegido do CallKeeper.
+  if (( CALLKEEPER_CHANGED == 1 )); then
+    if remote_commit_is_callkeeper_retirement "$CURRENT_COMMIT" "$REMOTE_COMMIT"; then
+      CALLKEEPER_TRANSITION_ALLOWED=1
+      logger -t "$LOG_TAG" "Retirada completa do CallKeeper reconhecida no commit remoto $(short_commit "$REMOTE_COMMIT")"
+    else
+      CHANGED_FILES="$(format_changed_files)"
+      body="Resumo: Update do GitHub bloqueado porque altera arquivos protegidos sem removê-los por completo.
 Commit: $(short_commit "$CURRENT_COMMIT") → $(short_commit "$REMOTE_COMMIT")
 Mudança: ${COMMIT_SUBJECT:-sem mensagem}
 Arquivos:
 $CHANGED_FILES
-Ação sugerida: Remova arquivos do CallKeeper ou faça um patch CallKeeper explícito e isolado.
+Ação sugerida: aplique primeiro o patch-ponte e envie a retirada completa em um único commit Git.
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
-    mark_remote_commit_rejected "$REMOTE_COMMIT" "alteração protegida de CallKeeper"
-    send_error "Atualização bloqueada: CallKeeper protegido" "$body"
-    exit 0
+      mark_remote_commit_rejected "$REMOTE_COMMIT" "alteração parcial de CallKeeper"
+      send_error "Atualização bloqueada: CallKeeper protegido" "$body"
+      exit 0
+    fi
   fi
 
   eval "$(create_direct_update_message "applying" "$(zip_progress_title "Conferindo commit do GitHub")" "$UPDATE_STAGE_EMOJI **Conferindo commit do GitHub**")"
@@ -5313,8 +5482,11 @@ OVERALL_FATAL=0
 if [[ "$BOT_HEALTHCHECK_STATUS" == falhou:* ]]; then
   OVERALL_FATAL=1
 fi
-if (( CALLKEEPER_CHANGED == 1 )) && [[ "${CALLKEEPER_STATUS:-}" != "OK" && "${CALLKEEPER_STATUS:-}" != "não alterado; isolado do updater" ]]; then
-  OVERALL_FATAL=1
+if (( CALLKEEPER_CHANGED == 1 )); then
+  case "${CALLKEEPER_STATUS:-}" in
+    removido|restaurado|"restaurado; mantido inativo") ;;
+    *) OVERALL_FATAL=1 ;;
+  esac
 fi
 if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
   [[ "${ACTIVITY_HEALTHCHECK_STATUS:-}" == "OK" ]] || OVERALL_FATAL=1

@@ -700,6 +700,23 @@ deploy_callkeeper
     _run_bash(harness)
 
 
+def test_terminal_refuses_self_stop_without_spawning_a_shutdown_process() -> None:
+    source = (ROOT / "cogs" / "terminal_cmd.py").read_text(encoding="utf-8")
+    start = source.index("    async def _refuse_primary_bot_stop")
+    end = source.index("\n    @commands.command", start)
+    block = source[start:end]
+    assert "Parar o bot pelo Discord está desativado" in block
+    assert "create_subprocess_shell" not in block
+    assert "systemctl stop" not in block
+
+
+def test_game_bot_filter_uses_member_metadata_instead_of_decoding_tokens() -> None:
+    source = (ROOT / "cogs" / "games" / "services" / "base.py").read_text(encoding="utf-8")
+    assert "def _is_bot_member" in source
+    assert 'getattr(member, "bot", False)' in source
+    assert "urlsafe_b64decode" not in source
+
+
 def test_installer_dynamically_keeps_disabled_updater_timer_disabled(tmp_path: Path) -> None:
     installer = ROOT / "scripts" / "install-vps-systemd-units.sh"
     calls = tmp_path / "systemctl.log"

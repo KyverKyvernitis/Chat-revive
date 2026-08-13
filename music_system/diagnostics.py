@@ -1297,7 +1297,7 @@ def _local_log_tail() -> str:
 
 
 def _systemd_units_for_diagnostics() -> list[str]:
-    return ["tts-bot.service", "lavalink.service", "callkeeper.service"]
+    return ["tts-bot.service", "lavalink.service"]
 
 
 def _node_process_inventory() -> str:
@@ -1387,7 +1387,7 @@ def _tts_runtime_snapshot(router: Any, guild_id: int) -> str:
 
 def _journalctl_commands(*, full: bool = False) -> list[list[str]]:
     if full:
-        spec = [("tts-bot.service", "2 hours ago", "1200"), ("lavalink.service", "2 hours ago", "900"), ("callkeeper.service", "2 hours ago", "500")]
+        spec = [("tts-bot.service", "2 hours ago", "1200"), ("lavalink.service", "2 hours ago", "900")]
     else:
         spec = [("tts-bot.service", "8 minutes ago", "160"), ("lavalink.service", "8 minutes ago", "160")]
     return [["journalctl", "-u", unit, "--since", since, "-n", limit, "--no-pager", "-o", "cat"] for unit, since, limit in spec]
@@ -2128,7 +2128,6 @@ def _quick_service_lines() -> list[str]:
     labels = {
         "tts-bot.service": "Bot",
         "lavalink.service": "Lavalink",
-        "callkeeper.service": "CallKeeper",
     }
     names = {
         "active": "ativo",

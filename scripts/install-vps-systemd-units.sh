@@ -346,12 +346,6 @@ install_units() {
     phone-worker-watch.service phone-worker-watch.timer; do
     install_file "$unit"
   done
-  if [[ "${UPDATE_TOUCH_CALLKEEPER:-}" == "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" == "1" ]]; then
-    install_file "callkeeper.service"
-    action "CallKeeper systemd atualizado por opt-in explícito"
-  else
-    action "CallKeeper ignorado pelo updater"
-  fi
   install_dir_files "tts-bot.service.d"
 }
 
@@ -467,9 +461,6 @@ audit_vps_systemd() {
       *.backup.*|*.disabled.*|*.disabled|*.tmp) continue ;;
       tts-bot.service|tts-bot-updater.service|tts-bot-updater.timer|tts-bot-alert@.service|cleanup-audio-temp.service|cleanup-audio-temp.timer|sinuca-activity-server.service|phone-worker-watch.service|phone-worker-watch.timer|tts-bot.service.d/*)
         [[ -f "$TEMPLATE_DIR/$name" ]] || warn "audit: existe só na VPS: $name"
-        ;;
-      callkeeper.service)
-        action "audit: CallKeeper ignorado pelo updater"
         ;;
       lavalink.service|lavalink.service.d/*)
         action "audit: Lavalink VPS legado ignorado/mantido fora: $name"

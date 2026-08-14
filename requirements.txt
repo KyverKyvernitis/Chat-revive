@@ -2,7 +2,7 @@ discord.py[voice]>=2.7.1,<2.8
 davey
 flask
 motor
-edge-tts
+edge-tts==7.2.8
 gTTS
 psutil
 pillow

@@ -138,6 +138,18 @@ TTS_SYNTH_CONCURRENCY = _parse_int(os.getenv("TTS_SYNTH_CONCURRENCY", "3"), 3)
 # Tempo máximo de espera da síntese Edge antes de fallback
 TTS_EDGE_TIMEOUT_SECONDS = _parse_int(os.getenv("TTS_EDGE_TIMEOUT_SECONDS", "10"), 10)
 
+# Fast path do Edge: a VPS mantém a posse da call e começa a reproduzir os
+# fragmentos recebidos antes de a síntese completa terminar. O caminho antigo
+# por arquivo continua disponível para rollback por variável de ambiente.
+TTS_EDGE_VPS_FAST_PATH_ENABLED = _parse_bool(os.getenv("TTS_EDGE_VPS_FAST_PATH_ENABLED", "true"), True)
+TTS_EDGE_STREAMING_ENABLED = _parse_bool(os.getenv("TTS_EDGE_STREAMING_ENABLED", "true"), True)
+TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS", "4.0"), 4.0))
+TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS = max(TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS, _parse_float(os.getenv("TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS", "30.0"), 30.0))
+TTS_EDGE_STREAM_PREBUFFER_MS = min(1200, max(100, _parse_int(os.getenv("TTS_EDGE_STREAM_PREBUFFER_MS", "300"), 300)))
+TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS = min(128, max(8, _parse_int(os.getenv("TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS", "64"), 64)))
+TTS_EDGE_STREAM_CHUNK_BYTES = min(64 * 1024, max(4 * 1024, _parse_int(os.getenv("TTS_EDGE_STREAM_CHUNK_BYTES", "16384"), 16384)))
+TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS", "10.0"), 10.0))
+
 # Concorrência máxima do gTTS
 TTS_GTTS_CONCURRENCY = _parse_int(os.getenv("TTS_GTTS_CONCURRENCY", "1"), 1)
 

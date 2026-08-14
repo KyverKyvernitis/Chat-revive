@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -139,7 +141,8 @@ def _install_runtime_stubs() -> None:
 
 _install_runtime_stubs()
 
-from cogs.tts.audio import QueueItem, TTSAudioMixin, _has_speakable_tts_text
+import cogs.tts.audio as tts_audio
+from cogs.tts.audio import GuildTTSState, QueueItem, TTSAudioMixin, _has_speakable_tts_text
 from cogs.chatbot import VoiceConnectionFilter
 from cogs.tts.utils.message_dispatch import dispatch_message_tts
 from cogs.tts.utils.message_gate import analyze_message_for_tts
@@ -468,6 +471,196 @@ class PlaybackRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe.ensure_calls, 1)
         self.assertEqual(probe.reset_calls, 0)
         self.assertIs(probe.asserted_voice_client, recovered_voice_client)
+
+
+class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = self.temp_dir.name
+        runtime = os.path.join(root, "runtime")
+        cache = os.path.join(root, "cache")
+        self.paths_patch = patch.multiple(
+            tts_audio,
+            TTS_TEMP_DIR=root,
+            _RUNTIME_DIR=runtime,
+            _CACHE_DIR=cache,
+            _TTS_REQUIRED_DIRS=(root, runtime, cache),
+        )
+        self.paths_patch.start()
+        tts_audio._ensure_tts_temp_dirs()
+
+    async def asyncTearDown(self):
+        self.paths_patch.stop()
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _item() -> QueueItem:
+        return QueueItem(
+            77,
+            55,
+            66,
+            "teste progressivo",
+            "edge",
+            "pt-BR-FranciscaNeural",
+            "pt-br",
+            "+18%",
+            "-7Hz",
+        )
+
+    @staticmethod
+    def _probe():
+        class Probe(TTSAudioMixin):
+            def __init__(self):
+                self.guild_states = {}
+                self.edge_voice_names = {"pt-BR-FranciscaNeural"}
+                self.bot = SimpleNamespace(audio_router=None)
+
+            async def _record_persistent_synt_success(self, guild_id, engine):
+                return None
+
+            def _schedule_worker_turbo_cache_store(self, item, path):
+                return None
+
+        return Probe()
+
+    async def test_returns_after_prebuffer_and_streams_remaining_audio(self):
+        release_tail = asyncio.Event()
+        captured = {}
+
+        class FakeCommunicate:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def stream(self):
+                async def generate():
+                    yield {"type": "audio", "data": b"A" * 2048}
+                    await release_tail.wait()
+                    yield {"type": "audio", "data": b"B" * 2048}
+
+                return generate()
+
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        item = self._item()
+
+        with patch.object(tts_audio.edge_tts, "Communicate", FakeCommunicate):
+            handle = await asyncio.wait_for(
+                probe._prepare_edge_stream(state, item, store_in_cache=True),
+                timeout=1.0,
+            )
+            self.assertFalse(handle.producer_task.done())
+            self.assertTrue(os.path.exists(handle.fifo_path))
+            self.assertEqual(handle.queue.maxsize, tts_audio.TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS)
+
+            def read_fifo():
+                with open(handle.fifo_path, "rb") as source:
+                    return source.read()
+
+            reader_task = asyncio.create_task(asyncio.to_thread(read_fifo))
+            await probe._activate_edge_stream(handle)
+            release_tail.set()
+            streamed = await asyncio.wait_for(reader_task, timeout=2.0)
+            await asyncio.wait_for(handle.producer_task, timeout=2.0)
+            await asyncio.wait_for(handle.writer_task, timeout=2.0)
+
+        self.assertEqual(streamed, (b"A" * 2048) + (b"B" * 2048))
+        self.assertEqual(captured["voice"], item.voice)
+        self.assertEqual(captured["rate"], item.rate)
+        self.assertEqual(captured["pitch"], item.pitch)
+        self.assertTrue(handle.cache_path)
+        with open(handle.cache_path, "rb") as cached:
+            self.assertEqual(cached.read(), streamed)
+
+        await probe._finalize_edge_stream(handle)
+        self.assertFalse(os.path.exists(handle.fifo_path))
+        self.assertEqual(probe._get_edge_stream_handles(), {})
+
+    async def test_failure_before_first_audio_uses_gtts_without_retrying_edge(self):
+        class FailingCommunicate:
+            def __init__(self, **kwargs):
+                pass
+
+            def stream(self):
+                async def generate():
+                    raise RuntimeError("edge offline")
+                    yield  # pragma: no cover
+
+                return generate()
+
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        item = self._item()
+
+        async def fake_gtts(text, language):
+            path = probe._make_runtime_temp_file(suffix=".mp3")
+            with open(path, "wb") as output:
+                output.write(b"gtts-fallback")
+            return path
+
+        with (
+            patch.object(tts_audio.edge_tts, "Communicate", FailingCommunicate),
+            patch.object(probe, "_generate_gtts_file", side_effect=fake_gtts) as gtts_mock,
+        ):
+            path, should_cleanup = await probe._resolve_audio_path(
+                state,
+                item,
+                allow_edge_stream=True,
+            )
+
+        self.assertTrue(should_cleanup)
+        self.assertEqual(gtts_mock.await_count, 1)
+        with open(path, "rb") as fallback:
+            self.assertEqual(fallback.read(), b"gtts-fallback")
+        self.assertEqual(probe._get_metrics_store()["edge_stream_fallbacks"], 1)
+        await probe._discard_edge_stream_path(path)
+
+    async def test_cancel_before_playback_releases_slot_and_removes_pipe(self):
+        never_release = asyncio.Event()
+
+        class SlowCommunicate:
+            def __init__(self, **kwargs):
+                pass
+
+            def stream(self):
+                async def generate():
+                    yield {"type": "audio", "data": b"A" * 2048}
+                    await never_release.wait()
+
+                return generate()
+
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        semaphore = probe._get_synth_semaphore()
+        initial_slots = semaphore._value
+
+        with patch.object(tts_audio.edge_tts, "Communicate", SlowCommunicate):
+            handle = await probe._prepare_edge_stream(state, self._item(), store_in_cache=False)
+            self.assertEqual(semaphore._value, initial_slots - 1)
+            await probe._finalize_edge_stream(handle, cancel=True)
+
+        self.assertEqual(semaphore._value, initial_slots)
+        self.assertFalse(os.path.exists(handle.fifo_path))
+        self.assertFalse(os.path.exists(handle.part_path))
+
+    async def test_direct_worker_handoff_is_skipped_for_local_edge_fast_path(self):
+        probe = self._probe()
+        probe._tts_agent_route_available = lambda: True
+        guild = SimpleNamespace(id=77)
+
+        with patch.multiple(
+            tts_audio,
+            WORKER_VOICE_AGENT_ENABLED=True,
+            WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED=True,
+            WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED=True,
+        ):
+            allowed, reason = probe._worker_voice_direct_tts_available_for(guild, self._item())
+            with patch.object(tts_audio, "TTS_EDGE_STREAMING_ENABLED", False):
+                rollback_allowed, rollback_reason = probe._worker_voice_direct_tts_available_for(guild, self._item())
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "edge_vps_stream_fastpath")
+        self.assertTrue(rollback_allowed)
+        self.assertEqual(rollback_reason, "allowed")
 
 
 class MessageDispatchTests(unittest.IsolatedAsyncioTestCase):

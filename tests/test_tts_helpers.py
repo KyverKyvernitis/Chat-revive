@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -661,6 +663,355 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reason, "edge_vps_stream_fastpath")
         self.assertTrue(rollback_allowed)
         self.assertEqual(rollback_reason, "allowed")
+
+    async def test_prefetch_limit_reserves_one_edge_slot_for_current_speech(self):
+        never_release = asyncio.Event()
+
+        class SlowCommunicate:
+            def __init__(self, **kwargs):
+                pass
+
+            def stream(self):
+                async def generate():
+                    yield {"type": "audio", "data": b"A" * 2048}
+                    await never_release.wait()
+
+                return generate()
+
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        prefetch_handles = []
+
+        with (
+            patch.object(tts_audio.edge_tts, "Communicate", SlowCommunicate),
+            patch.object(tts_audio, "TTS_SYNTH_CONCURRENCY", 3),
+            patch.object(tts_audio, "TTS_EDGE_PREFETCH_CONCURRENCY", 2),
+        ):
+            for _ in range(2):
+                item = self._item()
+                setattr(item, "_tts_prefetch", True)
+                prefetch_handles.append(
+                    await asyncio.wait_for(
+                        probe._prepare_edge_stream(state, item, store_in_cache=False),
+                        timeout=0.5,
+                    )
+                )
+
+            blocked_item = self._item()
+            setattr(blocked_item, "_tts_prefetch", True)
+            blocked_prefetch = asyncio.create_task(
+                probe._prepare_edge_stream(state, blocked_item, store_in_cache=False)
+            )
+            await asyncio.sleep(0.02)
+            self.assertFalse(blocked_prefetch.done())
+
+            current_handle = await asyncio.wait_for(
+                probe._prepare_edge_stream(state, self._item(), store_in_cache=False),
+                timeout=0.5,
+            )
+
+            blocked_prefetch.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await blocked_prefetch
+            await probe._finalize_edge_stream(current_handle, cancel=True)
+            for handle in prefetch_handles:
+                await probe._finalize_edge_stream(handle, cancel=True)
+
+    async def test_end_marker_wakes_fifo_writer_without_polling_tail(self):
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        fifo_path = probe._make_edge_stream_fifo()
+        part_path = probe._make_runtime_temp_file(suffix=".edge-stream.tmp")
+        handle = tts_audio.EdgeStreamHandle(
+            fifo_path=fifo_path,
+            part_path=part_path,
+            cache_key="test",
+            state=state,
+            item=self._item(),
+            queue=asyncio.Queue(maxsize=8),
+            store_in_cache=False,
+            started_at=asyncio.get_running_loop().time(),
+            first_audio_ms=1.0,
+        )
+        probe._get_edge_stream_handles()[os.path.abspath(fifo_path)] = handle
+
+        def read_fifo():
+            with open(fifo_path, "rb") as source:
+                return source.read()
+
+        reader = asyncio.create_task(asyncio.to_thread(read_fifo))
+        await probe._activate_edge_stream(handle)
+        await handle.queue.put(b"audio")
+        await handle.queue.join()
+        await asyncio.sleep(0.01)
+        started = asyncio.get_running_loop().time()
+        await probe._signal_stream_end(handle)
+        self.assertEqual(await asyncio.wait_for(reader, timeout=0.5), b"audio")
+        self.assertLess(asyncio.get_running_loop().time() - started, 0.15)
+        await probe._finalize_edge_stream(handle)
+
+
+class GTTSLatencyFastPathTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = self.temp_dir.name
+        runtime = os.path.join(root, "runtime")
+        cache = os.path.join(root, "cache")
+        self.paths_patch = patch.multiple(
+            tts_audio,
+            TTS_TEMP_DIR=root,
+            _RUNTIME_DIR=runtime,
+            _CACHE_DIR=cache,
+            _TTS_REQUIRED_DIRS=(root, runtime, cache),
+        )
+        self.paths_patch.start()
+        tts_audio._ensure_tts_temp_dirs()
+
+    async def asyncTearDown(self):
+        self.paths_patch.stop()
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _item() -> QueueItem:
+        return QueueItem(
+            77,
+            55,
+            66,
+            "Esta mensagem tem mais de cem caracteres para que o gTTS possa entregar a primeira parte enquanto prepara a segunda parte do áudio.",
+            "gtts",
+            "",
+            "pt-br",
+            "+0%",
+            "+0Hz",
+        )
+
+    @staticmethod
+    def _probe():
+        class Probe(TTSAudioMixin):
+            def __init__(self):
+                self.guild_states = {}
+                self.bot = SimpleNamespace(audio_router=None, settings_db=None)
+
+            def _schedule_worker_turbo_cache_store(self, item, path):
+                return None
+
+        return Probe()
+
+    async def test_progressive_gtts_returns_on_first_part_and_preserves_full_cache(self):
+        release_tail = threading.Event()
+        captured = {}
+
+        class FakeGTTS:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def stream(self):
+                yield b"A" * 2048
+                release_tail.wait(timeout=2.0)
+                yield b"B" * 2048
+
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+
+        with patch.object(tts_audio, "gTTS", FakeGTTS):
+            handle = await asyncio.wait_for(
+                probe._prepare_gtts_stream(state, self._item(), store_in_cache=True),
+                timeout=1.0,
+            )
+            self.assertFalse(handle.producer_task.done())
+            self.assertEqual(handle.engine, "gtts")
+
+            def read_fifo():
+                with open(handle.fifo_path, "rb") as source:
+                    return source.read()
+
+            reader_task = asyncio.create_task(asyncio.to_thread(read_fifo))
+            await probe._activate_edge_stream(handle)
+            release_tail.set()
+            streamed = await asyncio.wait_for(reader_task, timeout=2.0)
+            await asyncio.wait_for(handle.producer_task, timeout=2.0)
+
+        self.assertEqual(streamed, (b"A" * 2048) + (b"B" * 2048))
+        self.assertEqual(captured["lang"], "pt")
+        self.assertEqual(
+            captured["timeout"],
+            (tts_audio.TTS_GTTS_CONNECT_TIMEOUT_SECONDS, tts_audio.TTS_GTTS_READ_TIMEOUT_SECONDS),
+        )
+        self.assertTrue(handle.cache_path)
+        with open(handle.cache_path, "rb") as cached:
+            self.assertEqual(cached.read(), streamed)
+
+        await probe._finalize_edge_stream(handle)
+        probe._shutdown_tts_runtime()
+
+    async def test_full_gtts_passes_native_request_timeout(self):
+        captured = {}
+
+        class FakeGTTS:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def stream(self):
+                yield b"complete-mp3"
+
+        probe = self._probe()
+        with patch.object(tts_audio, "gTTS", FakeGTTS):
+            path = await probe._generate_gtts_file("texto curto", "pt-br")
+
+        with open(path, "rb") as audio:
+            self.assertEqual(audio.read(), b"complete-mp3")
+        self.assertEqual(
+            captured["timeout"],
+            (tts_audio.TTS_GTTS_CONNECT_TIMEOUT_SECONDS, tts_audio.TTS_GTTS_READ_TIMEOUT_SECONDS),
+        )
+        os.remove(path)
+        probe._shutdown_tts_runtime()
+
+    async def test_timed_out_gtts_keeps_physical_concurrency_slot_until_thread_stops(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingGTTS:
+            def __init__(self, **kwargs):
+                pass
+
+            def stream(self):
+                entered.set()
+                release.wait(timeout=2.0)
+                yield b"late-audio"
+
+        probe = self._probe()
+        with (
+            patch.object(tts_audio, "gTTS", BlockingGTTS),
+            patch.object(tts_audio, "TTS_GTTS_TIMEOUT_SECONDS", 0.05),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "gTTS timeout"):
+                await probe._generate_gtts_file("texto", "pt")
+
+            self.assertTrue(entered.is_set())
+            semaphore = probe._get_gtts_semaphore()
+            self.assertEqual(semaphore._value, 0)
+            release.set()
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while semaphore._value == 0 and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.01)
+            self.assertEqual(semaphore._value, 1)
+
+        probe._shutdown_tts_runtime()
+
+    async def test_prefetch_enables_progressive_resolution_for_local_engines(self):
+        calls = []
+
+        class Probe(TTSAudioMixin):
+            def __init__(self):
+                self.guild_states = {}
+
+            async def _resolve_audio_path(self, state, item, *, allow_edge_stream=False):
+                calls.append((item, allow_edge_stream, bool(getattr(item, "_tts_prefetch", False))))
+                return "/tmp/fake.mp3", False
+
+        probe = Probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        item = self._item()
+        await state.queue.put(item)
+
+        prefetched_item, audio_task = await probe._maybe_prefetch_next(state)
+        await audio_task
+
+        self.assertIs(prefetched_item, item)
+        self.assertEqual(calls, [(item, True, True)])
+        state.queue.task_done()
+
+    async def test_direct_voice_handoff_is_disabled_for_gtts_by_default(self):
+        probe = self._probe()
+        probe._tts_agent_route_available = lambda: True
+        guild = SimpleNamespace(id=77)
+
+        with patch.multiple(
+            tts_audio,
+            WORKER_VOICE_AGENT_ENABLED=True,
+            WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED=True,
+            WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED=True,
+            WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED=False,
+        ):
+            allowed, reason = probe._worker_voice_direct_tts_available_for(guild, self._item())
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "gtts_direct_handoff_disabled")
+
+    async def test_persistent_counter_is_not_on_generation_critical_path(self):
+        release_db = asyncio.Event()
+
+        class DB:
+            async def increment_tts_synt_count(self, guild_id, engine, amount):
+                await release_db.wait()
+
+        probe = self._probe()
+        probe.bot.settings_db = DB()
+
+        async def generate():
+            return "/tmp/audio.mp3"
+
+        result = await asyncio.wait_for(
+            probe._run_timed_generation("gtts", generate, guild_id=77),
+            timeout=0.2,
+        )
+        self.assertEqual(result, "/tmp/audio.mp3")
+        self.assertTrue(probe._get_tts_background_tasks())
+        release_db.set()
+        await asyncio.gather(*list(probe._get_tts_background_tasks()))
+        probe._shutdown_tts_runtime()
+
+    async def test_cache_maintenance_is_deferred_until_after_critical_path(self):
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        calls = []
+        probe._purge_cache = lambda active_state, protected_paths=None: calls.append(
+            (active_state, set(protected_paths or set()))
+        )
+
+        with patch.object(tts_audio, "TTS_CACHE_MAINTENANCE_DELAY_SECONDS", 0.01):
+            probe._schedule_cache_maintenance(state, protected_paths={"/tmp/protected.mp3"})
+            self.assertEqual(calls, [])
+            await asyncio.sleep(0.03)
+
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][0], state)
+        self.assertIn("/tmp/protected.mp3", calls[0][1])
+        probe._shutdown_tts_runtime()
+
+
+class FirstFrameMetricsTests(unittest.TestCase):
+    def test_audio_source_proxy_reports_only_the_first_nonempty_frame(self):
+        frames = []
+
+        class Source:
+            def __init__(self):
+                self.parts = [b"", b"frame-1", b"frame-2"]
+                self.cleaned = False
+
+            def read(self):
+                return self.parts.pop(0)
+
+            def is_opus(self):
+                return True
+
+            def cleanup(self):
+                self.cleaned = True
+
+        source = Source()
+        proxy = tts_audio._FirstFrameAudioSource(
+            source,
+            lambda frame_at, read_ms: frames.append((frame_at, read_ms)),
+        )
+
+        self.assertEqual(proxy.read(), b"")
+        self.assertEqual(proxy.read(), b"frame-1")
+        self.assertEqual(proxy.read(), b"frame-2")
+        self.assertEqual(len(frames), 1)
+        self.assertTrue(proxy.is_opus())
+        proxy.cleanup()
+        self.assertTrue(source.cleaned)
 
 
 class MessageDispatchTests(unittest.IsolatedAsyncioTestCase):

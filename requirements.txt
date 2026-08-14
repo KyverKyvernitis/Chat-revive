@@ -3,7 +3,7 @@ davey
 flask
 motor
 edge-tts==7.2.8
-gTTS
+gTTS==2.5.4
 psutil
 pillow
 yt-dlp[default]

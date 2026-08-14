@@ -1,6 +1,7 @@
 import contextlib
 import asyncio
 import base64
+import concurrent.futures
 import errno
 import hashlib
 import json
@@ -10,9 +11,10 @@ import re
 import shutil
 import stat
 import tempfile
+import threading
 import time
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -43,12 +45,29 @@ TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS = max(
     TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS,
     float(getattr(config, "TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS", 30.0)),
 )
-TTS_EDGE_STREAM_PREBUFFER_MS = min(1200, max(100, int(getattr(config, "TTS_EDGE_STREAM_PREBUFFER_MS", 300))))
+TTS_EDGE_STREAM_PREBUFFER_MS = min(1200, max(100, int(getattr(config, "TTS_EDGE_STREAM_PREBUFFER_MS", 220))))
 TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS = min(128, max(8, int(getattr(config, "TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS", 64))))
 TTS_EDGE_STREAM_CHUNK_BYTES = min(64 * 1024, max(4 * 1024, int(getattr(config, "TTS_EDGE_STREAM_CHUNK_BYTES", 16 * 1024))))
 TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS", 10.0)))
+TTS_EDGE_PREFETCH_CONCURRENCY = min(
+    TTS_SYNTH_CONCURRENCY,
+    max(1, int(getattr(config, "TTS_EDGE_PREFETCH_CONCURRENCY", max(1, TTS_SYNTH_CONCURRENCY - 1)))),
+)
 TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 1)))
 TTS_GTTS_TIMEOUT_SECONDS = max(5.0, float(getattr(config, "TTS_GTTS_TIMEOUT_SECONDS", 20.0)))
+TTS_GTTS_CONNECT_TIMEOUT_SECONDS = max(0.5, float(getattr(config, "TTS_GTTS_CONNECT_TIMEOUT_SECONDS", 3.5)))
+TTS_GTTS_READ_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_GTTS_READ_TIMEOUT_SECONDS", 8.0)))
+TTS_GTTS_STREAMING_ENABLED = bool(getattr(config, "TTS_GTTS_STREAMING_ENABLED", True))
+TTS_GTTS_STREAM_MIN_CHARS = max(1, int(getattr(config, "TTS_GTTS_STREAM_MIN_CHARS", 101)))
+TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS = max(
+    1.0,
+    float(getattr(config, "TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS", 6.0)),
+)
+TTS_CACHE_MAINTENANCE_DELAY_SECONDS = max(
+    0.1,
+    float(getattr(config, "TTS_CACHE_MAINTENANCE_DELAY_SECONDS", 0.75)),
+)
+TTS_LATENCY_SAMPLE_WINDOW = min(2048, max(32, int(getattr(config, "TTS_LATENCY_SAMPLE_WINDOW", 256))))
 TTS_PLAYBACK_TIMEOUT_BASE_SECONDS = max(5.0, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_BASE_SECONDS", 12.0)))
 TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS = max(0.0, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS", 0.08)))
 TTS_PLAYBACK_TIMEOUT_MAX_SECONDS = max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_MAX_SECONDS", 120.0)))
@@ -127,6 +146,7 @@ TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS = max(0.0, float(getattr(config, "TTS_W
 WORKER_VOICE_AGENT_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_ENABLED", True))
 WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True))
 WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED", True))
+WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED", False))
 WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS = max(16, int(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS", 600) or 600))
 WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS = max(3.0, float(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS", 30.0) or 30.0))
 WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS", 45.0) or 45.0))
@@ -161,6 +181,43 @@ _TTS_REQUIRED_DIRS = (TTS_TEMP_DIR, _RUNTIME_DIR, _CACHE_DIR)
 _TTS_CACHE_SUFFIXES = (".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw")
 
 logger = logging.getLogger(__name__)
+
+# Marcador dedicado para acordar o escritor no fim da síntese. Sem ele, um
+# FIFO vazio podia pagar até 250 ms extras aguardando o próximo polling.
+_TTS_STREAM_END = object()
+
+
+_DiscordAudioSourceBase = getattr(discord, "AudioSource", object)
+
+
+class _FirstFrameAudioSource(_DiscordAudioSourceBase):
+    """Proxy transparente que mede a primeira leitura real do Discord."""
+
+    def __init__(self, source: Any, on_first_frame) -> None:
+        self._source = source
+        self._on_first_frame = on_first_frame
+        self._first_seen = False
+
+    def read(self):
+        started_at = time.monotonic()
+        data = self._source.read()
+        read_ms = max(0.0, (time.monotonic() - started_at) * 1000.0)
+        if data and not self._first_seen:
+            self._first_seen = True
+            self._on_first_frame(time.monotonic(), read_ms)
+        return data
+
+    def is_opus(self) -> bool:
+        method = getattr(self._source, "is_opus", None)
+        return bool(method()) if callable(method) else False
+
+    def cleanup(self) -> None:
+        cleanup = getattr(self._source, "cleanup", None)
+        if callable(cleanup):
+            cleanup()
+
+    def __getattr__(self, name: str):
+        return getattr(self._source, name)
 
 
 def _has_speakable_tts_text(text: str) -> bool:
@@ -261,11 +318,17 @@ class EdgeStreamHandle:
     store_in_cache: bool
     started_at: float
     first_audio_ms: float
+    engine: str = "edge"
     semaphore: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     semaphore_released: bool = field(default=False, repr=False)
+    prefetch_semaphore: Optional[asyncio.Semaphore] = field(default=None, repr=False)
+    prefetch_semaphore_released: bool = field(default=False, repr=False)
     producer_done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    first_audio_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    stop_requested: threading.Event = field(default_factory=threading.Event, repr=False)
     producer_task: Optional[asyncio.Task] = field(default=None, repr=False)
     writer_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    blocking_future: Optional[asyncio.Future] = field(default=None, repr=False)
     cache_path: str = ""
     audio_bytes: int = 0
     error: Optional[BaseException] = field(default=None, repr=False)
@@ -407,12 +470,29 @@ class TTSAudioMixin:
             setattr(self, "_tts_synth_semaphore", semaphore)
         return semaphore
 
+    def _get_edge_prefetch_semaphore(self) -> asyncio.Semaphore:
+        semaphore = getattr(self, "_tts_edge_prefetch_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(TTS_EDGE_PREFETCH_CONCURRENCY)
+            setattr(self, "_tts_edge_prefetch_semaphore", semaphore)
+        return semaphore
+
     def _get_gtts_semaphore(self) -> asyncio.Semaphore:
         semaphore = getattr(self, "_tts_gtts_semaphore", None)
         if semaphore is None:
             semaphore = asyncio.Semaphore(TTS_GTTS_CONCURRENCY)
             setattr(self, "_tts_gtts_semaphore", semaphore)
         return semaphore
+
+    def _get_gtts_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+        executor = getattr(self, "_tts_gtts_executor", None)
+        if executor is None:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=TTS_GTTS_CONCURRENCY,
+                thread_name_prefix="tts-gtts",
+            )
+            setattr(self, "_tts_gtts_executor", executor)
+        return executor
 
     def _get_gtts_rate_lock(self) -> asyncio.Lock:
         lock = getattr(self, "_tts_gtts_rate_lock", None)
@@ -438,6 +518,67 @@ class TTSAudioMixin:
             return False, "edge_stream_disabled"
         if str(getattr(item, "engine", "") or "").strip().lower() != "edge":
             return False, "not_edge"
+        if os.name != "posix" or not callable(getattr(os, "mkfifo", None)):
+            return False, "fifo_unsupported"
+        guild_id = int(getattr(item, "guild_id", 0) or 0)
+        if guild_id and self._is_music_active_for_guild(guild_id):
+            return False, "music_active"
+
+        router = getattr(getattr(self, "bot", None), "audio_router", None)
+        lavalink_active = getattr(router, "is_lavalink_active_for_guild", None)
+        if guild_id and callable(lavalink_active):
+            with contextlib.suppress(Exception):
+                if bool(lavalink_active(guild_id)):
+                    return False, "lavalink_active"
+
+        guild = None
+        get_guild = getattr(getattr(self, "bot", None), "get_guild", None)
+        if guild_id and callable(get_guild):
+            with contextlib.suppress(Exception):
+                guild = get_guild(guild_id)
+        get_vc = getattr(self, "_get_voice_client_for_guild", None)
+        is_lavalink_vc = getattr(self, "_is_lavalink_voice_client", None)
+        if guild is not None and callable(get_vc) and callable(is_lavalink_vc):
+            with contextlib.suppress(Exception):
+                if bool(is_lavalink_vc(get_vc(guild))):
+                    return False, "lavalink_voice_client"
+        return True, "allowed"
+
+    def _gtts_streaming_allowed_for(self, item: QueueItem) -> tuple[bool, str]:
+        if not TTS_GTTS_STREAMING_ENABLED:
+            return False, "gtts_stream_disabled"
+        if str(getattr(item, "engine", "") or "").strip().lower() != "gtts":
+            return False, "not_gtts"
+        if len(self._get_item_normalized_cache_text(item)) < TTS_GTTS_STREAM_MIN_CHARS:
+            # Até 100 caracteres o gTTS normalmente faz uma única requisição;
+            # o stream público só entrega o MP3 quando essa resposta termina.
+            return False, "gtts_single_request"
+        route_available = getattr(self, "_tts_agent_route_available", None)
+        if callable(route_available):
+            with contextlib.suppress(Exception):
+                if route_available():
+                    if not TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED or "gtts" in TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES:
+                        return False, "worker_config_preferred"
+                    metrics = self._get_metrics_store()
+                    first_audio_samples = int(metrics.get("gtts_stream_first_audio_samples", 0) or 0)
+                    local_first_audio_ms = (
+                        float(metrics.get("gtts_stream_first_audio_total_ms", 0.0) or 0.0)
+                        / first_audio_samples
+                        if first_audio_samples > 0
+                        else 0.0
+                    )
+                    worker_total_ms = self._engine_average_ms("tts_agent:gtts")
+                    if worker_total_ms <= 0:
+                        worker_total_ms = float(self._tts_agent_route_state().get("avg_synth_ms") or 0.0)
+                    # Primeiro experimenta o stream local. Depois das amostras,
+                    # deixa o worker ganhar quando ele entrega o arquivo inteiro
+                    # com vantagem clara sobre o primeiro áudio da VPS.
+                    if (
+                        local_first_audio_ms > 0
+                        and worker_total_ms > 0
+                        and (worker_total_ms + TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS) < local_first_audio_ms
+                    ):
+                        return False, "worker_measured_faster"
         if os.name != "posix" or not callable(getattr(os, "mkfifo", None)):
             return False, "fifo_unsupported"
         guild_id = int(getattr(item, "guild_id", 0) or 0)
@@ -527,12 +668,20 @@ class TTSAudioMixin:
                 return
             await handle.queue.put(data[offset:offset + TTS_EDGE_STREAM_CHUNK_BYTES])
 
+    async def _signal_stream_end(self, handle: EdgeStreamHandle) -> None:
+        handle.producer_done.set()
+        if handle.consumer_abandoned:
+            return
+        await handle.queue.put(_TTS_STREAM_END)
+
     @staticmethod
     def _release_edge_stream_slot(handle: EdgeStreamHandle) -> None:
-        if handle.semaphore_released or handle.semaphore is None:
-            return
-        handle.semaphore_released = True
-        handle.semaphore.release()
+        if not handle.semaphore_released and handle.semaphore is not None:
+            handle.semaphore_released = True
+            handle.semaphore.release()
+        if not handle.prefetch_semaphore_released and handle.prefetch_semaphore is not None:
+            handle.prefetch_semaphore_released = True
+            handle.prefetch_semaphore.release()
 
     async def _edge_stream_pipe_writer(self, handle: EdgeStreamHandle) -> None:
         fd: int | None = None
@@ -545,7 +694,7 @@ class TTSAudioMixin:
                 except OSError as exc:
                     if exc.errno not in {errno.ENXIO, errno.ENOENT} or time.monotonic() >= deadline:
                         raise
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0.005)
 
             if fd is None or handle.consumer_abandoned:
                 return
@@ -556,10 +705,11 @@ class TTSAudioMixin:
                 except asyncio.QueueEmpty:
                     if handle.producer_done.is_set():
                         break
-                    try:
-                        chunk = await asyncio.wait_for(handle.queue.get(), timeout=0.25)
-                    except asyncio.TimeoutError:
-                        continue
+                    chunk = await handle.queue.get()
+
+                if chunk is _TTS_STREAM_END:
+                    handle.queue.task_done()
+                    break
 
                 view = memoryview(chunk)
                 try:
@@ -568,7 +718,7 @@ class TTSAudioMixin:
                             written = os.write(fd, view)
                             view = view[written:]
                         except BlockingIOError:
-                            await asyncio.sleep(0.005)
+                            await asyncio.sleep(0.002)
                 finally:
                     handle.queue.task_done()
         except asyncio.CancelledError:
@@ -595,6 +745,10 @@ class TTSAudioMixin:
             return
         if cancel:
             handle.consumer_abandoned = True
+            handle.stop_requested.set()
+            blocking_future = handle.blocking_future
+            if blocking_future is not None and not blocking_future.done():
+                blocking_future.cancel()
             for task in (handle.writer_task, handle.producer_task):
                 if task is not None and not task.done():
                     task.cancel()
@@ -626,7 +780,11 @@ class TTSAudioMixin:
         self._get_edge_stream_handles().clear()
         for handle in handles:
             handle.consumer_abandoned = True
+            handle.stop_requested.set()
             handle.cleaned = True
+            blocking_future = handle.blocking_future
+            if blocking_future is not None and not blocking_future.done():
+                blocking_future.cancel()
             for task in (handle.writer_task, handle.producer_task):
                 if task is not None and not task.done():
                     task.cancel()
@@ -1148,6 +1306,13 @@ class TTSAudioMixin:
                 "edge_stream_first_audio_total_ms": 0.0,
                 "edge_stream_first_audio_samples": 0,
                 "edge_stream_audio_bytes": 0,
+                "gtts_stream_started": 0,
+                "gtts_stream_completed": 0,
+                "gtts_stream_failures": 0,
+                "gtts_stream_fallbacks": 0,
+                "gtts_stream_first_audio_total_ms": 0.0,
+                "gtts_stream_first_audio_samples": 0,
+                "gtts_stream_audio_bytes": 0,
                 "queue_wait_total_ms": 0.0,
                 "queue_wait_samples": 0,
                 "dispatch_total_ms": 0.0,
@@ -1238,6 +1403,53 @@ class TTSAudioMixin:
         metrics = self._get_metrics_store()
         metrics[total_key] = float(metrics.get(total_key, 0.0) or 0.0) + float(value_ms)
         metrics[samples_key] = int(metrics.get(samples_key, 0) or 0) + 1
+
+    def _record_latency_sample(self, name: str, value_ms: float | None) -> None:
+        if value_ms is None:
+            return
+        try:
+            value = max(0.0, float(value_ms))
+        except (TypeError, ValueError):
+            return
+        samples = getattr(self, "_tts_latency_samples", None)
+        if not isinstance(samples, dict):
+            samples = {}
+            setattr(self, "_tts_latency_samples", samples)
+        bucket = samples.get(name)
+        if not isinstance(bucket, deque):
+            bucket = deque(maxlen=TTS_LATENCY_SAMPLE_WINDOW)
+            samples[name] = bucket
+        bucket.append(value)
+
+    @staticmethod
+    def _latency_percentile(values: list[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(float(value) for value in values)
+        if len(ordered) == 1:
+            return ordered[0]
+        position = (len(ordered) - 1) * max(0.0, min(1.0, percentile))
+        lower = int(position)
+        upper = min(len(ordered) - 1, lower + 1)
+        fraction = position - lower
+        return ordered[lower] + ((ordered[upper] - ordered[lower]) * fraction)
+
+    def _latency_percentiles_snapshot(self) -> dict[str, dict[str, float | int]]:
+        samples = getattr(self, "_tts_latency_samples", None)
+        if not isinstance(samples, dict):
+            return {}
+        result: dict[str, dict[str, float | int]] = {}
+        for name, bucket in samples.items():
+            values = list(bucket or ())
+            if not values:
+                continue
+            result[str(name)] = {
+                "samples": len(values),
+                "p50": round(self._latency_percentile(values, 0.50), 2),
+                "p95": round(self._latency_percentile(values, 0.95), 2),
+                "p99": round(self._latency_percentile(values, 0.99), 2),
+            }
+        return result
 
     def _queue_signature(self, item: QueueItem) -> str:
         cached = getattr(item, "_dedup_signature", None)
@@ -1442,6 +1654,79 @@ class TTSAudioMixin:
         except Exception:
             logger.exception("[tts_voice] Falha ao persistir synt TTS | guild=%s engine=%s", gid, engine)
 
+    def _get_tts_background_tasks(self) -> set[asyncio.Task]:
+        tasks = getattr(self, "_tts_background_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = set()
+            setattr(self, "_tts_background_tasks", tasks)
+        return tasks
+
+    def _schedule_tts_background(self, coroutine) -> asyncio.Task | None:
+        try:
+            task = asyncio.create_task(coroutine)
+        except RuntimeError:
+            close = getattr(coroutine, "close", None)
+            if callable(close):
+                close()
+            return None
+        tasks = self._get_tts_background_tasks()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return task
+
+    def _schedule_persistent_synt_success(self, guild_id: int | None, engine: str) -> None:
+        self._schedule_tts_background(self._record_persistent_synt_success(guild_id, engine))
+
+    def _schedule_cache_maintenance(
+        self,
+        state: GuildTTSState,
+        *,
+        protected_paths: Optional[set[str]] = None,
+    ) -> None:
+        protected = getattr(self, "_tts_cache_maintenance_protected", None)
+        if not isinstance(protected, set):
+            protected = set()
+            setattr(self, "_tts_cache_maintenance_protected", protected)
+        protected.update(os.path.abspath(path) for path in (protected_paths or set()) if path)
+
+        task = getattr(self, "_tts_cache_maintenance_task", None)
+        if task is not None and not task.done():
+            return
+
+        async def _runner() -> None:
+            try:
+                await asyncio.sleep(TTS_CACHE_MAINTENANCE_DELAY_SECONDS)
+                while True:
+                    active_playbacks = int(getattr(self, "_tts_active_playbacks", 0) or 0)
+                    active_streams = len(self._get_edge_stream_handles())
+                    queued_items = sum(guild_state.queue.qsize() for guild_state in self.guild_states.values())
+                    if active_playbacks <= 0 and active_streams <= 0 and queued_items <= 0:
+                        break
+                    await asyncio.sleep(TTS_CACHE_MAINTENANCE_DELAY_SECONDS)
+                paths = set(getattr(self, "_tts_cache_maintenance_protected", set()) or set())
+                getattr(self, "_tts_cache_maintenance_protected", set()).clear()
+                self._purge_cache(state, protected_paths=paths)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[tts_voice] manutenção adiada do cache falhou")
+
+        task = asyncio.create_task(_runner())
+        setattr(self, "_tts_cache_maintenance_task", task)
+
+    def _shutdown_tts_runtime(self) -> None:
+        self._cancel_edge_streams()
+        maintenance = getattr(self, "_tts_cache_maintenance_task", None)
+        if maintenance is not None and not maintenance.done():
+            maintenance.cancel()
+        for task in list(self._get_tts_background_tasks()):
+            if not task.done():
+                task.cancel()
+        executor = getattr(self, "_tts_gtts_executor", None)
+        if executor is not None:
+            setattr(self, "_tts_gtts_executor", None)
+            executor.shutdown(wait=False, cancel_futures=True)
+
     def _record_engine_failure(self, engine: str, error: Exception, duration_ms: float | None = None) -> None:
         engine_metrics = self._get_engine_metrics(engine)
         engine_metrics["synth_failures"] = int(engine_metrics.get("synth_failures", 0) or 0) + 1
@@ -1474,8 +1759,10 @@ class TTSAudioMixin:
     ) -> None:
         if queue_wait_ms is not None:
             self._record_average_metric("queue_wait_total_ms", "queue_wait_samples", queue_wait_ms)
+            self._record_latency_sample("queue_wait", queue_wait_ms)
         if dispatch_ms is not None:
             self._record_average_metric("dispatch_total_ms", "dispatch_samples", dispatch_ms)
+            self._record_latency_sample("dispatch", dispatch_ms)
         if source_setup_ms is not None:
             self._record_average_metric("source_setup_total_ms", "source_setup_samples", source_setup_ms)
         if play_call_ms is not None:
@@ -1484,6 +1771,7 @@ class TTSAudioMixin:
             self._record_average_metric("playback_total_ms", "playback_samples", playback_ms)
         if total_to_playback_ms is not None:
             self._record_average_metric("total_to_playback_total_ms", "total_to_playback_samples", total_to_playback_ms)
+            self._record_latency_sample("total_to_playback", total_to_playback_ms)
 
     def _hydrate_cache_index(self) -> None:
         cache_order = self._get_global_cache_order()
@@ -1566,6 +1854,16 @@ class TTSAudioMixin:
                 2,
             ) if int(metrics.get("edge_stream_first_audio_samples", 0) or 0) else 0.0,
             "edge_stream_audio_bytes": int(metrics.get("edge_stream_audio_bytes", 0) or 0),
+            "gtts_stream_started": int(metrics.get("gtts_stream_started", 0) or 0),
+            "gtts_stream_completed": int(metrics.get("gtts_stream_completed", 0) or 0),
+            "gtts_stream_failures": int(metrics.get("gtts_stream_failures", 0) or 0),
+            "gtts_stream_fallbacks": int(metrics.get("gtts_stream_fallbacks", 0) or 0),
+            "avg_gtts_stream_first_audio_ms": round(
+                float(metrics.get("gtts_stream_first_audio_total_ms", 0.0) or 0.0)
+                / int(metrics.get("gtts_stream_first_audio_samples", 0) or 1),
+                2,
+            ) if int(metrics.get("gtts_stream_first_audio_samples", 0) or 0) else 0.0,
+            "gtts_stream_audio_bytes": int(metrics.get("gtts_stream_audio_bytes", 0) or 0),
             "edge_streams_active": int(len(self._get_edge_stream_handles())),
             "avg_queue_wait_ms": round((float(metrics.get("queue_wait_total_ms", 0.0) or 0.0) / int(metrics.get("queue_wait_samples", 0) or 1)), 2) if int(metrics.get("queue_wait_samples", 0) or 0) else 0.0,
             "avg_dispatch_ms": round((float(metrics.get("dispatch_total_ms", 0.0) or 0.0) / int(metrics.get("dispatch_samples", 0) or 1)), 2) if int(metrics.get("dispatch_samples", 0) or 0) else 0.0,
@@ -1629,6 +1927,7 @@ class TTSAudioMixin:
             "last_warmup_duration_ms": metrics.get("last_warmup_duration_ms"),
             "queued_items_current": int(sum(state.queue.qsize() for state in self.guild_states.values())),
             "guild_states_current": int(len(self.guild_states)),
+            "latency_percentiles_ms": self._latency_percentiles_snapshot(),
             "engines": {},
             "temp_dirs": _tts_temp_dirs_snapshot(),
         }
@@ -1871,7 +2170,7 @@ class TTSAudioMixin:
                 with contextlib.suppress(FileNotFoundError, OSError):
                     os.remove(source_path)
             self._touch_cache_entry(state, key, path=existing)
-            self._purge_cache(state, protected_paths={existing})
+            self._schedule_cache_maintenance(state, protected_paths={existing})
             return existing
 
         try:
@@ -1886,7 +2185,7 @@ class TTSAudioMixin:
 
         self._touch_cache_entry(state, key, path=path)
         self._record_cache_store()
-        self._purge_cache(state, protected_paths={path})
+        self._schedule_cache_maintenance(state, protected_paths={path})
         return path
 
     def _cache_key(self, item: QueueItem) -> str:
@@ -1948,6 +2247,13 @@ class TTSAudioMixin:
         path = self._cache_path_for_key(key, item=item)
         if not path:
             return None
+        try:
+            if os.path.getsize(path) <= 0:
+                self._remove_cache_file(key, path)
+                return None
+        except OSError:
+            self._forget_cache_entry(key, path=path)
+            return None
 
         cache_order = self._get_global_cache_order()
         last_used = float(cache_order.get(key, 0.0) or 0.0)
@@ -1969,28 +2275,268 @@ class TTSAudioMixin:
         self._log_debug(f"[tts_voice] gTTS synth | language={language!r} tld={tld!r} text={text[:80]!r}")
 
         path = self._make_runtime_temp_file(suffix=".mp3")
+        stop_requested = threading.Event()
+        semaphore = self._get_gtts_semaphore()
+        semaphore_acquired = False
+        release_deferred = False
+        future: asyncio.Future | None = None
         try:
-            tts = gTTS(text=text, lang=language, tld=tld)
+            def _write_gtts_file(target_path: str) -> None:
+                # O timeout nativo limita a conexão que continua dentro da
+                # thread mesmo se a coroutine externa for cancelada.
+                tts = gTTS(
+                    text=text,
+                    lang=language,
+                    tld=tld,
+                    timeout=(TTS_GTTS_CONNECT_TIMEOUT_SECONDS, TTS_GTTS_READ_TIMEOUT_SECONDS),
+                )
+                stream = getattr(tts, "stream", None)
+                with open(target_path, "wb") as output:
+                    if callable(stream):
+                        for chunk in stream():
+                            if stop_requested.is_set():
+                                raise TimeoutError("gTTS interrompido")
+                            if chunk:
+                                output.write(bytes(chunk))
+                    else:
+                        # Compatibilidade defensiva com versões antigas.
+                        tts.write_to_fp(output)
 
-            def _write_gtts_file(target_path: str):
-                with open(target_path, "wb") as handle:
-                    tts.write_to_fp(handle)
-
-            async with self._get_gtts_semaphore():
-                await asyncio.wait_for(asyncio.to_thread(_write_gtts_file, path), timeout=TTS_GTTS_TIMEOUT_SECONDS)
+            await semaphore.acquire()
+            semaphore_acquired = True
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(self._get_gtts_executor(), _write_gtts_file, path)
+            try:
+                await asyncio.wait_for(asyncio.shield(future), timeout=TTS_GTTS_TIMEOUT_SECONDS)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                stop_requested.set()
+                if not future.done():
+                    release_deferred = True
+                    def _release_after_physical_stop(done_future: asyncio.Future) -> None:
+                        semaphore.release()
+                        with contextlib.suppress(BaseException):
+                            done_future.exception()
+                    future.add_done_callback(_release_after_physical_stop)
+                raise
             return path
         except asyncio.TimeoutError as exc:
-            logger.warning("[tts_voice] gTTS travou e foi cancelado | language=%s timeout=%.1fs", language, TTS_GTTS_TIMEOUT_SECONDS)
-            try:
+            logger.warning(
+                "[tts_voice] gTTS excedeu o limite | language=%s timeout=%.1fs",
+                language,
+                TTS_GTTS_TIMEOUT_SECONDS,
+            )
+            with contextlib.suppress(Exception):
                 os.remove(path)
-            except Exception:
-                pass
             raise RuntimeError(f"gTTS timeout após {TTS_GTTS_TIMEOUT_SECONDS:.1f}s") from exc
-        except Exception:
-            try:
+        except BaseException:
+            stop_requested.set()
+            with contextlib.suppress(Exception):
                 os.remove(path)
-            except Exception:
-                pass
+            raise
+        finally:
+            if semaphore_acquired and not release_deferred:
+                semaphore.release()
+
+    async def _accept_gtts_stream_chunk(self, handle: EdgeStreamHandle, data: bytes) -> bool:
+        if not data or handle.stop_requested.is_set() or handle.consumer_abandoned:
+            return False
+        await self._edge_stream_enqueue(handle, data)
+        if handle.stop_requested.is_set() or handle.consumer_abandoned:
+            return False
+        handle.audio_bytes += len(data)
+        if not handle.first_audio_ready.is_set():
+            handle.first_audio_ms = max(0.0, (time.monotonic() - handle.started_at) * 1000.0)
+            handle.first_audio_ready.set()
+        return True
+
+    def _gtts_stream_blocking(
+        self,
+        handle: EdgeStreamHandle,
+        loop: asyncio.AbstractEventLoop,
+        language: str,
+        tld: str,
+    ) -> None:
+        tts = gTTS(
+            text=handle.item.text,
+            lang=language,
+            tld=tld,
+            timeout=(TTS_GTTS_CONNECT_TIMEOUT_SECONDS, TTS_GTTS_READ_TIMEOUT_SECONDS),
+        )
+        stream = getattr(tts, "stream", None)
+        if not callable(stream):
+            raise RuntimeError("versão instalada do gTTS não oferece stream()")
+
+        with open(handle.part_path, "wb") as output:
+            for raw_chunk in stream():
+                if handle.stop_requested.is_set():
+                    return
+                chunk = bytes(raw_chunk or b"")
+                if not chunk:
+                    continue
+                bridge = asyncio.run_coroutine_threadsafe(
+                    self._accept_gtts_stream_chunk(handle, chunk),
+                    loop,
+                )
+                while True:
+                    try:
+                        accepted = bool(bridge.result(timeout=0.1))
+                        break
+                    except concurrent.futures.TimeoutError:
+                        if handle.stop_requested.is_set():
+                            bridge.cancel()
+                            return
+                if not accepted:
+                    return
+                output.write(chunk)
+
+    async def _gtts_stream_producer(
+        self,
+        handle: EdgeStreamHandle,
+        language: str,
+        tld: str,
+    ) -> None:
+        stream_ok = False
+        try:
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(
+                self._get_gtts_executor(),
+                self._gtts_stream_blocking,
+                handle,
+                loop,
+                language,
+                tld,
+            )
+            handle.blocking_future = future
+            await asyncio.wait_for(asyncio.shield(future), timeout=TTS_GTTS_TIMEOUT_SECONDS)
+            if handle.audio_bytes <= 0:
+                raise RuntimeError("gTTS não enviou áudio")
+            stream_ok = True
+        except asyncio.CancelledError:
+            handle.stop_requested.set()
+            future = handle.blocking_future
+            if future is not None and not future.done():
+                future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            raise
+        except Exception as exc:
+            handle.stop_requested.set()
+            future = handle.blocking_future
+            if future is not None:
+                if future.done():
+                    with contextlib.suppress(BaseException):
+                        future.exception()
+                else:
+                    future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            handle.error = exc
+            duration_ms = max(0.0, (time.monotonic() - handle.started_at) * 1000.0)
+            self._record_engine_failure("gtts", exc, duration_ms=duration_ms)
+            metrics = self._get_metrics_store()
+            metrics["gtts_stream_failures"] = int(metrics.get("gtts_stream_failures", 0) or 0) + 1
+            logger.warning(
+                "[tts_gtts_stream] gTTS encerrou antes do áudio completo | guild=%s bytes=%s erro=%s",
+                handle.item.guild_id,
+                handle.audio_bytes,
+                exc,
+            )
+        finally:
+            self._release_edge_stream_slot(handle)
+            if not handle.first_audio_ready.is_set():
+                handle.first_audio_ready.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._signal_stream_end(handle)
+
+        if not stream_ok:
+            with contextlib.suppress(FileNotFoundError, OSError):
+                os.remove(handle.part_path)
+            return
+
+        duration_ms = max(0.0, (time.monotonic() - handle.started_at) * 1000.0)
+        self._record_engine_success("gtts", duration_ms)
+        metrics = self._get_metrics_store()
+        metrics["gtts_stream_completed"] = int(metrics.get("gtts_stream_completed", 0) or 0) + 1
+        metrics["gtts_stream_audio_bytes"] = int(metrics.get("gtts_stream_audio_bytes", 0) or 0) + int(handle.audio_bytes)
+        self._schedule_persistent_synt_success(handle.item.guild_id, "gtts")
+
+        if not handle.store_in_cache or not os.path.isfile(handle.part_path):
+            return
+        try:
+            cached_path = await self._store_in_cache(handle.state, handle.item, handle.part_path)
+            if cached_path and os.path.isfile(cached_path) and os.path.abspath(cached_path) != os.path.abspath(handle.part_path):
+                handle.cache_path = cached_path
+                if not bool(getattr(handle.item, "_tts_agent_inline_cache", False)):
+                    self._schedule_worker_turbo_cache_store(handle.item, cached_path)
+        except Exception as exc:
+            logger.warning(
+                "[tts_gtts_stream] áudio concluído, mas cache local falhou | guild=%s erro=%s",
+                handle.item.guild_id,
+                exc,
+            )
+
+    async def _prepare_gtts_stream(
+        self,
+        state: GuildTTSState,
+        item: QueueItem,
+        *,
+        store_in_cache: bool,
+        tld: str = "com",
+    ) -> EdgeStreamHandle:
+        language = (item.language or GTTS_DEFAULT_LANGUAGE).strip().lower().replace("_", "-")
+        if language == "pt-br":
+            language = "pt"
+        tld = str(tld or "com").strip() or "com"
+        started_at = time.monotonic()
+        metrics = self._get_metrics_store()
+        metrics["gtts_stream_started"] = int(metrics.get("gtts_stream_started", 0) or 0) + 1
+
+        semaphore = self._get_gtts_semaphore()
+        await semaphore.acquire()
+        part_path = ""
+        fifo_path = ""
+        handle: EdgeStreamHandle | None = None
+        try:
+            part_path = self._make_runtime_temp_file(suffix=".edge-stream.tmp")
+            fifo_path = self._make_edge_stream_fifo()
+            handle = EdgeStreamHandle(
+                fifo_path=fifo_path,
+                part_path=part_path,
+                cache_key=self._cache_key(item),
+                state=state,
+                item=item,
+                queue=asyncio.Queue(maxsize=TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS),
+                store_in_cache=bool(store_in_cache),
+                started_at=started_at,
+                first_audio_ms=0.0,
+                engine="gtts",
+                semaphore=semaphore,
+            )
+            self._get_edge_stream_handles()[os.path.abspath(fifo_path)] = handle
+            handle.producer_task = asyncio.create_task(
+                self._gtts_stream_producer(handle, language, tld)
+            )
+            await asyncio.wait_for(
+                handle.first_audio_ready.wait(),
+                timeout=TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS,
+            )
+            if handle.audio_bytes <= 0 or handle.error is not None:
+                raise handle.error or RuntimeError("gTTS não enviou o primeiro áudio")
+            self._record_average_metric(
+                "gtts_stream_first_audio_total_ms",
+                "gtts_stream_first_audio_samples",
+                handle.first_audio_ms,
+            )
+            self._record_latency_sample("gtts_first_audio", handle.first_audio_ms)
+            self._log_debug(
+                f"[tts_gtts_stream] pronto para playback | guild={item.guild_id} first_audio_ms={handle.first_audio_ms:.1f}"
+            )
+            return handle
+        except BaseException:
+            if handle is not None:
+                await self._finalize_edge_stream(handle, cancel=True)
+            else:
+                semaphore.release()
+                for path in (fifo_path, part_path):
+                    if path:
+                        with contextlib.suppress(FileNotFoundError, OSError):
+                            os.remove(path)
             raise
 
     async def _generate_edge_file(self, text: str, voice: str, rate: str, pitch: str) -> str:
@@ -2029,9 +2575,9 @@ class TTSAudioMixin:
                         data = self._edge_stream_audio_chunk(message)
                         if not data:
                             continue
+                        await self._edge_stream_enqueue(handle, data)
                         output.write(data)
                         handle.audio_bytes += len(data)
-                        await self._edge_stream_enqueue(handle, data)
             stream_ok = True
         except asyncio.CancelledError:
             raise
@@ -2052,8 +2598,9 @@ class TTSAudioMixin:
             if callable(close_stream):
                 with contextlib.suppress(BaseException):
                     await close_stream()
-            handle.producer_done.set()
             self._release_edge_stream_slot(handle)
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._signal_stream_end(handle)
 
         if not stream_ok:
             with contextlib.suppress(FileNotFoundError, OSError):
@@ -2065,8 +2612,7 @@ class TTSAudioMixin:
         metrics = self._get_metrics_store()
         metrics["edge_stream_completed"] = int(metrics.get("edge_stream_completed", 0) or 0) + 1
         metrics["edge_stream_audio_bytes"] = int(metrics.get("edge_stream_audio_bytes", 0) or 0) + int(handle.audio_bytes)
-        with contextlib.suppress(Exception):
-            await self._record_persistent_synt_success(handle.item.guild_id, "edge")
+        self._schedule_persistent_synt_success(handle.item.guild_id, "edge")
 
         if not handle.store_in_cache or not os.path.isfile(handle.part_path):
             return
@@ -2098,12 +2644,20 @@ class TTSAudioMixin:
         metrics["edge_stream_started"] = int(metrics.get("edge_stream_started", 0) or 0) + 1
 
         semaphore = self._get_synth_semaphore()
-        await semaphore.acquire()
+        prefetch_semaphore: asyncio.Semaphore | None = None
+        semaphore_acquired = False
+        prefetch_acquired = False
         stream_iterator = None
         part_path = ""
         fifo_path = ""
         handle: EdgeStreamHandle | None = None
         try:
+            if bool(getattr(item, "_tts_prefetch", False)):
+                prefetch_semaphore = self._get_edge_prefetch_semaphore()
+                await prefetch_semaphore.acquire()
+                prefetch_acquired = True
+            await semaphore.acquire()
+            semaphore_acquired = True
             communicate = edge_tts.Communicate(
                 text=item.text,
                 voice=voice,
@@ -2152,8 +2706,10 @@ class TTSAudioMixin:
                 started_at=started_at,
                 first_audio_ms=first_audio_ms,
                 semaphore=semaphore,
+                prefetch_semaphore=prefetch_semaphore,
                 audio_bytes=initial_size,
             )
+            handle.first_audio_ready.set()
             # Um único item inicial evita bloquear a preparação mesmo se o SDK
             # entregar um fragmento maior que o tamanho normal dos chunks.
             handle.queue.put_nowait(b"".join(initial_parts))
@@ -2164,6 +2720,7 @@ class TTSAudioMixin:
                 "edge_stream_first_audio_samples",
                 first_audio_ms,
             )
+            self._record_latency_sample("edge_first_audio", first_audio_ms)
             handle.producer_task = asyncio.create_task(
                 self._edge_stream_producer(handle, stream_iterator)
             )
@@ -2179,7 +2736,10 @@ class TTSAudioMixin:
                 if callable(close_stream):
                     with contextlib.suppress(BaseException):
                         await close_stream()
-            semaphore.release()
+            if semaphore_acquired:
+                semaphore.release()
+            if prefetch_acquired and prefetch_semaphore is not None:
+                prefetch_semaphore.release()
             for path in (fifo_path, part_path):
                 if path:
                     with contextlib.suppress(FileNotFoundError, OSError):
@@ -2852,6 +3412,12 @@ class TTSAudioMixin:
             return False, "empty_text"
         if len(str(item.text or "")) > WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS:
             return False, "text_too_long_for_direct_tts"
+        engine = str(getattr(item, "engine", "") or "gtts").strip().lower().replace("-", "_")
+        if engine == "gtts" and not WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED:
+            # O handoff de voz custa mais que manter a conexão local quente.
+            # O worker de síntese adaptativo continua disponível sem transferir
+            # a propriedade da call.
+            return False, "gtts_direct_handoff_disabled"
         edge_stream_allowed, _ = self._edge_streaming_allowed_for(item)
         if edge_stream_allowed:
             # Handoff + MP3 completo no worker tem maior latência de início.
@@ -3791,7 +4357,7 @@ class TTSAudioMixin:
                 engine_to_persist = str(persistent_engine() or engine)
         elif persistent_engine not in (None, ""):
             engine_to_persist = str(persistent_engine)
-        await self._record_persistent_synt_success(guild_id, engine_to_persist)
+        self._schedule_persistent_synt_success(guild_id, engine_to_persist)
         return result
 
     def _tts_agent_payload_for_item(self, item: QueueItem) -> dict[str, Any]:
@@ -4103,6 +4669,52 @@ class TTSAudioMixin:
                 )
                 return fallback_path, True
 
+        gtts_stream_allowed, gtts_stream_reason = self._gtts_streaming_allowed_for(item)
+        if allow_edge_stream and gtts_stream_allowed:
+            cached = self._try_get_cached_path(state, item)
+            if cached:
+                return cached, False
+
+            key = self._cache_key(item)
+            existing = self._get_inflight_cache_tasks().get(key)
+            if existing is not None:
+                return await existing
+
+            if text_length <= TTS_CACHEABLE_TEXT_MAX_LENGTH:
+                store_in_cache = True
+            else:
+                seen_count = self._remember_long_text_repeat(key)
+                store_in_cache = bool(
+                    text_length <= TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH
+                    and seen_count >= TTS_LONG_TEXT_CACHE_MIN_REPEATS
+                )
+
+            self._record_cache_miss(item.engine)
+            try:
+                handle = await self._prepare_gtts_stream(
+                    state,
+                    item,
+                    store_in_cache=store_in_cache,
+                )
+                return handle.fifo_path, True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                metrics = self._get_metrics_store()
+                metrics["gtts_stream_fallbacks"] = int(metrics.get("gtts_stream_fallbacks", 0) or 0) + 1
+                logger.warning(
+                    "[tts_gtts_stream] falha antes do primeiro áudio; usando arquivo completo | guild=%s rota=%s erro=%s",
+                    item.guild_id,
+                    gtts_stream_reason,
+                    exc,
+                )
+                fallback_path = await self._run_timed_generation(
+                    "gtts",
+                    lambda: self._generate_gtts_file(item.text, item.language),
+                    guild_id=item.guild_id,
+                )
+                return fallback_path, True
+
         if text_length <= TTS_CACHEABLE_TEXT_MAX_LENGTH:
             return await self._resolve_or_generate_singleflight_audio(
                 state,
@@ -4173,10 +4785,12 @@ class TTSAudioMixin:
         lock = self._get_tts_playback_lock(guild_id) if guild_id else asyncio.Lock()
         edge_stream = self._edge_stream_handle_for_path(path)
         stream_playback_ok = False
+        playback_counted = False
 
         async with lock:
             loop = asyncio.get_running_loop()
             finished = loop.create_future()
+            first_frame = loop.create_future()
 
             def _after_playback(error: Optional[Exception]) -> None:
                 if error:
@@ -4186,11 +4800,14 @@ class TTSAudioMixin:
                     if not finished.done():
                         loop.call_soon_threadsafe(finished.set_result, None)
 
+            def _on_first_frame(frame_at: float, first_read_ms: float) -> None:
+                def _publish() -> None:
+                    if not first_frame.done():
+                        first_frame.set_result((frame_at, first_read_ms))
+                loop.call_soon_threadsafe(_publish)
+
             source = None
             try:
-                if edge_stream is not None:
-                    await self._activate_edge_stream(edge_stream)
-
                 router = getattr(getattr(self, "bot", None), "audio_router", None)
                 play_tts = getattr(router, "play_tts", None)
                 # FIFO é um fast path exclusivamente local. Música/Lavalink e
@@ -4228,11 +4845,18 @@ class TTSAudioMixin:
 
                 await self._wait_until_voice_playable_for_tts(vc, item=item)
 
+                if edge_stream is not None:
+                    await self._activate_edge_stream(edge_stream)
+
                 source_setup_started_at = time.monotonic()
                 source, source_kind = self._make_discord_tts_source(path)
+                if callable(getattr(source, "read", None)):
+                    source = _FirstFrameAudioSource(source, _on_first_frame)
                 source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
 
                 play_call_started_at = time.monotonic()
+                setattr(self, "_tts_active_playbacks", int(getattr(self, "_tts_active_playbacks", 0) or 0) + 1)
+                playback_counted = True
                 try:
                     vc.play(source, after=_after_playback)
                 except Exception:
@@ -4250,29 +4874,46 @@ class TTSAudioMixin:
                         if self._voice_client_is_playing_or_paused(vc):
                             vc.stop()
                     raise RuntimeError(f"Playback timeout após {playback_timeout:.1f}s") from exc
+                await asyncio.sleep(0)
                 playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+                first_frame_at = playback_started_at
+                first_read_ms = 0.0
+                if first_frame.done() and not first_frame.cancelled():
+                    with contextlib.suppress(Exception):
+                        first_frame_at, first_read_ms = first_frame.result()
+                first_frame_ms = max(0.0, (first_frame_at - play_call_started_at) * 1000.0)
+                self._record_latency_sample("first_frame", first_frame_ms)
+                self._record_latency_sample("first_source_read", first_read_ms)
                 result = {
                     "source_setup_ms": source_setup_ms,
                     "play_call_ms": play_call_ms,
                     "playback_ms": playback_duration_ms,
                     "playback_started_at": playback_started_at,
+                    "first_frame_at": first_frame_at,
+                    "first_frame_ms": first_frame_ms,
+                    "first_read_ms": first_read_ms,
                     "playback_source": source_kind,
                     "audio_format": self._path_audio_format(path),
                 }
                 if edge_stream is not None:
-                    result["edge_stream"] = True
-                    result["edge_first_audio_ms"] = edge_stream.first_audio_ms
-                    result["edge_stream_bytes"] = edge_stream.audio_bytes
+                    stream_engine = str(edge_stream.engine or "edge")
+                    result["progressive_stream"] = True
+                    result[f"{stream_engine}_stream"] = True
+                    result[f"{stream_engine}_first_audio_ms"] = edge_stream.first_audio_ms
+                    result[f"{stream_engine}_stream_bytes"] = edge_stream.audio_bytes
                     if edge_stream.error is not None:
-                        result["edge_stream_incomplete"] = True
+                        result[f"{stream_engine}_stream_incomplete"] = True
                         logger.warning(
-                            "[tts_edge_stream] playback terminou com stream incompleto | guild=%s erro=%s",
+                            "[tts_stream] playback terminou com stream incompleto | guild=%s engine=%s erro=%s",
                             guild_id,
+                            stream_engine,
                             edge_stream.error,
                         )
                     stream_playback_ok = True
                 return result
             finally:
+                if playback_counted:
+                    setattr(self, "_tts_active_playbacks", max(0, int(getattr(self, "_tts_active_playbacks", 0) or 0) - 1))
                 if edge_stream is not None:
                     await self._finalize_edge_stream(edge_stream, cancel=not stream_playback_ok)
 
@@ -4639,9 +5280,28 @@ class TTSAudioMixin:
             return None, None
 
         setattr(prefetched_item, "_dequeued_at_monotonic", time.monotonic())
-        self._record_prefetch_started()
-        prefetched_audio_task = asyncio.create_task(self._resolve_audio_path(state, prefetched_item))
+        engine = str(getattr(prefetched_item, "engine", "") or "gtts").strip().lower().replace("-", "_")
+        if engine in {"edge", "gtts"}:
+            setattr(prefetched_item, "_tts_prefetch", True)
+            self._record_prefetch_started()
+            prefetched_audio_task = asyncio.create_task(
+                self._resolve_audio_path(state, prefetched_item, allow_edge_stream=True)
+            )
         return prefetched_item, prefetched_audio_task
+
+    async def _wait_and_prefetch_next(self, state: GuildTTSState):
+        item = await state.queue.get()
+        self._decrement_pending_signature(state, item)
+        setattr(item, "_dequeued_at_monotonic", time.monotonic())
+        engine = str(getattr(item, "engine", "") or "gtts").strip().lower().replace("-", "_")
+        audio_task: asyncio.Task | None = None
+        if engine in {"edge", "gtts"}:
+            setattr(item, "_tts_prefetch", True)
+            self._record_prefetch_started()
+            audio_task = asyncio.create_task(
+                self._resolve_audio_path(state, item, allow_edge_stream=True)
+            )
+        return item, audio_task
 
     async def _worker_loop(self, guild_id: int) -> None:
         state = self._get_state(guild_id)
@@ -4656,6 +5316,7 @@ class TTSAudioMixin:
                     return
 
                 fetched_from_queue = False
+                arrival_prefetch_task: asyncio.Task | None = None
 
                 if not state.dashboard_enabled:
                     if prefetched_audio_task is not None:
@@ -4720,6 +5381,11 @@ class TTSAudioMixin:
                             audio_task.cancel()
                             with contextlib.suppress(BaseException):
                                 await audio_task
+                        elif audio_task is not None and not audio_task.cancelled():
+                            with contextlib.suppress(Exception):
+                                routed_path, routed_cleanup = audio_task.result()
+                                if routed_cleanup and routed_path:
+                                    await self._discard_edge_stream_path(routed_path)
                         dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
                         try:
                             playback_result = await play_agent_tts(
@@ -4783,7 +5449,17 @@ class TTSAudioMixin:
                         else:
                             continue
 
-                    direct_worker_result = await self._try_worker_voice_direct_tts(guild, item)
+                    engine = str(getattr(item, "engine", "") or "gtts").strip().lower().replace("-", "_")
+                    if audio_task is None and engine in {"edge", "gtts"}:
+                        cached_path = self._try_get_cached_path(state, item)
+                        if cached_path:
+                            ready_audio = asyncio.get_running_loop().create_future()
+                            ready_audio.set_result((cached_path, False))
+                            audio_task = ready_audio
+
+                    direct_worker_result = None
+                    if audio_task is None:
+                        direct_worker_result = await self._try_worker_voice_direct_tts(guild, item)
                     if direct_worker_result is not None:
                         dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
                         playback_started_at = float(direct_worker_result.get("playback_started_at", time.monotonic()) or time.monotonic())
@@ -4812,6 +5488,13 @@ class TTSAudioMixin:
 
                     if prefetched_item is None and not state.queue.empty():
                         prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
+                    elif prefetched_item is None:
+                        # Observa a fila durante conexão/síntese/playback. Assim,
+                        # uma mensagem que chega enquanto a voz atual toca já
+                        # começa a sintetizar, em vez de esperar o áudio acabar.
+                        arrival_prefetch_task = asyncio.create_task(
+                            self._wait_and_prefetch_next(state)
+                        )
 
                     vc = await connect_task
                     if vc is None:
@@ -4853,11 +5536,13 @@ class TTSAudioMixin:
                     try:
                         playback_result = await self._play_file_with_recovery(guild, item, vc, current_path)
                         playback_started_at = float(playback_result.get("playback_started_at", time.monotonic()) or time.monotonic())
+                        first_frame_at = float(playback_result.get("first_frame_at", playback_started_at) or playback_started_at)
                         source_setup_ms = max(0.0, float(playback_result.get("source_setup_ms", 0.0) or 0.0))
                         play_call_ms = max(0.0, float(playback_result.get("play_call_ms", 0.0) or 0.0))
                         playback_duration_ms = max(0.0, float(playback_result.get("playback_ms", 0.0) or 0.0))
-                        dispatch_ms = max(0.0, (playback_started_at - dequeue_started_at) * 1000.0)
-                        total_to_playback_ms = max(0.0, (playback_started_at - float(getattr(item, "enqueued_at_monotonic", playback_started_at))) * 1000.0)
+                        dispatch_ms = max(0.0, (first_frame_at - dequeue_started_at) * 1000.0)
+                        total_to_playback_ms = max(0.0, (first_frame_at - float(getattr(item, "enqueued_at_monotonic", first_frame_at))) * 1000.0)
+                        self._record_latency_sample("total_to_first_frame", total_to_playback_ms)
                         self._record_queue_timing(
                             queue_wait_ms=queue_wait_ms,
                             dispatch_ms=dispatch_ms,
@@ -4886,15 +5571,30 @@ class TTSAudioMixin:
                                 prefetched_path, _ = prefetched_audio_task.result()
                                 if prefetched_path:
                                     protected_paths.add(prefetched_path)
-                        self._purge_cache(state, protected_paths=protected_paths)
+                        self._schedule_cache_maintenance(state, protected_paths=protected_paths)
                         state.warmed_until = time.monotonic() + TTS_WARM_HOLD_SECONDS
-
-                    if prefetched_item is None and not state.queue.empty():
-                        prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
 
                 except Exception as e:
                     logger.exception("[tts_voice] Erro no worker da guild %s: %s", guild_id, e)
                 finally:
+                    if arrival_prefetch_task is not None:
+                        if not arrival_prefetch_task.done():
+                            arrival_prefetch_task.cancel()
+                            with contextlib.suppress(BaseException):
+                                await arrival_prefetch_task
+                        if arrival_prefetch_task.done() and not arrival_prefetch_task.cancelled():
+                            with contextlib.suppress(Exception):
+                                arrived_item, arrived_audio_task = arrival_prefetch_task.result()
+                                if prefetched_item is None:
+                                    prefetched_item = arrived_item
+                                    prefetched_audio_task = arrived_audio_task
+                                else:
+                                    # Só seria possível em uma corrida com uma
+                                    # extensão futura de prefetch; devolvemos o
+                                    # item sem perder o task_done da fila.
+                                    if arrived_audio_task is not None and not arrived_audio_task.done():
+                                        arrived_audio_task.cancel()
+                                    state.queue.task_done()
                     if fetched_from_queue:
                         state.queue.task_done()
         finally:

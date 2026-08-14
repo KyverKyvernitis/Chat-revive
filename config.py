@@ -145,13 +145,27 @@ TTS_EDGE_VPS_FAST_PATH_ENABLED = _parse_bool(os.getenv("TTS_EDGE_VPS_FAST_PATH_E
 TTS_EDGE_STREAMING_ENABLED = _parse_bool(os.getenv("TTS_EDGE_STREAMING_ENABLED", "true"), True)
 TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS", "4.0"), 4.0))
 TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS = max(TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS, _parse_float(os.getenv("TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS", "30.0"), 30.0))
-TTS_EDGE_STREAM_PREBUFFER_MS = min(1200, max(100, _parse_int(os.getenv("TTS_EDGE_STREAM_PREBUFFER_MS", "300"), 300)))
+TTS_EDGE_STREAM_PREBUFFER_MS = min(1200, max(100, _parse_int(os.getenv("TTS_EDGE_STREAM_PREBUFFER_MS", "220"), 220)))
 TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS = min(128, max(8, _parse_int(os.getenv("TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS", "64"), 64)))
 TTS_EDGE_STREAM_CHUNK_BYTES = min(64 * 1024, max(4 * 1024, _parse_int(os.getenv("TTS_EDGE_STREAM_CHUNK_BYTES", "16384"), 16384)))
 TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS", "10.0"), 10.0))
+# No máximo dois prefetches usam os três slots Edge padrão; pelo menos um slot
+# fica livre para uma fala atual de outra guild.
+TTS_EDGE_PREFETCH_CONCURRENCY = max(1, _parse_int(os.getenv("TTS_EDGE_PREFETCH_CONCURRENCY", "2"), 2))
 
-# Concorrência máxima do gTTS
+# gTTS: executor limitado mantém a concorrência física correta mesmo quando uma
+# coroutine expira. Os timeouts nativos impedem thread zumbi em requests.
 TTS_GTTS_CONCURRENCY = _parse_int(os.getenv("TTS_GTTS_CONCURRENCY", "1"), 1)
+TTS_GTTS_TIMEOUT_SECONDS = max(5.0, _parse_float(os.getenv("TTS_GTTS_TIMEOUT_SECONDS", "20.0"), 20.0))
+TTS_GTTS_CONNECT_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("TTS_GTTS_CONNECT_TIMEOUT_SECONDS", "3.5"), 3.5))
+TTS_GTTS_READ_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_GTTS_READ_TIMEOUT_SECONDS", "8.0"), 8.0))
+TTS_GTTS_STREAMING_ENABLED = _parse_bool(os.getenv("TTS_GTTS_STREAMING_ENABLED", "true"), True)
+# Acima de 100 caracteres o gTTS divide o texto em mais de uma requisição; o
+# stream permite tocar a primeira parte enquanto as próximas são sintetizadas.
+TTS_GTTS_STREAM_MIN_CHARS = max(1, _parse_int(os.getenv("TTS_GTTS_STREAM_MIN_CHARS", "101"), 101))
+TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS", "6.0"), 6.0))
+TTS_CACHE_MAINTENANCE_DELAY_SECONDS = max(0.1, _parse_float(os.getenv("TTS_CACHE_MAINTENANCE_DELAY_SECONDS", "0.75"), 0.75))
+TTS_LATENCY_SAMPLE_WINDOW = max(32, _parse_int(os.getenv("TTS_LATENCY_SAMPLE_WINDOW", "256"), 256))
 
 # FFmpeg enxuto para reprodução
 TTS_FFMPEG_BEFORE_OPTIONS = (os.getenv("TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin") or "-nostdin").strip()
@@ -542,6 +556,9 @@ TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS = max(0.0, _parse_float(os.getenv("TTS_
 WORKER_VOICE_AGENT_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX) and _parse_bool(os.getenv("WORKER_VOICE_AGENT_ENABLED", "true"), True)
 WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", "true"), True)
 WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED", "true"), True)
+# gTTS mantém a call na VPS por padrão. O worker adaptativo ainda pode sintetizar
+# e devolver bytes, mas sem pagar a transferência de propriedade da voz.
+WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED", "false"), False)
 WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS = max(16, _parse_int(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS", "600"), 600))
 WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS = max(3.0, _parse_float(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS", "30"), 30.0))
 WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS = max(5.0, _parse_float(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS", "45"), 45.0))

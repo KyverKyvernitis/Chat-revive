@@ -152,7 +152,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     def cog_unload(self):
         self._cancel_tts_agent_health_task()
-        self._cancel_edge_streams()
+        self._shutdown_tts_runtime()
         close_phone_worker_session = getattr(self, "_close_phone_worker_http_session", None)
         if callable(close_phone_worker_session):
             close_phone_worker_session()

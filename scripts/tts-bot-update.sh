@@ -34,8 +34,15 @@ ROLLBACK_REQUEST_ACTIVE_FILE="$ROLLBACK_REQUEST_ROOT/active.json"
 # quebrar com variáveis antigas/novas fora de sincronia. Por isso o processo
 # real sempre roda a partir de uma cópia temporária estável.
 if [[ "${TTS_BOT_UPDATER_RUNNING_COPY:-0}" != "1" ]]; then
-  UPDATER_RUNTIME_COPY="${TMPDIR:-/tmp}/tts-bot-update.$$.run"
-  cp "$0" "$UPDATER_RUNTIME_COPY"
+  UPDATER_RUNTIME_BASE="${TTS_BOT_UPDATER_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+  if [[ "$UPDATER_RUNTIME_BASE" != /* || ! -d "$UPDATER_RUNTIME_BASE" || -L "$UPDATER_RUNTIME_BASE" || ! -w "$UPDATER_RUNTIME_BASE" ]]; then
+    UPDATER_RUNTIME_BASE="/tmp"
+  fi
+  # mktemp evita colisão/symlink previsível em /tmp. No serviço systemd, a
+  # cópia fica em RuntimeDirectory e é removida pelo próprio systemd mesmo em
+  # SIGKILL, reboot ou queda antes do trap EXIT.
+  UPDATER_RUNTIME_COPY="$(mktemp "$UPDATER_RUNTIME_BASE/tts-bot-update.XXXXXX.run")"
+  cp -- "$0" "$UPDATER_RUNTIME_COPY"
   chmod 0700 "$UPDATER_RUNTIME_COPY" 2>/dev/null || true
   export TTS_BOT_UPDATER_RUNNING_COPY=1
   export TTS_BOT_UPDATER_RUNTIME_COPY
@@ -182,7 +189,11 @@ DIFF_TOTAL_SUMMARY=""
 FAST_RELOAD_STATUS="não usado"
 FAST_RELOAD_MODULES=""
 UPDATER_UNIT="tts-bot-updater.service"
-RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
+UPDATER_EPHEMERAL_DIR="${TTS_BOT_UPDATER_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+if [[ "$UPDATER_EPHEMERAL_DIR" != /* || ! -d "$UPDATER_EPHEMERAL_DIR" || -L "$UPDATER_EPHEMERAL_DIR" || ! -w "$UPDATER_EPHEMERAL_DIR" ]]; then
+  UPDATER_EPHEMERAL_DIR="/tmp"
+fi
+RUN_LOG_FILE="$(mktemp "$UPDATER_EPHEMERAL_DIR/tts-bot-updater.XXXXXX.log")"
 ZIP_STATUS_CONTROL_JSON=""
 UPDATE_TITLE_EMOJI="<a:areia:1496606578395189473>"
 UPDATE_STAGE_EMOJI="<a:loading:1510065277868445796>"
@@ -200,7 +211,6 @@ UPDATER_TIMINGS=""
 UPDATE_STATUS_OUTBOX_DIR="$REPO_DIR/data/runtime/update-status-outbox"
 UPDATE_ALERT_OUTBOX_DIR="$REPO_DIR/data/runtime/update-alert-outbox"
 UPDATE_DELIVERY_RECEIPTS_DIR="$REPO_DIR/data/runtime/update-delivery-receipts"
-: > "$RUN_LOG_FILE"
 chmod 0644 "$RUN_LOG_FILE" 2>/dev/null || true
 
 # Log persistente do updater para diagnóstico pelo /vps.
@@ -1792,20 +1802,172 @@ PYQUEUESTATUS
   )
 }
 
+prune_archive_root() {
+  local root="${1:?}" retention_days="${2:?}" keep_count="${3:?}"
+  local -a entries=()
+  local index path
+  [[ -d "$root" && ! -L "$root" ]] || return 0
+  [[ "$retention_days" =~ ^[0-9]+$ ]] || return 0
+  [[ "$keep_count" =~ ^[0-9]+$ ]] || return 0
+  (( keep_count < 1 )) && keep_count=1
+  (( keep_count > 100 )) && keep_count=100
+
+  find "$root" -mindepth 1 -maxdepth 1 -type d -mtime "+$retention_days" -exec rm -rf -- {} + 2>/dev/null || true
+  mapfile -t entries < <(
+    find "$root" -mindepth 1 -maxdepth 1 -type d -printf '%T@\t%p\n' 2>/dev/null \
+      | sort -t $'\t' -k1,1nr \
+      | cut -f2-
+  )
+  for ((index=keep_count; index<${#entries[@]}; index++)); do
+    path="${entries[$index]}"
+    [[ -n "$path" && ! -L "$path" && "$(dirname -- "$path")" == "$root" ]] || continue
+    rm -rf -- "$path" 2>/dev/null || true
+  done
+}
+
+prune_updater_runtime_orphans() {
+  local legacy_tmp="${TMPDIR:-/tmp}"
+  [[ "$legacy_tmp" == /* && -d "$legacy_tmp" && ! -L "$legacy_tmp" ]] || return 0
+
+  # Apenas prefixos privados do updater, sem recursão fora das raízes exatas.
+  find "$legacy_tmp" -maxdepth 1 -type f -name 'tts-bot-update.*.run' -mmin +60 -delete 2>/dev/null || true
+  find "$legacy_tmp" -maxdepth 1 -type f -name 'tts-bot-updater.*.log' -mmin +1440 -delete 2>/dev/null || true
+  find "$legacy_tmp" -maxdepth 1 -type f \( -name 'tts-bot-git-add.*' -o -name 'tts-bot-git-add-retry.*' \) -mmin +360 -delete 2>/dev/null || true
+  find "$legacy_tmp" -mindepth 1 -maxdepth 1 -type d \( -name 'tts-bot-remote-candidate.*' -o -name 'tts-bot-systemd-overlay.*' \) -mmin +360 -exec rm -rf -- {} + 2>/dev/null || true
+  sudo -u ubuntu -H git -C "$REPO_DIR" worktree prune --expire=now >/dev/null 2>&1 || true
+}
+
+prune_rejected_remote_commits() {
+  local retention_days="${DISCORD_AUTO_UPDATE_REJECTED_RETENTION_DAYS:-30}"
+  local keep_count="${DISCORD_AUTO_UPDATE_REJECTED_KEEP_COUNT:-100}"
+  [[ -f "$REMOTE_REJECTED_FILE" && ! -L "$REMOTE_REJECTED_FILE" ]] || return 0
+  [[ "$retention_days" =~ ^[0-9]+$ ]] || retention_days=30
+  [[ "$keep_count" =~ ^[0-9]+$ ]] || keep_count=100
+  REJECTED_FILE_VALUE="$REMOTE_REJECTED_FILE" REJECTED_RETENTION_DAYS="$retention_days" REJECTED_KEEP_COUNT="$keep_count" \
+    python3 - <<'PYPRUNEREJECTED' 2>/dev/null || true
+import datetime, json, os, pathlib, tempfile
+
+path = pathlib.Path(os.environ['REJECTED_FILE_VALUE'])
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit
+items = data.get('commits') if isinstance(data, dict) else None
+if not isinstance(items, dict):
+    raise SystemExit
+
+now = datetime.datetime.now(datetime.timezone.utc)
+cutoff = now - datetime.timedelta(days=max(0, int(os.environ['REJECTED_RETENTION_DAYS'])))
+keep_count = max(1, min(1000, int(os.environ['REJECTED_KEEP_COUNT'])))
+retained = []
+for commit, record in items.items():
+    if not isinstance(record, dict):
+        retained.append((now, commit, record))
+        continue
+    raw = str(record.get('rejected_at') or '')
+    try:
+        stamp = datetime.datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        stamp = now
+    if stamp >= cutoff:
+        retained.append((stamp, commit, record))
+retained.sort(key=lambda item: (item[0], item[1]), reverse=True)
+new_items = {commit: record for _stamp, commit, record in retained[:keep_count]}
+if new_items == items:
+    raise SystemExit
+data['commits'] = new_items
+fd, tmp_name = tempfile.mkstemp(prefix='.' + path.name + '.', suffix='.tmp', dir=path.parent)
+tmp = pathlib.Path(tmp_name)
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+finally:
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+PYPRUNEREJECTED
+  chown ubuntu:ubuntu "$REMOTE_REJECTED_FILE" 2>/dev/null || true
+}
+
+human_storage_bytes() {
+  local value="${1:-0}"
+  if command -v numfmt >/dev/null 2>&1; then
+    numfmt --to=iec-i --suffix=B "$value" 2>/dev/null || printf '%s bytes' "$value"
+  else
+    printf '%s bytes' "$value"
+  fi
+}
+
+guard_updater_disk_space() {
+  local metrics total available hard_min hard_percent soft_percent hard_floor percent_floor event_id
+  metrics="$(df -P -B1 "$REPO_DIR" 2>/dev/null | awk 'NR == 2 {print $2, $4}')"
+  read -r total available <<< "$metrics"
+  [[ "$total" =~ ^[0-9]+$ && "$available" =~ ^[0-9]+$ ]] || {
+    logger -t "$LOG_TAG" "proteção de espaço: não foi possível ler o filesystem" 2>/dev/null || true
+    return 0
+  }
+
+  hard_min="${TTS_BOT_UPDATER_DISK_HARD_MIN_BYTES:-2147483648}"
+  hard_percent="${TTS_BOT_UPDATER_DISK_HARD_MIN_PERCENT:-5}"
+  soft_percent="${TTS_BOT_UPDATER_DISK_SOFT_MIN_PERCENT:-15}"
+  [[ "$hard_min" =~ ^[0-9]+$ ]] || hard_min=2147483648
+  [[ "$hard_percent" =~ ^[0-9]+$ && "$hard_percent" -le 50 ]] || hard_percent=5
+  [[ "$soft_percent" =~ ^[0-9]+$ && "$soft_percent" -le 80 ]] || soft_percent=15
+  percent_floor=$((total * hard_percent / 100))
+  hard_floor="$hard_min"
+  (( percent_floor > hard_floor )) && hard_floor="$percent_floor"
+
+  if (( available < hard_floor )); then
+    event_id="updater-disk-critical-$(date +%Y%m%d)"
+    logger -t "$LOG_TAG" "update pausado: espaço crítico, livre=$(human_storage_bytes "$available") mínimo=$(human_storage_bytes "$hard_floor")" 2>/dev/null || true
+    send_error "Update pausado por pouco espaço" "Resumo: A atualização não foi iniciada para evitar uma aplicação parcial.
+Espaço livre: $(human_storage_bytes "$available")
+Mínimo seguro: $(human_storage_bytes "$hard_floor")
+Bot: preservado e sem reinício
+Ação: revise os artefatos de armazenamento antes de tentar novamente.
+Hora: $(date '+%d/%m/%Y %H:%M:%S')" "$event_id"
+    return 1
+  fi
+
+  if (( available * 100 < total * soft_percent )); then
+    event_id="updater-disk-warning-$(date +%Y%m%d)"
+    logger -t "$LOG_TAG" "proteção de espaço: nível preventivo, livre=$(human_storage_bytes "$available")" 2>/dev/null || true
+    send_warn "Espaço da VPS abaixo do nível preventivo" "Resumo: O updater ainda pode funcionar, mas o espaço livre caiu abaixo de ${soft_percent}%.
+Espaço livre: $(human_storage_bytes "$available")
+Limite crítico atual: $(human_storage_bytes "$hard_floor")
+Bot: preservado
+Ação: revise os artefatos de armazenamento antes de atingir o bloqueio de segurança.
+Hora: $(date '+%d/%m/%Y %H:%M:%S')" "$event_id"
+  fi
+  return 0
+}
+
 prune_update_artifacts() {
   local done_days="${DISCORD_AUTO_UPDATE_DONE_RETENTION_DAYS:-7}"
   local failed_days="${DISCORD_AUTO_UPDATE_FAILED_RETENTION_DAYS:-30}"
   local cancelled_days="${DISCORD_AUTO_UPDATE_CANCELLED_RETENTION_DAYS:-7}"
+  local done_keep="${DISCORD_AUTO_UPDATE_DONE_KEEP_COUNT:-5}"
+  local failed_keep="${DISCORD_AUTO_UPDATE_FAILED_KEEP_COUNT:-5}"
+  local cancelled_keep="${DISCORD_AUTO_UPDATE_CANCELLED_KEEP_COUNT:-3}"
   local outbox_days="${DISCORD_AUTO_UPDATE_OUTBOX_RETENTION_DAYS:-7}"
   local receipt_days="${DISCORD_AUTO_UPDATE_DELIVERY_RECEIPT_RETENTION_DAYS:-30}"
   [[ "$done_days" =~ ^[0-9]+$ ]] || done_days=7
   [[ "$failed_days" =~ ^[0-9]+$ ]] || failed_days=30
   [[ "$cancelled_days" =~ ^[0-9]+$ ]] || cancelled_days=7
+  [[ "$done_keep" =~ ^[0-9]+$ ]] || done_keep=5
+  [[ "$failed_keep" =~ ^[0-9]+$ ]] || failed_keep=5
+  [[ "$cancelled_keep" =~ ^[0-9]+$ ]] || cancelled_keep=3
   [[ "$outbox_days" =~ ^[0-9]+$ ]] || outbox_days=7
   [[ "$receipt_days" =~ ^[0-9]+$ ]] || receipt_days=30
-  find "$CANDIDATE_ROOT/done" -mindepth 1 -maxdepth 1 -mtime "+$done_days" -exec rm -rf -- {} + 2>/dev/null || true
-  find "$CANDIDATE_ROOT/failed" -mindepth 1 -maxdepth 1 -mtime "+$failed_days" -exec rm -rf -- {} + 2>/dev/null || true
-  find "$CANDIDATE_ROOT/cancelled" -mindepth 1 -maxdepth 1 -mtime "+$cancelled_days" -exec rm -rf -- {} + 2>/dev/null || true
+  prune_archive_root "$CANDIDATE_ROOT/done" "$done_days" "$done_keep"
+  prune_archive_root "$CANDIDATE_ROOT/failed" "$failed_days" "$failed_keep"
+  prune_archive_root "$CANDIDATE_ROOT/cancelled" "$cancelled_days" "$cancelled_keep"
   find "$CANDIDATE_QUEUE_DONE_DIR" -type f -mtime "+$done_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_FAILED_DIR" -type f -mtime "+$failed_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_CANCELLED_DIR" -type f -mtime "+$cancelled_days" -delete 2>/dev/null || true
@@ -1813,6 +1975,8 @@ prune_update_artifacts() {
   find "$UPDATE_ALERT_OUTBOX_DIR" -type f -name '*.json' -mtime "+$outbox_days" -delete 2>/dev/null || true
   find "$UPDATE_ALERT_OUTBOX_DIR" -type f -name '*.attachment' -mtime "+$outbox_days" -delete 2>/dev/null || true
   find "$UPDATE_DELIVERY_RECEIPTS_DIR" -type f -mtime "+$receipt_days" -delete 2>/dev/null || true
+  prune_rejected_remote_commits
+  prune_updater_runtime_orphans
 }
 
 git_add_changed_files_or_reject() {
@@ -3589,7 +3753,7 @@ classify_changed_files() {
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(alert\.sh|deploy/systemd(/vps)?/tts-bot-alert@\.service)$'; then
     ALERT_CHANGED=1
   fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/(vps/)?(tts-bot\.service|tts-bot-updater\.(service|timer)|tts-bot-alert@\.service|cleanup-audio-temp\.(service|timer)|sinuca-activity-server\.service|phone-worker-watch\.(service|timer)|tts-bot\.service\.d/)|deploy/sudoers\.d/|scripts/install-vps-systemd-units\.sh$)'; then
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/(vps/)?(tts-bot\.service|tts-bot-updater\.(service|timer)|tts-bot-alert@\.service|cleanup-audio-temp\.(service|timer)|sinuca-activity-server\.service|phone-worker-watch\.(service|timer)|tts-bot\.service\.d/)|deploy/(sudoers\.d|journald|tmpfiles\.d)/|scripts/install-vps-systemd-units\.sh$)'; then
     # O instalador sincroniza as units gerenciadas em uma única passagem. Inclua
     # também os templates na raiz deploy/systemd; ignorá-los deixava a VPS usando
     # uma unit antiga mesmo depois do commit ter sido aplicado.
@@ -5068,6 +5232,9 @@ cd "$REPO_DIR"
 prepare_update_delivery_dirs || true
 mkdir -p "$CANDIDATE_QUEUE_CANCELLED_DIR" "$CANDIDATE_ROOT/cancelled" 2>/dev/null || true
 prune_update_artifacts || true
+if ! guard_updater_disk_space; then
+  exit 0
+fi
 flush_update_status_outbox || true
 flush_update_alert_outbox || true
 refresh_pending_queue_messages || true

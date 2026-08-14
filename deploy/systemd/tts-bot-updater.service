@@ -9,4 +9,8 @@ User=root
 Nice=10
 CPUWeight=20
 IOWeight=20
+RuntimeDirectory=tts-bot-updater
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=no
+Environment=TTS_BOT_UPDATER_RUNTIME_DIR=/run/tts-bot-updater
 ExecStart=/usr/bin/env bash /home/ubuntu/bot/scripts/tts-bot-update.sh

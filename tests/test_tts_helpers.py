@@ -351,7 +351,12 @@ class SpeakableTextTests(unittest.TestCase):
 
 class VoiceConnectionLogFilterTests(unittest.TestCase):
     def test_recoverable_close_is_kept_as_compact_info_record(self):
-        exc = sys.modules["discord.errors"].ConnectionClosed(1006, "abnormal closure")
+        connection_closed = sys.modules["discord.errors"].ConnectionClosed
+        try:
+            exc = connection_closed(SimpleNamespace(close_code=1006), shard_id=None, code=1006)
+        except TypeError:
+            # O stub leve usado sem discord.py mantém a assinatura antiga.
+            exc = connection_closed(1006, "abnormal closure")
         record = logging.LogRecord(
             name="discord.voice_client",
             level=logging.ERROR,

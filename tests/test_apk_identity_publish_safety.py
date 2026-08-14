@@ -240,6 +240,23 @@ def test_vps_rejects_old_apk_with_fake_version_and_preserves_release(
     assert latest["versionName"] == "0.7.4"
     assert latest["versionCode"] == 122
     assert latest["validation"]["identity"]["versionCode"] == 122
+    assert current_body["storageCleanup"]["ok"] is True
+
+    for version_name, version_code in (("0.7.5", 123), ("0.7.6", 124)):
+        published_body, published_status = _publish(
+            webserver,
+            _apk_bytes(version_name=version_name, version_code=version_code),
+            version_name=version_name,
+            version_code=version_code,
+            filename=f"CoreWorker-v{version_name}-debug.apk",
+        )
+        assert published_status == 200, published_body
+
+    assert not (tmp_path / "CoreWorker-v0.7.3-debug.apk").exists()
+    assert (tmp_path / "CoreWorker-v0.7.4-debug.apk").is_file()
+    assert (tmp_path / "CoreWorker-v0.7.5-debug.apk").is_file()
+    assert (tmp_path / "CoreWorker-v0.7.6-debug.apk").is_file()
+    assert published_body["storageCleanup"]["removed"] == ["CoreWorker-v0.7.3-debug.apk"]
 
 
 def test_self_builder_restores_jspawnhelper_and_never_builds_on_vps() -> None:

@@ -17,6 +17,7 @@ import urllib.request
 from pathlib import Path
 
 from utility.apk_identity import ApkIdentityError, assert_expected_apk_identity, inspect_apk_identity
+from utility.storage_maintenance import prune_core_worker_releases
 
 app = Flask(__name__)
 
@@ -3220,6 +3221,7 @@ def core_worker_app_publish():
     signed_stage = ""
     manifest_stage = ""
     signing_info: dict[str, object] = {"signedByVps": False, "signingMode": "not-run"}
+    release_cleanup: dict[str, object] = {"ok": True, "removedCount": 0, "reclaimedBytes": 0}
 
     try:
         fd, uploaded_stage = tempfile.mkstemp(prefix=".core-worker-upload-", suffix=".apk", dir=base)
@@ -3390,6 +3392,30 @@ def core_worker_app_publish():
                     with contextlib.suppress(Exception):
                         os.remove(backup_target)
 
+            # A publicação já é íntegra neste ponto. A poda roda sob o mesmo
+            # lock, preserva sempre o APK atual e nunca transforma uma falha de
+            # housekeeping em falha da atualização entregue ao dispositivo.
+            try:
+                release_cleanup = prune_core_worker_releases(
+                    base,
+                    filename,
+                    keep=_env_int("CORE_WORKER_APK_RETAIN_RELEASES", 3, minimum=1, maximum=10),
+                    max_total_bytes=_env_int(
+                        "CORE_WORKER_APK_RELEASE_MAX_BYTES",
+                        256 * 1024 * 1024,
+                        minimum=64 * 1024 * 1024,
+                        maximum=2 * 1024 * 1024 * 1024,
+                    ),
+                )
+            except Exception as cleanup_exc:
+                release_cleanup = {
+                    "ok": False,
+                    "removedCount": 0,
+                    "reclaimedBytes": 0,
+                    "error": f"{type(cleanup_exc).__name__}: {cleanup_exc}"[:240],
+                }
+                app.logger.warning("poda de releases do Core Worker ignorada: %s", cleanup_exc)
+
         _kick_core_worker_fcm_push(manifest, reason="apk_published")
         _kick_core_worker_pending_automation(str(worker.get("worker_id") or ""))
         return jsonify({
@@ -3400,6 +3426,7 @@ def core_worker_app_publish():
             "signedByVps": bool(signing_info.get("signedByVps")),
             "signingMode": manifest.get("signingMode"),
             "validation": validation,
+            "storageCleanup": release_cleanup,
             "latest": manifest,
         }), 200
     except ValueError as exc:

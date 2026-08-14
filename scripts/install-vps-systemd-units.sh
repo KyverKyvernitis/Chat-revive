@@ -5,6 +5,10 @@ REPO_DIR="${REPO_DIR:-/home/ubuntu/bot}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-$REPO_DIR/deploy/systemd/vps}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 SUDOERS_DIR="${SUDOERS_DIR:-/etc/sudoers.d}"
+JOURNALD_POLICY_SRC="${JOURNALD_POLICY_SRC:-$REPO_DIR/deploy/journald/60-tts-bot-storage.conf}"
+JOURNALD_POLICY_DEST="${JOURNALD_POLICY_DEST:-/etc/systemd/journald.conf.d/60-tts-bot-storage.conf}"
+TMPFILES_POLICY_SRC="${TMPFILES_POLICY_SRC:-$REPO_DIR/deploy/tmpfiles.d/tts-bot-storage.conf}"
+TMPFILES_POLICY_DEST="${TMPFILES_POLICY_DEST:-/etc/tmpfiles.d/tts-bot-storage.conf}"
 BACKUP_ROOT="${BACKUP_ROOT:-$REPO_DIR/data/systemd-backups}"
 STATUS_FILE="${STATUS_FILE:-$REPO_DIR/data/vps-systemd-install-status.json}"
 DRY_RUN=0
@@ -18,6 +22,8 @@ ACTIONS=()
 WARNINGS=()
 UPDATER_TIMER_WAS_ENABLED=0
 UPDATER_TIMER_WAS_ACTIVE=0
+JOURNALD_POLICY_CHANGED=0
+TMPFILES_POLICY_CHANGED=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -46,7 +52,7 @@ ensure_paths() {
     exit 1
   fi
   if [[ "$DRY_RUN" != "1" ]]; then
-    mkdir -p "$BACKUP_DIR" "$(dirname "$STATUS_FILE")"
+    mkdir -p "$(dirname "$STATUS_FILE")"
   fi
 }
 
@@ -54,6 +60,7 @@ backup_live() {
   local rel="$1"
   local live="$SYSTEMD_DIR/$rel"
   local dest="$BACKUP_DIR/$rel"
+  [[ "$DRY_RUN" != "1" ]] || return 0
   if [[ -e "$live" || -L "$live" ]]; then
     mkdir -p "$(dirname "$dest")"
     cp -a "$live" "$dest" 2>/dev/null || true
@@ -68,8 +75,14 @@ install_file() {
     warn "template ausente: $rel"
     return 0
   fi
+  if [[ -f "$dst" && ! -L "$dst" ]] \
+      && cmp -s "$src" "$dst" \
+      && [[ "$(stat -c '%a' "$dst" 2>/dev/null || true)" == "644" ]]; then
+    action "mantido sem regravar: $rel"
+    return 0
+  fi
   if [[ "$DRY_RUN" == "1" ]]; then
-    action "dry-run: instalaria $rel"
+    action "dry-run: atualizaria $rel"
     return 0
   fi
   backup_live "$rel"
@@ -88,11 +101,50 @@ install_dir_files() {
     warn "diretório de templates ausente: $rel_dir"
     return 0
   fi
-  mkdir -p "$dst_dir"
+  [[ "$DRY_RUN" == "1" ]] || mkdir -p "$dst_dir"
   while IFS= read -r -d '' src; do
     rel="$rel_dir/${src#$src_dir/}"
     install_file "$rel"
   done < <(find "$src_dir" -type f -print0 | sort -z)
+}
+
+install_storage_policy_file() {
+  local src="${1:?}" dst="${2:?}" backup_rel="${3:?}" label="${4:?}" changed_var="${5:?}"
+  local backup_dest="$BACKUP_DIR/$backup_rel"
+  if [[ ! -f "$src" || -L "$src" ]]; then
+    warn "política ausente ou insegura: $label"
+    return 0
+  fi
+  if [[ -f "$dst" && ! -L "$dst" ]] \
+      && cmp -s "$src" "$dst" \
+      && [[ "$(stat -c '%a' "$dst" 2>/dev/null || true)" == "644" ]]; then
+    action "política mantida sem regravar: $label"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    action "dry-run: atualizaria política $label"
+    return 0
+  fi
+  if [[ -e "$dst" || -L "$dst" ]]; then
+    mkdir -p "$(dirname "$backup_dest")"
+    cp -a "$dst" "$backup_dest" 2>/dev/null || true
+  fi
+  mkdir -p "$(dirname "$dst")"
+  install -m 0644 "$src" "$dst"
+  printf -v "$changed_var" '%s' 1
+  CHANGED=1
+  action "política instalada: $label"
+}
+
+install_storage_policies() {
+  install_storage_policy_file \
+    "$JOURNALD_POLICY_SRC" "$JOURNALD_POLICY_DEST" \
+    "journald.conf.d/$(basename "$JOURNALD_POLICY_DEST")" \
+    "limite do journal" JOURNALD_POLICY_CHANGED
+  install_storage_policy_file \
+    "$TMPFILES_POLICY_SRC" "$TMPFILES_POLICY_DEST" \
+    "tmpfiles.d/$(basename "$TMPFILES_POLICY_DEST")" \
+    "retenção do cache Snap" TMPFILES_POLICY_CHANGED
 }
 
 truthy_env() {
@@ -276,6 +328,7 @@ PY_CRON
     if [[ "$DRY_RUN" == "1" ]]; then
       action "dry-run: normalizaria crontab ubuntu"
     else
+      mkdir -p "$BACKUP_DIR"
       cp -a "$current" "$BACKUP_DIR/ubuntu.crontab" 2>/dev/null || true
       sudo -u ubuntu -H crontab "$tmp"
       CHANGED=1
@@ -291,6 +344,7 @@ backup_sudoers_live() {
   local rel="$1"
   local live="$SUDOERS_DIR/$rel"
   local dest="$BACKUP_DIR/sudoers.d/$rel"
+  [[ "$DRY_RUN" != "1" ]] || return 0
   if [[ -e "$live" || -L "$live" ]]; then
     mkdir -p "$(dirname "$dest")"
     cp -a "$live" "$dest" 2>/dev/null || true
@@ -317,6 +371,13 @@ install_sudoers_files() {
     if ! visudo -cf "$tmp" >/dev/null; then
       rm -f "$tmp"
       warn "sudoers inválido ignorado: $rel"
+      continue
+    fi
+    if [[ -f "$dst" && ! -L "$dst" ]] \
+        && cmp -s "$tmp" "$dst" \
+        && [[ "$(stat -c '%a' "$dst" 2>/dev/null || true)" == "440" ]]; then
+      rm -f "$tmp"
+      action "sudoers mantido sem regravar: $rel"
       continue
     fi
     backup_sudoers_live "$rel"
@@ -363,6 +424,20 @@ apply_service_policy() {
     return 0
   fi
   systemctl daemon-reload || true
+  if [[ "${JOURNALD_POLICY_CHANGED:-0}" == "1" ]]; then
+    if systemctl restart systemd-journald.service; then
+      action "limite persistente do journal aplicado"
+    else
+      warn "política do journal instalada, mas o reload falhou"
+    fi
+  fi
+  if [[ "${TMPFILES_POLICY_CHANGED:-0}" == "1" ]]; then
+    if systemd-tmpfiles --clean "$TMPFILES_POLICY_DEST"; then
+      action "retenção do cache Snap aplicada"
+    else
+      warn "política tmpfiles instalada, mas a limpeza inicial falhou"
+    fi
+  fi
   systemctl reset-failed tts-bot.service tts-bot-updater.service tts-bot-alert@tts-bot.service >/dev/null 2>&1 || true
   systemctl enable tts-bot.service >/dev/null 2>&1 || true
 
@@ -396,15 +471,40 @@ apply_service_policy() {
   action "phone-lavalink-watch removido do fluxo: Lavalink/NodeLink não é mais usado"
 }
 
+prune_systemd_backups() {
+  local keep_count="${SYSTEMD_BACKUP_KEEP_COUNT:-3}"
+  local -a backup_names=()
+  local index name target
+  [[ "$DRY_RUN" != "1" && -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" ]] || return 0
+  [[ "$keep_count" =~ ^[0-9]+$ ]] || keep_count=3
+  (( keep_count < 1 )) && keep_count=1
+  (( keep_count > 20 )) && keep_count=20
+
+  mapfile -t backup_names < <(
+    find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
+      | grep -E '^[0-9]{8}-[0-9]{6}$' \
+      | sort -r || true
+  )
+  for ((index=keep_count; index<${#backup_names[@]}; index++)); do
+    name="${backup_names[$index]}"
+    [[ "$name" =~ ^[0-9]{8}-[0-9]{6}$ ]] || continue
+    target="$BACKUP_ROOT/$name"
+    [[ -d "$target" && ! -L "$target" && "$(dirname -- "$target")" == "$BACKUP_ROOT" ]] || continue
+    rm -rf -- "$target"
+    action "backup systemd antigo removido: $name"
+  done
+}
+
 write_status() {
-  local actions_json warnings_json
+  local actions_json warnings_json backup_dir_value=""
   actions_json="$(printf '%s\n' "${ACTIONS[@]:-}" | python3 -c 'import json,sys; print(json.dumps([x for x in sys.stdin.read().splitlines() if x], ensure_ascii=False))')"
   warnings_json="$(printf '%s\n' "${WARNINGS[@]:-}" | python3 -c 'import json,sys; print(json.dumps([x for x in sys.stdin.read().splitlines() if x], ensure_ascii=False))')"
   if [[ "$DRY_RUN" == "1" ]]; then
     return 0
   fi
+  [[ -d "$BACKUP_DIR" ]] && backup_dir_value="$BACKUP_DIR"
   cat > "$STATUS_FILE" <<EOF_STATUS
-{"ok": true, "changed": ${CHANGED}, "from_updater": ${FROM_UPDATER}, "timestamp": "$(date -Iseconds)", "template_dir": "$TEMPLATE_DIR", "backup_dir": "$BACKUP_DIR", "actions": $actions_json, "warnings": $warnings_json}
+{"ok": true, "changed": ${CHANGED}, "from_updater": ${FROM_UPDATER}, "timestamp": "$(date -Iseconds)", "template_dir": "$TEMPLATE_DIR", "backup_dir": "$backup_dir_value", "actions": $actions_json, "warnings": $warnings_json}
 EOF_STATUS
   chown ubuntu:ubuntu "$STATUS_FILE" 2>/dev/null || true
 }
@@ -467,6 +567,19 @@ audit_vps_systemd() {
         ;;
     esac
   done < <(find "$SYSTEMD_DIR" -maxdepth 2 \( -type f -o -type l \) -print0 2>/dev/null | sort -z)
+
+  for policy in \
+    "$JOURNALD_POLICY_SRC|$JOURNALD_POLICY_DEST|limite do journal" \
+    "$TMPFILES_POLICY_SRC|$TMPFILES_POLICY_DEST|retenção do cache Snap"; do
+    IFS='|' read -r src live name <<< "$policy"
+    if [[ -f "$src" && -f "$live" && ! -L "$live" ]] && cmp -s "$src" "$live"; then
+      action "audit: política igual: $name"
+    elif [[ ! -f "$live" && ! -L "$live" ]]; then
+      action "audit: política existe só no repo: $name"
+    else
+      warn "audit: política diferente ou insegura: $name"
+    fi
+  done
 }
 
 audit_crontab() {
@@ -514,13 +627,19 @@ main() {
   capture_updater_timer_state
   chmod_scripts
   install_units
+  install_storage_policies
   install_sudoers_files
   sanitize_lavalink_references
   mask_vps_lavalink
   normalize_crontab
   apply_service_policy
+  prune_systemd_backups
   write_status
-  log "concluído; backups em $BACKUP_DIR"
+  if [[ -d "$BACKUP_DIR" ]]; then
+    log "concluído; backup desta execução em $BACKUP_DIR"
+  else
+    log "concluído; nenhum backup novo foi necessário"
+  fi
 }
 
 main "$@"

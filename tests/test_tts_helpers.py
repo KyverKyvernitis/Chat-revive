@@ -560,15 +560,26 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
 
             reader_task = asyncio.create_task(asyncio.to_thread(read_fifo))
             await probe._activate_edge_stream(handle)
+            probe._close_edge_stream_reader_anchor(handle)
             release_tail.set()
             streamed = await asyncio.wait_for(reader_task, timeout=2.0)
             await asyncio.wait_for(handle.producer_task, timeout=2.0)
             await asyncio.wait_for(handle.writer_task, timeout=2.0)
+            if handle.cache_task is not None:
+                await asyncio.wait_for(handle.cache_task, timeout=2.0)
 
         self.assertEqual(streamed, (b"A" * 2048) + (b"B" * 2048))
         self.assertEqual(captured["voice"], item.voice)
         self.assertEqual(captured["rate"], item.rate)
         self.assertEqual(captured["pitch"], item.pitch)
+        self.assertEqual(
+            captured["connect_timeout"],
+            tts_audio.TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            captured["receive_timeout"],
+            tts_audio.TTS_EDGE_RECEIVE_TIMEOUT_SECONDS,
+        )
         self.assertTrue(handle.cache_path)
         with open(handle.cache_path, "rb") as cached:
             self.assertEqual(cached.read(), streamed)
@@ -642,7 +653,126 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(semaphore._value, initial_slots)
         self.assertFalse(os.path.exists(handle.fifo_path))
+        self.assertEqual(handle.part_path, "")
         self.assertFalse(os.path.exists(handle.part_path))
+
+    async def test_current_speech_overtakes_queued_prefetch(self):
+        semaphore = tts_audio._PrioritySemaphore(1)
+        await semaphore.acquire()
+        order = []
+
+        async def waiter(label, *, foreground):
+            await semaphore.acquire(foreground=foreground)
+            order.append(label)
+            await asyncio.sleep(0)
+            semaphore.release()
+
+        background = asyncio.create_task(waiter("prefetch", foreground=False))
+        await asyncio.sleep(0)
+        foreground = asyncio.create_task(waiter("current", foreground=True))
+        await asyncio.sleep(0)
+        semaphore.release()
+        await asyncio.gather(background, foreground)
+
+        self.assertEqual(order, ["current", "prefetch"])
+        self.assertEqual(semaphore._value, 1)
+
+    async def test_edge_circuit_bypasses_repeated_network_failure(self):
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        engine_metrics = probe._get_engine_metrics("edge")
+        engine_metrics["consecutive_failures"] = tts_audio.TTS_EDGE_CIRCUIT_BREAKER_FAILURES
+        engine_metrics["last_error_at"] = tts_audio.time.time()
+
+        async def fake_gtts(text, language):
+            path = probe._make_runtime_temp_file(suffix=".mp3")
+            with open(path, "wb") as output:
+                output.write(b"circuit-fallback")
+            return path
+
+        with (
+            patch.object(probe, "_generate_gtts_file", side_effect=fake_gtts),
+            patch.object(
+                probe,
+                "_prepare_edge_stream",
+                side_effect=AssertionError("Edge não deve ser chamado durante cooldown"),
+            ) as edge_mock,
+        ):
+            path, should_cleanup = await probe._resolve_audio_path(
+                state,
+                self._item(),
+                allow_edge_stream=True,
+            )
+
+        self.assertTrue(should_cleanup)
+        self.assertEqual(edge_mock.await_count, 0)
+        self.assertEqual(probe._get_metrics_store()["edge_circuit_bypasses"], 1)
+        with open(path, "rb") as fallback:
+            self.assertEqual(fallback.read(), b"circuit-fallback")
+        os.remove(path)
+        probe._shutdown_tts_runtime()
+
+    async def test_adaptive_prebuffer_reacts_slowly_and_backs_off_on_stall(self):
+        probe = self._probe()
+        item = self._item()
+        with patch.object(tts_audio, "TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS", 2):
+            initial_ms, profile_key = probe._edge_prebuffer_ms(item)
+            handle = SimpleNamespace(
+                engine="edge",
+                prebuffer_profile_key=profile_key,
+                max_source_read_ms=4.0,
+                source_read_stalls=0,
+                error=None,
+                pipe_error=None,
+            )
+            probe._observe_edge_stream_playback(handle, playback_ok=True)
+            probe._observe_edge_stream_playback(handle, playback_ok=True)
+            lowered_ms, _ = probe._edge_prebuffer_ms(item)
+
+            handle.source_read_stalls = 1
+            probe._observe_edge_stream_playback(handle, playback_ok=True)
+            raised_ms, _ = probe._edge_prebuffer_ms(item)
+
+        self.assertEqual(initial_ms, tts_audio.TTS_EDGE_STREAM_PREBUFFER_MS)
+        self.assertEqual(lowered_ms, max(tts_audio.TTS_EDGE_ADAPTIVE_PREBUFFER_MIN_MS, initial_ms - 20))
+        self.assertEqual(raised_ms, min(tts_audio.TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS, lowered_ms + 40))
+        self.assertEqual(probe._get_metrics_store()["edge_prebuffer_lowered"], 1)
+        self.assertEqual(probe._get_metrics_store()["edge_prebuffer_raised"], 1)
+
+    async def test_mp3_input_hint_is_scoped_to_edge_fifo(self):
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        fifo_path = probe._make_edge_stream_fifo()
+        handle = tts_audio.EdgeStreamHandle(
+            fifo_path=fifo_path,
+            part_path="",
+            cache_key="hint-test",
+            state=state,
+            item=self._item(),
+            queue=asyncio.Queue(maxsize=8),
+            store_in_cache=False,
+            started_at=asyncio.get_running_loop().time(),
+            first_audio_ms=1.0,
+        )
+        probe._get_edge_stream_handles()[os.path.abspath(fifo_path)] = handle
+        calls = []
+
+        class FakePCM:
+            def __init__(self, path, **kwargs):
+                calls.append((path, kwargs))
+
+        with (
+            patch.object(tts_audio.discord, "FFmpegPCMAudio", FakePCM),
+            patch.object(tts_audio, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin"),
+        ):
+            _, source_kind = probe._make_discord_tts_source(fifo_path)
+            handle.engine = "gtts"
+            probe._make_discord_tts_source(fifo_path)
+
+        self.assertEqual(source_kind, "ffmpeg_pcm")
+        self.assertIn("-f mp3", calls[0][1]["before_options"])
+        self.assertNotIn("-f mp3", calls[1][1]["before_options"])
+        await probe._finalize_edge_stream(handle, cancel=True)
 
     async def test_direct_worker_handoff_is_skipped_for_local_edge_fast_path(self):
         probe = self._probe()
@@ -746,8 +876,41 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.01)
         started = asyncio.get_running_loop().time()
         await probe._signal_stream_end(handle)
+        probe._close_edge_stream_reader_anchor(handle)
         self.assertEqual(await asyncio.wait_for(reader, timeout=0.5), b"audio")
         self.assertLess(asyncio.get_running_loop().time() - started, 0.15)
+        await probe._finalize_edge_stream(handle)
+
+    async def test_short_stream_stays_open_until_late_ffmpeg_reader_arrives(self):
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        fifo_path = probe._make_edge_stream_fifo()
+        handle = tts_audio.EdgeStreamHandle(
+            fifo_path=fifo_path,
+            part_path="",
+            cache_key="short-stream",
+            state=state,
+            item=self._item(),
+            queue=asyncio.Queue(maxsize=8),
+            store_in_cache=False,
+            started_at=asyncio.get_running_loop().time(),
+            first_audio_ms=1.0,
+        )
+        probe._get_edge_stream_handles()[os.path.abspath(fifo_path)] = handle
+        await handle.queue.put(b"audio")
+        await probe._signal_stream_end(handle)
+        await probe._activate_edge_stream(handle)
+        await asyncio.wait_for(handle.writer_task, timeout=0.5)
+
+        def late_read():
+            with open(fifo_path, "rb", buffering=0) as source:
+                return source.read(5)
+
+        self.assertEqual(
+            await asyncio.wait_for(asyncio.to_thread(late_read), timeout=0.5),
+            b"audio",
+        )
+        probe._close_edge_stream_reader_anchor(handle)
         await probe._finalize_edge_stream(handle)
 
 
@@ -827,9 +990,12 @@ class GTTSLatencyFastPathTests(unittest.IsolatedAsyncioTestCase):
 
             reader_task = asyncio.create_task(asyncio.to_thread(read_fifo))
             await probe._activate_edge_stream(handle)
+            probe._close_edge_stream_reader_anchor(handle)
             release_tail.set()
             streamed = await asyncio.wait_for(reader_task, timeout=2.0)
             await asyncio.wait_for(handle.producer_task, timeout=2.0)
+            if handle.cache_task is not None:
+                await asyncio.wait_for(handle.cache_task, timeout=2.0)
 
         self.assertEqual(streamed, (b"A" * 2048) + (b"B" * 2048))
         self.assertEqual(captured["lang"], "pt")
@@ -984,6 +1150,7 @@ class GTTSLatencyFastPathTests(unittest.IsolatedAsyncioTestCase):
 class FirstFrameMetricsTests(unittest.TestCase):
     def test_audio_source_proxy_reports_only_the_first_nonempty_frame(self):
         frames = []
+        stream_reads = []
 
         class Source:
             def __init__(self):
@@ -1003,12 +1170,14 @@ class FirstFrameMetricsTests(unittest.TestCase):
         proxy = tts_audio._FirstFrameAudioSource(
             source,
             lambda frame_at, read_ms: frames.append((frame_at, read_ms)),
+            lambda read_ms: stream_reads.append(read_ms),
         )
 
         self.assertEqual(proxy.read(), b"")
         self.assertEqual(proxy.read(), b"frame-1")
         self.assertEqual(proxy.read(), b"frame-2")
         self.assertEqual(len(frames), 1)
+        self.assertEqual(len(stream_reads), 1)
         self.assertTrue(proxy.is_opus())
         proxy.cleanup()
         self.assertTrue(source.cleaned)

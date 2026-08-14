@@ -137,6 +137,8 @@ TTS_SYNTH_CONCURRENCY = _parse_int(os.getenv("TTS_SYNTH_CONCURRENCY", "3"), 3)
 
 # Tempo máximo de espera da síntese Edge antes de fallback
 TTS_EDGE_TIMEOUT_SECONDS = _parse_int(os.getenv("TTS_EDGE_TIMEOUT_SECONDS", "10"), 10)
+TTS_EDGE_CONNECT_TIMEOUT_SECONDS = max(1, _parse_int(os.getenv("TTS_EDGE_CONNECT_TIMEOUT_SECONDS", "4"), 4))
+TTS_EDGE_RECEIVE_TIMEOUT_SECONDS = max(1, _parse_int(os.getenv("TTS_EDGE_RECEIVE_TIMEOUT_SECONDS", "15"), 15))
 
 # Fast path do Edge: a VPS mantém a posse da call e começa a reproduzir os
 # fragmentos recebidos antes de a síntese completa terminar. O caminho antigo
@@ -149,6 +151,17 @@ TTS_EDGE_STREAM_PREBUFFER_MS = min(1200, max(100, _parse_int(os.getenv("TTS_EDGE
 TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS = min(128, max(8, _parse_int(os.getenv("TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS", "64"), 64)))
 TTS_EDGE_STREAM_CHUNK_BYTES = min(64 * 1024, max(4 * 1024, _parse_int(os.getenv("TTS_EDGE_STREAM_CHUNK_BYTES", "16384"), 16384)))
 TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS", "10.0"), 10.0))
+TTS_EDGE_STREAM_PIPE_BYTES = min(1024 * 1024, max(64 * 1024, _parse_int(os.getenv("TTS_EDGE_STREAM_PIPE_BYTES", "131072"), 131072)))
+TTS_EDGE_STREAM_CACHE_BUFFER_BYTES = min(1024 * 1024, max(16 * 1024, _parse_int(os.getenv("TTS_EDGE_STREAM_CACHE_BUFFER_BYTES", "131072"), 131072)))
+TTS_EDGE_ADAPTIVE_PREBUFFER_ENABLED = _parse_bool(os.getenv("TTS_EDGE_ADAPTIVE_PREBUFFER_ENABLED", "true"), True)
+TTS_EDGE_ADAPTIVE_PREBUFFER_MIN_MS = min(TTS_EDGE_STREAM_PREBUFFER_MS, max(100, _parse_int(os.getenv("TTS_EDGE_ADAPTIVE_PREBUFFER_MIN_MS", "160"), 160)))
+TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS = max(TTS_EDGE_STREAM_PREBUFFER_MS, min(1200, _parse_int(os.getenv("TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS", "400"), 400)))
+TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS = max(4, _parse_int(os.getenv("TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS", "20"), 20))
+TTS_EDGE_STREAM_STALL_THRESHOLD_MS = max(20.0, _parse_float(os.getenv("TTS_EDGE_STREAM_STALL_THRESHOLD_MS", "35.0"), 35.0))
+TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED = _parse_bool(os.getenv("TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED", "true"), True)
+TTS_EDGE_CIRCUIT_BREAKER_ENABLED = _parse_bool(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_ENABLED", "true"), True)
+TTS_EDGE_CIRCUIT_BREAKER_FAILURES = max(2, _parse_int(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_FAILURES", "3"), 3))
+TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = max(5.0, _parse_float(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "15.0"), 15.0))
 # No máximo dois prefetches usam os três slots Edge padrão; pelo menos um slot
 # fica livre para uma fala atual de outra guild.
 TTS_EDGE_PREFETCH_CONCURRENCY = max(1, _parse_int(os.getenv("TTS_EDGE_PREFETCH_CONCURRENCY", "2"), 2))

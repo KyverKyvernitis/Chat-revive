@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import logging
+import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -28,6 +29,11 @@ from gtts.tts import gTTSError
 import config
 from .helpers import validate_voice
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - FIFO fast path is POSIX-only.
+    fcntl = None
+
 
 GTTS_DEFAULT_LANGUAGE = getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
 TTS_IDLE_DISCONNECT_SECONDS = int(getattr(config, "TTS_IDLE_DISCONNECT_SECONDS", 240))
@@ -38,6 +44,8 @@ TTS_WARM_HOLD_SECONDS = float(getattr(config, "TTS_WARM_HOLD_SECONDS", 30))
 TTS_QUEUE_MAXSIZE = max(1, int(getattr(config, "TTS_QUEUE_MAXSIZE", 20)))
 TTS_SYNTH_CONCURRENCY = max(1, int(getattr(config, "TTS_SYNTH_CONCURRENCY", 3)))
 TTS_EDGE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_TIMEOUT_SECONDS", 10)))
+TTS_EDGE_CONNECT_TIMEOUT_SECONDS = max(1, int(getattr(config, "TTS_EDGE_CONNECT_TIMEOUT_SECONDS", 4)))
+TTS_EDGE_RECEIVE_TIMEOUT_SECONDS = max(1, int(getattr(config, "TTS_EDGE_RECEIVE_TIMEOUT_SECONDS", 15)))
 TTS_EDGE_VPS_FAST_PATH_ENABLED = bool(getattr(config, "TTS_EDGE_VPS_FAST_PATH_ENABLED", True))
 TTS_EDGE_STREAMING_ENABLED = bool(getattr(config, "TTS_EDGE_STREAMING_ENABLED", True))
 TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS", 4.0)))
@@ -49,6 +57,17 @@ TTS_EDGE_STREAM_PREBUFFER_MS = min(1200, max(100, int(getattr(config, "TTS_EDGE_
 TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS = min(128, max(8, int(getattr(config, "TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS", 64))))
 TTS_EDGE_STREAM_CHUNK_BYTES = min(64 * 1024, max(4 * 1024, int(getattr(config, "TTS_EDGE_STREAM_CHUNK_BYTES", 16 * 1024))))
 TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS", 10.0)))
+TTS_EDGE_STREAM_PIPE_BYTES = min(1024 * 1024, max(64 * 1024, int(getattr(config, "TTS_EDGE_STREAM_PIPE_BYTES", 128 * 1024))))
+TTS_EDGE_STREAM_CACHE_BUFFER_BYTES = min(1024 * 1024, max(16 * 1024, int(getattr(config, "TTS_EDGE_STREAM_CACHE_BUFFER_BYTES", 128 * 1024))))
+TTS_EDGE_ADAPTIVE_PREBUFFER_ENABLED = bool(getattr(config, "TTS_EDGE_ADAPTIVE_PREBUFFER_ENABLED", True))
+TTS_EDGE_ADAPTIVE_PREBUFFER_MIN_MS = min(TTS_EDGE_STREAM_PREBUFFER_MS, max(100, int(getattr(config, "TTS_EDGE_ADAPTIVE_PREBUFFER_MIN_MS", 160))))
+TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS = max(TTS_EDGE_STREAM_PREBUFFER_MS, min(1200, int(getattr(config, "TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS", 400))))
+TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS = max(4, int(getattr(config, "TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS", 20)))
+TTS_EDGE_STREAM_STALL_THRESHOLD_MS = max(20.0, float(getattr(config, "TTS_EDGE_STREAM_STALL_THRESHOLD_MS", 35.0)))
+TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED = bool(getattr(config, "TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED", True))
+TTS_EDGE_CIRCUIT_BREAKER_ENABLED = bool(getattr(config, "TTS_EDGE_CIRCUIT_BREAKER_ENABLED", True))
+TTS_EDGE_CIRCUIT_BREAKER_FAILURES = max(2, int(getattr(config, "TTS_EDGE_CIRCUIT_BREAKER_FAILURES", 3)))
+TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 15.0)))
 TTS_EDGE_PREFETCH_CONCURRENCY = min(
     TTS_SYNTH_CONCURRENCY,
     max(1, int(getattr(config, "TTS_EDGE_PREFETCH_CONCURRENCY", max(1, TTS_SYNTH_CONCURRENCY - 1)))),
@@ -190,12 +209,72 @@ _TTS_STREAM_END = object()
 _DiscordAudioSourceBase = getattr(discord, "AudioSource", object)
 
 
+class _PrioritySemaphore:
+    """Semaphore that lets current speech overtake speculative prefetch."""
+
+    def __init__(self, value: int = 1) -> None:
+        if value < 0:
+            raise ValueError("Semaphore initial value must be >= 0")
+        self._value = int(value)
+        self._foreground_waiters: deque[asyncio.Future] = deque()
+        self._background_waiters: deque[asyncio.Future] = deque()
+
+    def locked(self) -> bool:
+        return self._value <= 0
+
+    async def acquire(self, *, foreground: bool = True) -> bool:
+        if (
+            self._value > 0
+            and not self._foreground_waiters
+            and not self._background_waiters
+        ):
+            self._value -= 1
+            return True
+
+        future = asyncio.get_running_loop().create_future()
+        waiters = self._foreground_waiters if foreground else self._background_waiters
+        waiters.append(future)
+        try:
+            await future
+            return True
+        except asyncio.CancelledError:
+            if future.cancelled():
+                with contextlib.suppress(ValueError):
+                    waiters.remove(future)
+            elif not future.done():
+                future.cancel()
+                with contextlib.suppress(ValueError):
+                    waiters.remove(future)
+            else:
+                # release() had already handed this task a physical slot.
+                self.release()
+            raise
+
+    def release(self) -> None:
+        for waiters in (self._foreground_waiters, self._background_waiters):
+            while waiters:
+                future = waiters.popleft()
+                if future.done():
+                    continue
+                future.set_result(True)
+                return
+        self._value += 1
+
+    async def __aenter__(self):
+        await self.acquire(foreground=True)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self.release()
+
+
 class _FirstFrameAudioSource(_DiscordAudioSourceBase):
     """Proxy transparente que mede a primeira leitura real do Discord."""
 
-    def __init__(self, source: Any, on_first_frame) -> None:
+    def __init__(self, source: Any, on_first_frame, on_stream_read=None) -> None:
         self._source = source
         self._on_first_frame = on_first_frame
+        self._on_stream_read = on_stream_read
         self._first_seen = False
 
     def read(self):
@@ -205,6 +284,8 @@ class _FirstFrameAudioSource(_DiscordAudioSourceBase):
         if data and not self._first_seen:
             self._first_seen = True
             self._on_first_frame(time.monotonic(), read_ms)
+        elif data and self._first_seen and callable(self._on_stream_read):
+            self._on_stream_read(read_ms)
         return data
 
     def is_opus(self) -> bool:
@@ -319,7 +400,7 @@ class EdgeStreamHandle:
     started_at: float
     first_audio_ms: float
     engine: str = "edge"
-    semaphore: Optional[asyncio.Semaphore] = field(default=None, repr=False)
+    semaphore: Optional[Any] = field(default=None, repr=False)
     semaphore_released: bool = field(default=False, repr=False)
     prefetch_semaphore: Optional[asyncio.Semaphore] = field(default=None, repr=False)
     prefetch_semaphore_released: bool = field(default=False, repr=False)
@@ -328,11 +409,24 @@ class EdgeStreamHandle:
     stop_requested: threading.Event = field(default_factory=threading.Event, repr=False)
     producer_task: Optional[asyncio.Task] = field(default=None, repr=False)
     writer_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    cache_task: Optional[asyncio.Task] = field(default=None, repr=False)
     blocking_future: Optional[asyncio.Future] = field(default=None, repr=False)
+    writer_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    reader_anchor_fd: Optional[int] = field(default=None, repr=False)
+    reader_anchor_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     cache_path: str = ""
     audio_bytes: int = 0
+    first_chunk_bytes: int = 0
+    network_first_audio_ms: float = 0.0
+    local_handoff_ms: float = 0.0
+    synth_slot_wait_ms: float = 0.0
+    prebuffer_ms: int = 0
+    prebuffer_profile_key: str = ""
+    source_read_stalls: int = 0
+    max_source_read_ms: float = 0.0
     error: Optional[BaseException] = field(default=None, repr=False)
     pipe_error: Optional[BaseException] = field(default=None, repr=False)
+    cache_error: Optional[BaseException] = field(default=None, repr=False)
     activated: bool = False
     consumer_abandoned: bool = False
     cleaned: bool = False
@@ -463,10 +557,10 @@ class TTSAudioMixin:
             item._normalized_cache_text = cached
         return cached
 
-    def _get_synth_semaphore(self) -> asyncio.Semaphore:
+    def _get_synth_semaphore(self) -> _PrioritySemaphore:
         semaphore = getattr(self, "_tts_synth_semaphore", None)
         if semaphore is None:
-            semaphore = asyncio.Semaphore(TTS_SYNTH_CONCURRENCY)
+            semaphore = _PrioritySemaphore(TTS_SYNTH_CONCURRENCY)
             setattr(self, "_tts_synth_semaphore", semaphore)
         return semaphore
 
@@ -507,6 +601,99 @@ class TTSAudioMixin:
             handles = {}
             setattr(self, "_tts_edge_stream_handles", handles)
         return handles
+
+    def _get_stream_cache_parts(self) -> set[str]:
+        paths = getattr(self, "_tts_stream_cache_parts", None)
+        if not isinstance(paths, set):
+            paths = set()
+            setattr(self, "_tts_stream_cache_parts", paths)
+        return paths
+
+    def _get_edge_prebuffer_profiles(self) -> OrderedDict[str, dict[str, int]]:
+        profiles = getattr(self, "_tts_edge_prebuffer_profiles", None)
+        if not isinstance(profiles, OrderedDict):
+            profiles = OrderedDict()
+            setattr(self, "_tts_edge_prebuffer_profiles", profiles)
+        return profiles
+
+    def _edge_prebuffer_profile_key(self, item: QueueItem) -> str:
+        voice = str(getattr(item, "voice", "") or "default").strip().lower()
+        rate = self._normalize_edge_rate(getattr(item, "rate", "+0%"))
+        match = re.fullmatch(r"([+-])(\d+)%", rate)
+        value = 0
+        if match:
+            value = int(match.group(2)) * (-1 if match.group(1) == "-" else 1)
+        bucket = "slow" if value <= -15 else "fast" if value >= 15 else "normal"
+        return f"{voice}|{bucket}"
+
+    def _edge_prebuffer_ms(self, item: QueueItem) -> tuple[int, str]:
+        key = self._edge_prebuffer_profile_key(item)
+        if not TTS_EDGE_ADAPTIVE_PREBUFFER_ENABLED:
+            return TTS_EDGE_STREAM_PREBUFFER_MS, key
+        profiles = self._get_edge_prebuffer_profiles()
+        profile = profiles.get(key)
+        if profile is None:
+            profile = {
+                "prebuffer_ms": TTS_EDGE_STREAM_PREBUFFER_MS,
+                "stable_streams": 0,
+            }
+            profiles[key] = profile
+        profiles.move_to_end(key)
+        while len(profiles) > 32:
+            profiles.popitem(last=False)
+        return int(profile["prebuffer_ms"]), key
+
+    def _observe_edge_stream_playback(self, handle: EdgeStreamHandle, *, playback_ok: bool) -> None:
+        if handle.engine != "edge" or not TTS_EDGE_ADAPTIVE_PREBUFFER_ENABLED:
+            return
+        profiles = self._get_edge_prebuffer_profiles()
+        profile = profiles.get(handle.prebuffer_profile_key)
+        if profile is None:
+            return
+
+        metrics = self._get_metrics_store()
+        if handle.max_source_read_ms > 0:
+            self._record_latency_sample("edge_source_read_max", handle.max_source_read_ms)
+        if handle.source_read_stalls:
+            metrics["edge_source_read_stalls"] = int(metrics.get("edge_source_read_stalls", 0) or 0) + int(handle.source_read_stalls)
+        stalled = bool(
+            handle.source_read_stalls
+            or handle.error is not None
+            or handle.pipe_error is not None
+        )
+        if stalled:
+            metrics["edge_stream_starvations"] = int(metrics.get("edge_stream_starvations", 0) or 0) + 1
+            previous = int(profile["prebuffer_ms"])
+            profile["prebuffer_ms"] = min(TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS, previous + 40)
+            profile["stable_streams"] = 0
+            if int(profile["prebuffer_ms"]) > previous:
+                metrics["edge_prebuffer_raised"] = int(metrics.get("edge_prebuffer_raised", 0) or 0) + 1
+        elif playback_ok:
+            profile["stable_streams"] = int(profile.get("stable_streams", 0) or 0) + 1
+            if int(profile["stable_streams"]) >= TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS:
+                previous = int(profile["prebuffer_ms"])
+                profile["prebuffer_ms"] = max(TTS_EDGE_ADAPTIVE_PREBUFFER_MIN_MS, previous - 20)
+                profile["stable_streams"] = 0
+                if int(profile["prebuffer_ms"]) < previous:
+                    metrics["edge_prebuffer_lowered"] = int(metrics.get("edge_prebuffer_lowered", 0) or 0) + 1
+        profiles.move_to_end(handle.prebuffer_profile_key)
+
+    def _edge_circuit_is_open(self) -> bool:
+        if not TTS_EDGE_CIRCUIT_BREAKER_ENABLED:
+            return False
+        engine_metrics = self._get_engine_metrics("edge")
+        failures = int(engine_metrics.get("consecutive_failures", 0) or 0)
+        if failures < TTS_EDGE_CIRCUIT_BREAKER_FAILURES:
+            return False
+        last_error_at = float(engine_metrics.get("last_error_at", 0.0) or 0.0)
+        return bool(
+            last_error_at > 0.0
+            and (time.time() - last_error_at) < TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+        )
+
+    def _record_edge_circuit_bypass(self) -> None:
+        metrics = self._get_metrics_store()
+        metrics["edge_circuit_bypasses"] = int(metrics.get("edge_circuit_bypasses", 0) or 0) + 1
 
     def _edge_stream_handle_for_path(self, path: str | None) -> EdgeStreamHandle | None:
         if not path:
@@ -615,8 +802,14 @@ class TTSAudioMixin:
             # stream. Nesse caso é mais seguro adiar a limpeza inteira.
             return
         for handle in active_handles:
-            active_paths.add(os.path.abspath(handle.fifo_path))
-            active_paths.add(os.path.abspath(handle.part_path))
+            if handle.fifo_path:
+                active_paths.add(os.path.abspath(handle.fifo_path))
+            if handle.part_path:
+                active_paths.add(os.path.abspath(handle.part_path))
+        try:
+            active_paths.update(self._get_stream_cache_parts())
+        except RuntimeError:
+            return
         try:
             with os.scandir(_RUNTIME_DIR) as iterator:
                 entries = list(iterator)
@@ -638,16 +831,28 @@ class TTSAudioMixin:
                 with contextlib.suppress(FileNotFoundError, OSError):
                     os.remove(path)
 
+    def _make_runtime_unique_path(self, *, suffix: str) -> str:
+        _ensure_tts_temp_dirs()
+        for _ in range(16):
+            path = os.path.join(_RUNTIME_DIR, f"tts_{uuid.uuid4().hex}{suffix}")
+            if not os.path.lexists(path):
+                return path
+        raise RuntimeError("não foi possível reservar um nome temporário TTS")
+
     def _make_edge_stream_fifo(self) -> str:
-        path = self._make_runtime_temp_file(suffix=".edge-stream.mp3")
-        try:
-            os.remove(path)
-            os.mkfifo(path, mode=0o600)
-            return path
-        except Exception:
-            with contextlib.suppress(FileNotFoundError, OSError):
-                os.remove(path)
-            raise
+        _ensure_tts_temp_dirs()
+        for _ in range(16):
+            path = self._make_runtime_unique_path(suffix=".edge-stream.mp3")
+            try:
+                os.mkfifo(path, mode=0o600)
+                return path
+            except FileExistsError:
+                continue
+            except Exception:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(path)
+                raise
+        raise RuntimeError("não foi possível criar FIFO temporário TTS")
 
     @staticmethod
     def _edge_stream_audio_chunk(message: Any) -> bytes:
@@ -663,10 +868,14 @@ class TTSAudioMixin:
     async def _edge_stream_enqueue(self, handle: EdgeStreamHandle, data: bytes) -> None:
         if not data or handle.consumer_abandoned:
             return
-        for offset in range(0, len(data), TTS_EDGE_STREAM_CHUNK_BYTES):
+        if len(data) <= TTS_EDGE_STREAM_CHUNK_BYTES:
+            await handle.queue.put(data)
+            return
+        data_view = memoryview(data)
+        for offset in range(0, len(data_view), TTS_EDGE_STREAM_CHUNK_BYTES):
             if handle.consumer_abandoned:
                 return
-            await handle.queue.put(data[offset:offset + TTS_EDGE_STREAM_CHUNK_BYTES])
+            await handle.queue.put(data_view[offset:offset + TTS_EDGE_STREAM_CHUNK_BYTES])
 
     async def _signal_stream_end(self, handle: EdgeStreamHandle) -> None:
         handle.producer_done.set()
@@ -689,7 +898,9 @@ class TTSAudioMixin:
             deadline = time.monotonic() + TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS
             while not handle.consumer_abandoned:
                 try:
-                    fd = os.open(handle.fifo_path, os.O_WRONLY | os.O_NONBLOCK)
+                    flags = os.O_WRONLY | os.O_NONBLOCK
+                    flags |= getattr(os, "O_CLOEXEC", 0)
+                    fd = os.open(handle.fifo_path, flags)
                     break
                 except OSError as exc:
                     if exc.errno not in {errno.ENXIO, errno.ENOENT} or time.monotonic() >= deadline:
@@ -698,6 +909,16 @@ class TTSAudioMixin:
 
             if fd is None or handle.consumer_abandoned:
                 return
+            if fcntl is not None and hasattr(fcntl, "F_SETPIPE_SZ"):
+                with contextlib.suppress(OSError, ValueError):
+                    current_pipe_bytes = (
+                        fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ)
+                        if hasattr(fcntl, "F_GETPIPE_SZ")
+                        else 0
+                    )
+                    if current_pipe_bytes < TTS_EDGE_STREAM_PIPE_BYTES:
+                        fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, TTS_EDGE_STREAM_PIPE_BYTES)
+            handle.writer_ready.set()
 
             while not handle.consumer_abandoned:
                 try:
@@ -726,19 +947,44 @@ class TTSAudioMixin:
         except (BrokenPipeError, ConnectionError, OSError) as exc:
             handle.pipe_error = exc
             handle.consumer_abandoned = True
+            producer_task = handle.producer_task
+            if producer_task is not None and not producer_task.done():
+                producer_task.cancel()
             self._log_debug(
                 f"[tts_edge_stream] consumidor encerrou | guild={handle.item.guild_id} erro={type(exc).__name__}: {exc}"
             )
         finally:
+            handle.writer_ready.set()
             if fd is not None:
                 with contextlib.suppress(OSError):
                     os.close(fd)
 
+    @staticmethod
+    def _close_edge_stream_reader_anchor(handle: EdgeStreamHandle) -> None:
+        with handle.reader_anchor_lock:
+            fd = handle.reader_anchor_fd
+            handle.reader_anchor_fd = None
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
     async def _activate_edge_stream(self, handle: EdgeStreamHandle) -> None:
         if handle.activated:
             return
-        handle.activated = True
-        handle.writer_task = asyncio.create_task(self._edge_stream_pipe_writer(handle))
+        # O_RDWR mantém também um escritor vivo até o primeiro frame. Assim,
+        # até streams muito curtos não fecham o FIFO antes de o FFmpeg abri-lo.
+        flags = os.O_RDWR | os.O_NONBLOCK
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        handle.reader_anchor_fd = os.open(handle.fifo_path, flags)
+        try:
+            handle.activated = True
+            handle.writer_task = asyncio.create_task(self._edge_stream_pipe_writer(handle))
+            await asyncio.wait_for(handle.writer_ready.wait(), timeout=0.5)
+            if handle.pipe_error is not None:
+                raise RuntimeError("escritor FIFO do TTS não iniciou") from handle.pipe_error
+        except BaseException:
+            self._close_edge_stream_reader_anchor(handle)
+            raise
 
     async def _finalize_edge_stream(self, handle: EdgeStreamHandle, *, cancel: bool = False) -> None:
         if handle.cleaned:
@@ -758,13 +1004,16 @@ class TTSAudioMixin:
             with contextlib.suppress(BaseException):
                 await asyncio.gather(*tasks, return_exceptions=True)
         self._release_edge_stream_slot(handle)
+        self._close_edge_stream_reader_anchor(handle)
 
         handle.cleaned = True
-        self._get_edge_stream_handles().pop(os.path.abspath(handle.fifo_path), None)
-        with contextlib.suppress(FileNotFoundError, OSError):
-            os.remove(handle.fifo_path)
-        with contextlib.suppress(FileNotFoundError, OSError):
-            os.remove(handle.part_path)
+        if handle.fifo_path:
+            self._get_edge_stream_handles().pop(os.path.abspath(handle.fifo_path), None)
+            with contextlib.suppress(FileNotFoundError, OSError):
+                os.remove(handle.fifo_path)
+        if handle.part_path and (handle.cache_task is None or handle.cache_task.done()):
+            with contextlib.suppress(FileNotFoundError, OSError):
+                os.remove(handle.part_path)
 
     async def _discard_edge_stream_path(self, path: str | None) -> None:
         handle = self._edge_stream_handle_for_path(path)
@@ -789,10 +1038,13 @@ class TTSAudioMixin:
                 if task is not None and not task.done():
                     task.cancel()
             self._release_edge_stream_slot(handle)
-            with contextlib.suppress(FileNotFoundError, OSError):
-                os.remove(handle.fifo_path)
-            with contextlib.suppress(FileNotFoundError, OSError):
-                os.remove(handle.part_path)
+            self._close_edge_stream_reader_anchor(handle)
+            if handle.fifo_path:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(handle.fifo_path)
+            if handle.part_path and (handle.cache_task is None or handle.cache_task.done()):
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(handle.part_path)
 
     async def _get_phone_worker_http_session(self) -> aiohttp.ClientSession:
         session = getattr(self, "_phone_worker_http_session", None)
@@ -1306,6 +1558,19 @@ class TTSAudioMixin:
                 "edge_stream_first_audio_total_ms": 0.0,
                 "edge_stream_first_audio_samples": 0,
                 "edge_stream_audio_bytes": 0,
+                "edge_slot_wait_total_ms": 0.0,
+                "edge_slot_wait_samples": 0,
+                "edge_network_first_audio_total_ms": 0.0,
+                "edge_network_first_audio_samples": 0,
+                "edge_local_handoff_total_ms": 0.0,
+                "edge_local_handoff_samples": 0,
+                "edge_first_chunk_bytes_total": 0,
+                "edge_first_chunk_bytes_samples": 0,
+                "edge_stream_starvations": 0,
+                "edge_source_read_stalls": 0,
+                "edge_prebuffer_raised": 0,
+                "edge_prebuffer_lowered": 0,
+                "edge_circuit_bypasses": 0,
                 "gtts_stream_started": 0,
                 "gtts_stream_completed": 0,
                 "gtts_stream_failures": 0,
@@ -1854,6 +2119,32 @@ class TTSAudioMixin:
                 2,
             ) if int(metrics.get("edge_stream_first_audio_samples", 0) or 0) else 0.0,
             "edge_stream_audio_bytes": int(metrics.get("edge_stream_audio_bytes", 0) or 0),
+            "avg_edge_slot_wait_ms": round(
+                float(metrics.get("edge_slot_wait_total_ms", 0.0) or 0.0)
+                / int(metrics.get("edge_slot_wait_samples", 0) or 1),
+                2,
+            ) if int(metrics.get("edge_slot_wait_samples", 0) or 0) else 0.0,
+            "avg_edge_network_first_audio_ms": round(
+                float(metrics.get("edge_network_first_audio_total_ms", 0.0) or 0.0)
+                / int(metrics.get("edge_network_first_audio_samples", 0) or 1),
+                2,
+            ) if int(metrics.get("edge_network_first_audio_samples", 0) or 0) else 0.0,
+            "avg_edge_local_handoff_ms": round(
+                float(metrics.get("edge_local_handoff_total_ms", 0.0) or 0.0)
+                / int(metrics.get("edge_local_handoff_samples", 0) or 1),
+                2,
+            ) if int(metrics.get("edge_local_handoff_samples", 0) or 0) else 0.0,
+            "avg_edge_first_chunk_bytes": round(
+                float(metrics.get("edge_first_chunk_bytes_total", 0.0) or 0.0)
+                / int(metrics.get("edge_first_chunk_bytes_samples", 0) or 1),
+                2,
+            ) if int(metrics.get("edge_first_chunk_bytes_samples", 0) or 0) else 0.0,
+            "edge_stream_starvations": int(metrics.get("edge_stream_starvations", 0) or 0),
+            "edge_source_read_stalls": int(metrics.get("edge_source_read_stalls", 0) or 0),
+            "edge_prebuffer_raised": int(metrics.get("edge_prebuffer_raised", 0) or 0),
+            "edge_prebuffer_lowered": int(metrics.get("edge_prebuffer_lowered", 0) or 0),
+            "edge_prebuffer_profiles": int(len(self._get_edge_prebuffer_profiles())),
+            "edge_circuit_bypasses": int(metrics.get("edge_circuit_bypasses", 0) or 0),
             "gtts_stream_started": int(metrics.get("gtts_stream_started", 0) or 0),
             "gtts_stream_completed": int(metrics.get("gtts_stream_completed", 0) or 0),
             "gtts_stream_failures": int(metrics.get("gtts_stream_failures", 0) or 0),
@@ -2004,8 +2295,14 @@ class TTSAudioMixin:
         except RuntimeError:
             return
         for handle in active_handles:
-            protected.add(os.path.abspath(handle.part_path))
-            protected.add(os.path.abspath(handle.fifo_path))
+            if handle.part_path:
+                protected.add(os.path.abspath(handle.part_path))
+            if handle.fifo_path:
+                protected.add(os.path.abspath(handle.fifo_path))
+        try:
+            protected.update(self._get_stream_cache_parts())
+        except RuntimeError:
+            return
         files = self._list_tmp_audio_files()
         total_files = len(files)
         total_bytes = sum(size for _, _, size, _ in files)
@@ -2188,6 +2485,52 @@ class TTSAudioMixin:
         self._schedule_cache_maintenance(state, protected_paths={path})
         return path
 
+    async def _finalize_progressive_stream_cache(self, handle: EdgeStreamHandle) -> None:
+        part_path = str(handle.part_path or "")
+        part_abs = os.path.abspath(part_path) if part_path else ""
+        try:
+            cached_path = await self._store_in_cache(handle.state, handle.item, part_path)
+            cached_abs = os.path.abspath(cached_path) if cached_path else ""
+            if cached_path and os.path.isfile(cached_path) and cached_abs != part_abs:
+                handle.cache_path = cached_path
+                if not bool(getattr(handle.item, "_tts_agent_inline_cache", False)):
+                    self._schedule_worker_turbo_cache_store(handle.item, cached_path)
+            else:
+                handle.cache_error = RuntimeError("cache progressivo não foi confirmado")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            handle.cache_error = exc
+            logger.warning(
+                "[tts_stream] áudio concluído, mas cache local falhou | guild=%s engine=%s erro=%s",
+                handle.item.guild_id,
+                handle.engine,
+                exc,
+            )
+        finally:
+            if part_abs:
+                self._get_stream_cache_parts().discard(part_abs)
+            if part_path and os.path.isfile(part_path):
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(part_path)
+
+    def _schedule_progressive_stream_cache(self, handle: EdgeStreamHandle) -> None:
+        if (
+            not handle.store_in_cache
+            or not handle.part_path
+            or not os.path.isfile(handle.part_path)
+        ):
+            return
+        part_abs = os.path.abspath(handle.part_path)
+        self._get_stream_cache_parts().add(part_abs)
+        task = self._schedule_tts_background(self._finalize_progressive_stream_cache(handle))
+        if task is None:
+            self._get_stream_cache_parts().discard(part_abs)
+            with contextlib.suppress(FileNotFoundError, OSError):
+                os.remove(handle.part_path)
+            return
+        handle.cache_task = task
+
     def _cache_key(self, item: QueueItem) -> str:
         cached_key = getattr(item, "_cache_key_value", None)
         if cached_key is not None:
@@ -2366,7 +2709,8 @@ class TTSAudioMixin:
         if not callable(stream):
             raise RuntimeError("versão instalada do gTTS não oferece stream()")
 
-        with open(handle.part_path, "wb") as output:
+        output = None
+        try:
             for raw_chunk in stream():
                 if handle.stop_requested.is_set():
                     return
@@ -2387,7 +2731,33 @@ class TTSAudioMixin:
                             return
                 if not accepted:
                     return
-                output.write(chunk)
+                if output is None and handle.part_path:
+                    try:
+                        output = open(
+                            handle.part_path,
+                            "xb",
+                            buffering=TTS_EDGE_STREAM_CACHE_BUFFER_BYTES,
+                        )
+                    except OSError as exc:
+                        handle.cache_error = exc
+                        failed_path = handle.part_path
+                        handle.part_path = ""
+                        with contextlib.suppress(FileNotFoundError, OSError):
+                            os.remove(failed_path)
+                if output is not None:
+                    try:
+                        output.write(chunk)
+                    except OSError as exc:
+                        handle.cache_error = exc
+                        output.close()
+                        output = None
+                        failed_path = handle.part_path
+                        handle.part_path = ""
+                        with contextlib.suppress(FileNotFoundError, OSError):
+                            os.remove(failed_path)
+        finally:
+            if output is not None:
+                output.close()
 
     async def _gtts_stream_producer(
         self,
@@ -2445,8 +2815,9 @@ class TTSAudioMixin:
                 await self._signal_stream_end(handle)
 
         if not stream_ok:
-            with contextlib.suppress(FileNotFoundError, OSError):
-                os.remove(handle.part_path)
+            if handle.part_path:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(handle.part_path)
             return
 
         duration_ms = max(0.0, (time.monotonic() - handle.started_at) * 1000.0)
@@ -2456,20 +2827,7 @@ class TTSAudioMixin:
         metrics["gtts_stream_audio_bytes"] = int(metrics.get("gtts_stream_audio_bytes", 0) or 0) + int(handle.audio_bytes)
         self._schedule_persistent_synt_success(handle.item.guild_id, "gtts")
 
-        if not handle.store_in_cache or not os.path.isfile(handle.part_path):
-            return
-        try:
-            cached_path = await self._store_in_cache(handle.state, handle.item, handle.part_path)
-            if cached_path and os.path.isfile(cached_path) and os.path.abspath(cached_path) != os.path.abspath(handle.part_path):
-                handle.cache_path = cached_path
-                if not bool(getattr(handle.item, "_tts_agent_inline_cache", False)):
-                    self._schedule_worker_turbo_cache_store(handle.item, cached_path)
-        except Exception as exc:
-            logger.warning(
-                "[tts_gtts_stream] áudio concluído, mas cache local falhou | guild=%s erro=%s",
-                handle.item.guild_id,
-                exc,
-            )
+        self._schedule_progressive_stream_cache(handle)
 
     async def _prepare_gtts_stream(
         self,
@@ -2493,7 +2851,8 @@ class TTSAudioMixin:
         fifo_path = ""
         handle: EdgeStreamHandle | None = None
         try:
-            part_path = self._make_runtime_temp_file(suffix=".edge-stream.tmp")
+            if store_in_cache:
+                part_path = self._make_runtime_unique_path(suffix=".edge-stream.tmp")
             fifo_path = self._make_edge_stream_fifo()
             handle = EdgeStreamHandle(
                 fifo_path=fifo_path,
@@ -2551,7 +2910,14 @@ class TTSAudioMixin:
 
         path = self._make_runtime_temp_file(suffix=".mp3")
         try:
-            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+            communicate = edge_tts.Communicate(
+                text=text,
+                voice=voice,
+                rate=rate,
+                pitch=pitch,
+                connect_timeout=TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
+                receive_timeout=TTS_EDGE_RECEIVE_TIMEOUT_SECONDS,
+            )
             async with self._get_synth_semaphore():
                 await asyncio.wait_for(communicate.save(path), timeout=TTS_EDGE_TIMEOUT_SECONDS)
             return path
@@ -2566,18 +2932,48 @@ class TTSAudioMixin:
         self,
         handle: EdgeStreamHandle,
         stream_iterator: Any,
+        initial_audio: bytes,
     ) -> None:
         stream_ok = False
+        output = None
         try:
+            # Devolve o handle ao playback antes de começar qualquer I/O de cache.
+            await asyncio.sleep(0)
+            if handle.part_path:
+                try:
+                    output = open(
+                        handle.part_path,
+                        "xb",
+                        buffering=TTS_EDGE_STREAM_CACHE_BUFFER_BYTES,
+                    )
+                    output.write(initial_audio)
+                except OSError as exc:
+                    handle.cache_error = exc
+                    if output is not None:
+                        output.close()
+                        output = None
+                    failed_path = handle.part_path
+                    handle.part_path = ""
+                    with contextlib.suppress(FileNotFoundError, OSError):
+                        os.remove(failed_path)
             async with asyncio.timeout(TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS):
-                with open(handle.part_path, "ab") as output:
-                    async for message in stream_iterator:
-                        data = self._edge_stream_audio_chunk(message)
-                        if not data:
-                            continue
-                        await self._edge_stream_enqueue(handle, data)
-                        output.write(data)
-                        handle.audio_bytes += len(data)
+                async for message in stream_iterator:
+                    data = self._edge_stream_audio_chunk(message)
+                    if not data:
+                        continue
+                    await self._edge_stream_enqueue(handle, data)
+                    handle.audio_bytes += len(data)
+                    if output is not None:
+                        try:
+                            output.write(data)
+                        except OSError as exc:
+                            handle.cache_error = exc
+                            output.close()
+                            output = None
+                            failed_path = handle.part_path
+                            handle.part_path = ""
+                            with contextlib.suppress(FileNotFoundError, OSError):
+                                os.remove(failed_path)
             stream_ok = True
         except asyncio.CancelledError:
             raise
@@ -2594,6 +2990,8 @@ class TTSAudioMixin:
                 exc,
             )
         finally:
+            if output is not None:
+                output.close()
             close_stream = getattr(stream_iterator, "aclose", None)
             if callable(close_stream):
                 with contextlib.suppress(BaseException):
@@ -2603,8 +3001,9 @@ class TTSAudioMixin:
                 await self._signal_stream_end(handle)
 
         if not stream_ok:
-            with contextlib.suppress(FileNotFoundError, OSError):
-                os.remove(handle.part_path)
+            if handle.part_path:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(handle.part_path)
             return
 
         duration_ms = max(0.0, (time.monotonic() - handle.started_at) * 1000.0)
@@ -2614,20 +3013,7 @@ class TTSAudioMixin:
         metrics["edge_stream_audio_bytes"] = int(metrics.get("edge_stream_audio_bytes", 0) or 0) + int(handle.audio_bytes)
         self._schedule_persistent_synt_success(handle.item.guild_id, "edge")
 
-        if not handle.store_in_cache or not os.path.isfile(handle.part_path):
-            return
-        try:
-            cached_path = await self._store_in_cache(handle.state, handle.item, handle.part_path)
-            if cached_path and os.path.isfile(cached_path) and os.path.abspath(cached_path) != os.path.abspath(handle.part_path):
-                handle.cache_path = cached_path
-                if not bool(getattr(handle.item, "_tts_agent_inline_cache", False)):
-                    self._schedule_worker_turbo_cache_store(handle.item, cached_path)
-        except Exception as exc:
-            logger.warning(
-                "[tts_edge_stream] áudio concluído, mas cache local falhou | guild=%s erro=%s",
-                handle.item.guild_id,
-                exc,
-            )
+        self._schedule_progressive_stream_cache(handle)
 
     async def _prepare_edge_stream(
         self,
@@ -2651,25 +3037,39 @@ class TTSAudioMixin:
         part_path = ""
         fifo_path = ""
         handle: EdgeStreamHandle | None = None
+        slot_wait_ms = 0.0
         try:
-            if bool(getattr(item, "_tts_prefetch", False)):
+            is_prefetch = bool(getattr(item, "_tts_prefetch", False))
+            if is_prefetch:
                 prefetch_semaphore = self._get_edge_prefetch_semaphore()
                 await prefetch_semaphore.acquire()
                 prefetch_acquired = True
-            await semaphore.acquire()
+            slot_wait_started_at = time.monotonic()
+            await semaphore.acquire(foreground=not is_prefetch)
+            slot_wait_ms = max(0.0, (time.monotonic() - slot_wait_started_at) * 1000.0)
             semaphore_acquired = True
+            self._record_average_metric(
+                "edge_slot_wait_total_ms",
+                "edge_slot_wait_samples",
+                slot_wait_ms,
+            )
+            self._record_latency_sample("edge_slot_wait", slot_wait_ms)
             communicate = edge_tts.Communicate(
                 text=item.text,
                 voice=voice,
                 rate=rate,
                 pitch=pitch,
+                connect_timeout=TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
+                receive_timeout=TTS_EDGE_RECEIVE_TIMEOUT_SECONDS,
             )
             stream_iterator = communicate.stream().__aiter__()
-            # edge-tts usa MP3 48 kbps. Esse alvo corresponde a cerca de
-            # 300 ms por padrão e normalmente cabe no primeiro frame recebido.
-            prebuffer_bytes = max(1024, int(6000 * (TTS_EDGE_STREAM_PREBUFFER_MS / 1000.0)))
+            # edge-tts usa MP3 48 kbps: aproximadamente seis bytes por ms.
+            prebuffer_ms, prebuffer_profile_key = self._edge_prebuffer_ms(item)
+            prebuffer_bytes = max(1024, int(6 * prebuffer_ms))
             initial_parts: list[bytes] = []
             initial_size = 0
+            first_chunk_bytes = 0
+            network_first_audio_ms = 0.0
             deadline = time.monotonic() + TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS
             while initial_size < prebuffer_bytes:
                 remaining = deadline - time.monotonic()
@@ -2682,19 +3082,26 @@ class TTSAudioMixin:
                 data = self._edge_stream_audio_chunk(message)
                 if not data:
                     continue
+                if not initial_parts:
+                    first_chunk_bytes = len(data)
+                    network_first_audio_ms = max(
+                        0.0,
+                        (time.monotonic() - started_at) * 1000.0,
+                    )
                 initial_parts.append(data)
                 initial_size += len(data)
 
             if initial_size <= 0:
                 raise RuntimeError("Edge não enviou áudio no início do stream")
 
-            part_path = self._make_runtime_temp_file(suffix=".edge-stream.tmp")
-            with open(part_path, "wb") as output:
-                for data in initial_parts:
-                    output.write(data)
+            prebuffer_ready_at = time.monotonic()
+            if store_in_cache:
+                part_path = self._make_runtime_unique_path(suffix=".edge-stream.tmp")
             fifo_path = self._make_edge_stream_fifo()
 
             first_audio_ms = max(0.0, (time.monotonic() - started_at) * 1000.0)
+            local_handoff_ms = max(0.0, (time.monotonic() - prebuffer_ready_at) * 1000.0)
+            initial_audio = initial_parts[0] if len(initial_parts) == 1 else b"".join(initial_parts)
             handle = EdgeStreamHandle(
                 fifo_path=fifo_path,
                 part_path=part_path,
@@ -2708,11 +3115,17 @@ class TTSAudioMixin:
                 semaphore=semaphore,
                 prefetch_semaphore=prefetch_semaphore,
                 audio_bytes=initial_size,
+                first_chunk_bytes=first_chunk_bytes,
+                network_first_audio_ms=network_first_audio_ms,
+                local_handoff_ms=local_handoff_ms,
+                synth_slot_wait_ms=slot_wait_ms,
+                prebuffer_ms=prebuffer_ms,
+                prebuffer_profile_key=prebuffer_profile_key,
             )
             handle.first_audio_ready.set()
             # Um único item inicial evita bloquear a preparação mesmo se o SDK
             # entregar um fragmento maior que o tamanho normal dos chunks.
-            handle.queue.put_nowait(b"".join(initial_parts))
+            handle.queue.put_nowait(initial_audio)
             self._get_edge_stream_handles()[os.path.abspath(fifo_path)] = handle
             setattr(item, "_edge_stream_fifo_path", fifo_path)
             self._record_average_metric(
@@ -2721,11 +3134,26 @@ class TTSAudioMixin:
                 first_audio_ms,
             )
             self._record_latency_sample("edge_first_audio", first_audio_ms)
+            self._record_average_metric(
+                "edge_network_first_audio_total_ms",
+                "edge_network_first_audio_samples",
+                network_first_audio_ms,
+            )
+            self._record_average_metric(
+                "edge_local_handoff_total_ms",
+                "edge_local_handoff_samples",
+                local_handoff_ms,
+            )
+            metrics["edge_first_chunk_bytes_total"] = int(metrics.get("edge_first_chunk_bytes_total", 0) or 0) + first_chunk_bytes
+            metrics["edge_first_chunk_bytes_samples"] = int(metrics.get("edge_first_chunk_bytes_samples", 0) or 0) + 1
+            self._record_latency_sample("edge_network_first_audio", network_first_audio_ms)
+            self._record_latency_sample("edge_local_handoff", local_handoff_ms)
+            self._record_latency_sample("edge_ready", first_audio_ms)
             handle.producer_task = asyncio.create_task(
-                self._edge_stream_producer(handle, stream_iterator)
+                self._edge_stream_producer(handle, stream_iterator, initial_audio)
             )
             self._log_debug(
-                f"[tts_edge_stream] pronto para playback | guild={item.guild_id} first_audio_ms={first_audio_ms:.1f} prebuffer={initial_size}"
+                f"[tts_edge_stream] pronto para playback | guild={item.guild_id} first_audio_ms={first_audio_ms:.1f} prebuffer_ms={prebuffer_ms} prebuffer={initial_size}"
             )
             return handle
         except BaseException as exc:
@@ -3626,7 +4054,20 @@ class TTSAudioMixin:
     def _audio_file_should_use_opus_source(self, path: str) -> bool:
         return bool(TTS_OPUS_PLAYBACK_ENABLED and self._path_audio_format(path) == "ogg" and getattr(discord, "FFmpegOpusAudio", None) is not None)
 
+    def _tts_ffmpeg_before_options(self, path: str) -> str:
+        options = str(TTS_FFMPEG_BEFORE_OPTIONS or "").strip()
+        handle = self._edge_stream_handle_for_path(path)
+        if (
+            TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED
+            and handle is not None
+            and handle.engine == "edge"
+            and re.search(r"(?:^|\s)-f\s+mp3(?:\s|$)", options) is None
+        ):
+            options = f"{options} -f mp3".strip()
+        return options
+
     def _make_discord_tts_source(self, path: str) -> tuple[Any, str]:
+        before_options = self._tts_ffmpeg_before_options(path)
         if self._audio_file_should_use_opus_source(path):
             opus_cls = getattr(discord, "FFmpegOpusAudio", None)
             if opus_cls is not None:
@@ -3634,7 +4075,7 @@ class TTSAudioMixin:
                     try:
                         return opus_cls(
                             path,
-                            before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+                            before_options=before_options,
                             options=TTS_FFMPEG_OPTIONS,
                             codec="copy",
                         ), "ffmpeg_opus_copy"
@@ -3646,14 +4087,14 @@ class TTSAudioMixin:
                 try:
                     return opus_cls(
                         path,
-                        before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+                        before_options=before_options,
                         options=TTS_FFMPEG_OPTIONS,
                     ), "ffmpeg_opus"
                 except Exception as exc:
                     logger.debug("[tts_voice] FFmpegOpusAudio falhou; usando PCM fallback | path=%s erro=%s", path, exc)
         return discord.FFmpegPCMAudio(
             path,
-            before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+            before_options=before_options,
             options=TTS_FFMPEG_OPTIONS,
         ), "ffmpeg_pcm"
 
@@ -4593,6 +5034,17 @@ class TTSAudioMixin:
                 return await self._generate_piper_fallback_file(item)
 
         if item.engine == "edge":
+            if self._edge_circuit_is_open():
+                self._record_edge_circuit_bypass()
+                logger.info(
+                    "[tts_voice] circuito Edge em cooldown; usando gTTS sem aguardar nova falha | guild=%s",
+                    item.guild_id,
+                )
+                return await self._run_timed_generation(
+                    "gtts",
+                    lambda: self._generate_gtts_file(item.text, item.language),
+                    guild_id=item.guild_id,
+                )
             try:
                 return await self._run_timed_generation(
                     "edge",
@@ -4633,6 +5085,15 @@ class TTSAudioMixin:
             existing = self._get_inflight_cache_tasks().get(key)
             if existing is not None:
                 return await existing
+
+            if self._edge_circuit_is_open():
+                self._record_edge_circuit_bypass()
+                fallback_path = await self._run_timed_generation(
+                    "gtts",
+                    lambda: self._generate_gtts_file(item.text, item.language),
+                    guild_id=item.guild_id,
+                )
+                return fallback_path, True
 
             if text_length <= TTS_CACHEABLE_TEXT_MAX_LENGTH:
                 store_in_cache = True
@@ -4801,10 +5262,19 @@ class TTSAudioMixin:
                         loop.call_soon_threadsafe(finished.set_result, None)
 
             def _on_first_frame(frame_at: float, first_read_ms: float) -> None:
+                if edge_stream is not None:
+                    self._close_edge_stream_reader_anchor(edge_stream)
                 def _publish() -> None:
                     if not first_frame.done():
                         first_frame.set_result((frame_at, first_read_ms))
                 loop.call_soon_threadsafe(_publish)
+
+            def _on_stream_read(read_ms: float) -> None:
+                if edge_stream is None or edge_stream.engine != "edge":
+                    return
+                edge_stream.max_source_read_ms = max(edge_stream.max_source_read_ms, read_ms)
+                if read_ms >= TTS_EDGE_STREAM_STALL_THRESHOLD_MS:
+                    edge_stream.source_read_stalls += 1
 
             source = None
             try:
@@ -4851,7 +5321,11 @@ class TTSAudioMixin:
                 source_setup_started_at = time.monotonic()
                 source, source_kind = self._make_discord_tts_source(path)
                 if callable(getattr(source, "read", None)):
-                    source = _FirstFrameAudioSource(source, _on_first_frame)
+                    source = _FirstFrameAudioSource(
+                        source,
+                        _on_first_frame,
+                        _on_stream_read if edge_stream is not None else None,
+                    )
                 source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
 
                 play_call_started_at = time.monotonic()
@@ -4915,6 +5389,10 @@ class TTSAudioMixin:
                 if playback_counted:
                     setattr(self, "_tts_active_playbacks", max(0, int(getattr(self, "_tts_active_playbacks", 0) or 0) - 1))
                 if edge_stream is not None:
+                    self._observe_edge_stream_playback(
+                        edge_stream,
+                        playback_ok=stream_playback_ok,
+                    )
                     await self._finalize_edge_stream(edge_stream, cancel=not stream_playback_ok)
 
     def _is_already_playing_audio_error(self, exc: Exception | str) -> bool:

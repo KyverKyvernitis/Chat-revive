@@ -5727,7 +5727,7 @@ class TTSAudioMixin:
         vc = await self._maybe_await(self._ensure_connected(
             guild,
             target_channel,
-            notify_owner_on_failure=True,
+            report_failure=True,
             failure_context=f"entrada automática do TTS para reproduzir mensagem de {item.author_id}",
         ))
         if vc is None:

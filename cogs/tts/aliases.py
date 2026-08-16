@@ -34,10 +34,15 @@ _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
         "display": ("set lang",),
         "accepts_argument": True,
     },
+    "owner_dm_test": {
+        "aliases": ("testdm",),
+        "display": ("testdm",),
+        "accepts_argument": False,
+    },
     "panel_user": {
-        "aliases": ("panel", "painel", "p"),
-        "display": ("panel", "p"),
-        # `_panel @usuário`/`_p @usuário` abre um painel de edição de usuário
+        "aliases": ("tts", "panel", "painel", "p"),
+        "display": ("tts", "panel", "p"),
+        # `_tts @usuário` e aliases legados abrem um painel de edição de usuário
         # para staff. O dispatcher valida o alvo antes de consumir `_p ...`,
         # porque `_p` também pode existir como alias do player de música.
         "accepts_argument": True,

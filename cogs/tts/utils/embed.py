@@ -97,11 +97,6 @@ def _has_field(embed: discord.Embed, *names: str) -> bool:
     return any(str(getattr(field, "name", "") or "").lower() in wanted for field in (getattr(embed, "fields", []) or []))
 
 
-def _history_value(embed: discord.Embed) -> str:
-    value = _field_value(embed, "Últimas alterações", "🕘 Últimas alterações", default="")
-    return "" if value == "Não definido" else value
-
-
 def _prefix_example(prefix: object) -> str:
     value = _clean_display_value(prefix, fallback=".")
     return f"`{value}texto`"
@@ -185,10 +180,6 @@ def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) 
             spoken_name,
         ])
 
-    history = _history_value(embed)
-    if history:
-        lines.extend(["", "**Últimas alterações**", history])
-
     return "\n".join(lines).strip()
 
 
@@ -196,11 +187,9 @@ def build_expired_panel_embed(*, slash_mention: str, prefix_hint: str) -> discor
     return make_embed("Esse painel expirou", f"Use o comando de barra {slash_mention} ou prefixo {prefix_hint} para abrir outro painel.", ok=False)
 
 
-def build_toggle_embed(*, auto_leave_enabled: bool, history_text: str = "") -> discord.Embed:
+def build_toggle_embed(*, auto_leave_enabled: bool) -> discord.Embed:
     embed = discord.Embed(title="Painel de toggles do TTS", description="Use o botão abaixo para ligar ou desligar o Auto Leave do TTS.", color=discord.Color.blurple())
     embed.add_field(name="Auto leave", value="`Ativado`" if bool(auto_leave_enabled) else "`Desativado`", inline=True)
-    if history_text:
-        embed.add_field(name="Últimas alterações", value=history_text, inline=False)
     return embed
 
 
@@ -245,7 +234,7 @@ def spoken_name_status_text(*, active_name: str, active_source: str, custom_name
     return f"`{active_name}` (padrão)", active_source
 
 
-def build_status_embed(*, member: discord.abc.User | None, target_name: str, user_id: int, viewer_user_id: int, public: bool, is_connected: bool, is_playing: bool, queue_size: int, resolved: dict, user_settings: dict, user_channel: str, bot_channel: str, spoken_name_text: str, history_text: str, google_language_default: str = "", google_voice_default: str = "", google_rate_default: str = "", google_pitch_default: str = "") -> discord.Embed:
+def build_status_embed(*, member: discord.abc.User | None, target_name: str, user_id: int, viewer_user_id: int, public: bool, is_connected: bool, is_playing: bool, queue_size: int, resolved: dict, user_settings: dict, user_channel: str, bot_channel: str, spoken_name_text: str, google_language_default: str = "", google_voice_default: str = "", google_rate_default: str = "", google_pitch_default: str = "") -> discord.Embed:
     if public:
         title = f"📡 Status de TTS de {target_name}"
         description = f"Resumo público das configurações atuais de TTS de {target_name}."
@@ -268,14 +257,10 @@ def build_status_embed(*, member: discord.abc.User | None, target_name: str, use
     source_line = "**Origem:** usando padrões do servidor" if not customized_keys else "**Personalizado:** " + ", ".join(customized_keys)
     embed.add_field(name="🎛️ Configuração ativa", value=(f"**Engine:** {status_engine_label(str(resolved.get('engine', 'gtts')))}\n" f"**gTTS idioma:** `{resolved.get('gtts_language', resolved.get('language', 'Não definido'))}`\n" f"**Edge voz:** `{resolved.get('edge_voice', resolved.get('voice', 'Não definido'))}`\n" f"**Edge velocidade:** `{resolved.get('edge_rate', resolved.get('rate', '+0%'))}`\n" f"**Edge tom:** `{resolved.get('edge_pitch', resolved.get('pitch', '+0Hz'))}`\n" f"**Apelido falado:** {spoken_name_text}\n" f"{source_line}"), inline=False)
     embed.add_field(name="🛰️ Estado atual", value=(f"**Você:** {user_channel}\n" f"**Bot:** {bot_channel}\n" f"**Conexão:** {status_badge(is_connected, on='Conectado', off='Desconectado')}\n" f"**Reprodução:** {status_badge(is_playing, on='Falando agora', off='Parado')}\n" f"**Fila:** `{queue_label}`"), inline=False)
-    if history_text:
-        embed.add_field(name="🕘 Últimas alterações", value=history_text, inline=False)
-    footer_text = "Sincronizado com o histórico do seu tts menu." if not public and int(user_id or 0) == int(viewer_user_id or 0) else "Sincronizado com o histórico do tts menu."
-    embed.set_footer(text=footer_text)
     return embed
 
 
-def build_settings_embed(*, title: str, description: str, resolved: dict, guild_defaults: dict, history_text: str, server: bool, panel_kind: str, spoken_name_text: str | None, google_language_default: str = "", google_voice_default: str = "", google_rate_default: str = "", google_pitch_default: str = "", google_prefix_default: str = "", ignored_tts_role_text: str | None = None) -> discord.Embed:
+def build_settings_embed(*, title: str, description: str, resolved: dict, guild_defaults: dict, server: bool, panel_kind: str, spoken_name_text: str | None, google_language_default: str = "", google_voice_default: str = "", google_rate_default: str = "", google_pitch_default: str = "", google_prefix_default: str = "", ignored_tts_role_text: str | None = None) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
     embed.add_field(name="Voz do Edge", value=f"`{resolved.get('edge_voice', resolved.get('voice', 'Não definido'))}`", inline=True)
     embed.add_field(name="Idioma do gTTS", value=f"`{resolved.get('gtts_language', resolved.get('language', 'Não definido'))}`", inline=True)
@@ -292,8 +277,6 @@ def build_settings_embed(*, title: str, description: str, resolved: dict, guild_
         embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '_')}`", inline=True)
         embed.add_field(name="Autor antes da frase", value="`Ativado`" if bool(guild_defaults.get('announce_author', False)) else "`Desativado`", inline=True)
         embed.add_field(name="Cargo ignorado", value=ignored_tts_role_text or "`Nenhum`", inline=True)
-    if history_text:
-        embed.add_field(name="Últimas alterações", value=history_text, inline=False)
     embed.set_footer(text="Detalhes técnicos preservados para o painel avançado." if server else "Ajustes salvos para este usuário neste servidor.")
     return embed
 

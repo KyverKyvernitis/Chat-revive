@@ -91,6 +91,8 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
         return PrefixControlCommand("reset", extract_prefixed_argument(raw, bot_prefix, kind="reset"))
     if matches_prefixed_command(raw, bot_prefix, kind="set_lang"):
         return PrefixControlCommand("set_lang", extract_prefixed_argument(raw, bot_prefix, kind="set_lang"))
+    if matches_prefixed_command(raw, bot_prefix, kind="owner_dm_test"):
+        return PrefixControlCommand("owner_dm_test")
     panel_user = _match_prefixed_command_with_argument(raw, bot_prefix, kind="panel_user")
     if panel_user is not None:
         alias, argument = panel_user
@@ -176,6 +178,9 @@ async def dispatch_prefix_control_command(cog: Any, message: Any, command: Prefi
         return True
     if kind == "set_lang":
         await cog._prefix_set_lang(message, command.argument)
+        return True
+    if kind == "owner_dm_test":
+        await cog._prefix_test_owner_dm(message)
         return True
     if kind == "panel_user":
         return bool(await cog._send_prefix_panel(

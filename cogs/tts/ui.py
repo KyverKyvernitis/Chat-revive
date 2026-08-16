@@ -1387,8 +1387,6 @@ async def _save_tts_modal_updates(
     source_panel_message: discord.Message | None,
     server: bool,
     updates: dict[str, object],
-    history_label: str,
-    history_value: str,
     success_title: str,
     success_description: str,
     target_user_id: int | None = None,
@@ -1434,33 +1432,14 @@ async def _save_tts_modal_updates(
 
     if server:
         await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, **clean_updates))
-        history_entry = cog._server_history_text(interaction, history_label, history_value)
-        await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
-        cog._append_public_panel_history(message_id, history_entry)
-        history_user_id = interaction.user.id
         panel_kind = "server"
     else:
-        history_entry = cog._user_history_text(
-            interaction,
-            history_label,
-            history_value,
-            message_id=message_id,
-            target_user_id=effective_user_id,
-            target_user_name=effective_user_name,
-        )
-        await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, history_entry=history_entry, **clean_updates)
-        cog._append_public_panel_history(message_id, history_entry)
-        history_user_id = effective_user_id
+        await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, **clean_updates)
         panel_kind = "user"
 
     state = cog._public_panel_states.get(message_id or 0, {}) if message_id else {}
     if panel_message is not None and state.get("panel_kind") == "launcher":
-        history_text = cog._format_history_entries(
-            cog._get_public_panel_history(message_id),
-            viewer_user_id=None,
-            message_id=message_id,
-        ) or "• Nada recente."
-        view = cog._build_public_tts_launcher_view(interaction.guild.id, timeout=300, history_text=history_text)
+        view = cog._build_public_tts_launcher_view(interaction.guild.id, timeout=300)
         view.message = panel_message
         await cog._panel_update_after_change(
             interaction,
@@ -1476,16 +1455,11 @@ async def _save_tts_modal_updates(
 
     should_edit_panel = bool(panel_message is not None)
     if should_edit_panel:
-        panel_history = await cog._maybe_await(db.get_panel_history(interaction.guild.id, history_user_id)) if hasattr(db, "get_panel_history") else {}
-        key = "server_last_changes" if server else "user_last_changes"
-        last_changes = list((panel_history or {}).get(key, []) or [])
         embed = await cog._build_settings_embed(
             interaction.guild.id,
             effective_user_id if not server else interaction.user.id,
             server=server,
             panel_kind=panel_kind,
-            last_changes=last_changes,
-            message_id=message_id,
             target_user_name=effective_user_name if not server else None,
             viewer_user_id=interaction.user.id,
         )
@@ -1639,7 +1613,6 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
         details: list[str] = []
-        history_bits: list[str] = []
 
         language = _single_component_value(getattr(self, "language", None), self.current_language)
         selected_language = str(language or self.current_language or "pt-BR").strip() or "pt-BR"
@@ -1657,17 +1630,14 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
             if selected_language != self.current_language and adjusted_voice:
                 details.append(f"• Idioma: {selected_language}")
                 details.append(f"• Voz ajustada: {human_voice_name(selected_voice)}")
-                history_bits.append("idioma e voz atualizados")
             else:
                 details.append(f"• Voz: {human_voice_name(selected_voice)}")
-                history_bits.append(f"voz {human_voice_name(selected_voice)}")
         elif selected_language != self.current_language:
             picked_voice = _pick_first_edge_voice_for_language(self.cog, selected_language, self.current_voice)
             if picked_voice and picked_voice != self.current_voice:
                 updates["voice"] = picked_voice
                 details.append(f"• Idioma: {selected_language}")
                 details.append(f"• Voz ajustada: {human_voice_name(picked_voice)}")
-                history_bits.append("idioma e voz atualizados")
 
         rate = _single_component_value(getattr(self, "rate", None), self.current_rate)
         if rate:
@@ -1679,7 +1649,6 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
             if str(normalized) != str(current_rate):
                 updates["rate"] = normalized
                 details.append(f"• Velocidade: {human_rate(normalized)}")
-                history_bits.append(f"velocidade {human_rate(normalized)}")
 
         pitch = _single_component_value(getattr(self, "pitch", None), self.current_pitch)
         if pitch:
@@ -1691,19 +1660,7 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
             if str(normalized) != str(current_pitch):
                 updates["pitch"] = normalized
                 details.append(f"• Tom: {human_pitch(normalized)}")
-                history_bits.append(f"tom {human_pitch(normalized)}")
 
-        if len(history_bits) == 1 and history_bits[0] != "idioma e voz atualizados":
-            key = history_bits[0].split(' ', 1)[0]
-            article = {"voz": "a", "velocidade": "a", "tom": "o"}.get(key, "o")
-            history_label = f"{article} {'própria ' if not self.server else ''}{key} do Edge"
-            history_value = history_bits[0].split(' ', 1)[1] if ' ' in history_bits[0] else "atualizado"
-        else:
-            history_label = "o Edge" if self.server else "o próprio Edge"
-            if "idioma e voz atualizados" in history_bits:
-                history_value = "idioma e voz atualizados"
-            else:
-                history_value = "leitura atualizada" if updates and all(k in updates for k in ("rate", "pitch")) and "voice" not in updates else "configurações atualizadas"
 
         await _save_tts_modal_updates(
             self.cog,
@@ -1711,8 +1668,6 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
             source_panel_message=self.panel_message,
             server=self.server,
             updates=updates,
-            history_label=history_label,
-            history_value=history_value,
             success_title="Edge atualizado",
             success_description="\n".join(details) if details else "Nada mudou.",
             target_user_id=self.target_user_id,
@@ -1802,8 +1757,6 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
             source_panel_message=self.panel_message,
             server=self.server,
             updates=updates,
-            history_label="o idioma do modo gTTS" if self.server else "o próprio idioma do gTTS",
-            history_value=code,
             success_title="gTTS atualizado",
             success_description=f"• Idioma: {human_language_name(code)}" if updates else "Nada mudou.",
             target_user_id=self.target_user_id,
@@ -2035,14 +1988,12 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
         details: list[str] = []
-        history_bits: list[str] = []
 
         language = _normalize_atts_locale(_single_component_value(getattr(self, "language", None), self.current_language), "pt-BR")
         current_language = _normalize_atts_locale(self.current_language, "pt-BR")
         if language != current_language:
             updates["android_language"] = language
             details.append(f"• Idioma: `{language}`")
-            history_bits.append(f"idioma {language}")
 
         raw_voice = _single_component_value(getattr(self, "voice", None), self.current_voice).strip()
         raw_lower = raw_voice.casefold()
@@ -2068,7 +2019,6 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
         if voice != current_norm:
             updates["android_voice"] = voice
             details.append(f"• Voz: `{voice_label}`")
-            history_bits.append(f"voz {voice_label}")
 
         rate_choice = _single_component_value(getattr(self, "rate", None), self.current_rate)
         pitch_choice = _single_component_value(getattr(self, "pitch", None), self.current_pitch)
@@ -2092,7 +2042,6 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
         if rate != current_rate:
             updates["android_rate"] = rate
             details.append(f"• Velocidade: `{rate}x`")
-            history_bits.append(f"velocidade {rate}x")
 
         if str(pitch_choice or "").strip().casefold() == "custom":
             pitch = _normalize_atts_custom_factor(custom_pitch_raw)
@@ -2108,15 +2057,7 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
         if pitch != current_pitch:
             updates["android_pitch"] = pitch
             details.append(f"• Tom: `{pitch}x`")
-            history_bits.append(f"tom {pitch}x")
 
-        history_label = "o ATTS" if self.server else "o próprio ATTS"
-        if len(history_bits) == 1:
-            history_value = history_bits[0]
-        elif updates:
-            history_value = "configurações atualizadas"
-        else:
-            history_value = "sem alterações"
 
         await _save_tts_modal_updates(
             self.cog,
@@ -2124,8 +2065,6 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
             source_panel_message=self.panel_message,
             server=self.server,
             updates=updates,
-            history_label=history_label,
-            history_value=history_value,
             success_title="ATTS atualizado",
             success_description="\n".join(details) if details else "Nada mudou.",
             target_user_id=self.target_user_id,
@@ -2197,8 +2136,6 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
             source_panel_message=self.panel_message,
             server=True,
             updates=updates,
-            history_label="os prefixos do servidor",
-            history_value=", ".join(parts),
             success_title="Prefixos atualizados",
             success_description="Salvo: " + ", ".join(parts) + ".",
         )
@@ -2425,16 +2362,6 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             )
             return
 
-        history_label = "as regras do TTS"
-        history_value = "regras atualizadas" if parts else "sem alterações"
-        if len(parts) == 1:
-            only = str(parts[0])
-            if only.startswith("autor antes da frase"):
-                history_label = "o autor antes da frase"
-                history_value = "desligado" if "desligado" in only else "ligado"
-            elif only.startswith("cargo ignorado"):
-                history_label = "o cargo ignorado"
-                history_value = only.replace("cargo ignorado", "", 1).strip() or "atualizado"
 
         await _save_tts_modal_updates(
             self.cog,
@@ -2442,8 +2369,6 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             source_panel_message=self.panel_message,
             server=True,
             updates=updates,
-            history_label=history_label,
-            history_value=history_value,
             success_title="Regras atualizadas",
             success_description="\n".join(f"• {part}" for part in parts) if parts else "Nada mudou.",
         )
@@ -2495,12 +2420,7 @@ async def _reset_public_launcher_select(interaction: discord.Interaction, panel)
         return
 
     try:
-        history_text = cog._format_history_entries(
-            cog._get_public_panel_history(message_id),
-            viewer_user_id=None,
-            message_id=message_id,
-        ) or getattr(panel, "history_text", "") or "• Nada recente."
-        view = cog._build_public_tts_launcher_view(guild.id, timeout=300, history_text=history_text)
+        view = cog._build_public_tts_launcher_view(guild.id, timeout=300)
         view.message = message
         await cog._edit_panel_message_payload(
             message,
@@ -2617,10 +2537,9 @@ class _BaseTTSLayoutView(_TTS_LAYOUT_VIEW_CLS):
 
 
 class TTSPublicLauncherView(_BaseTTSLayoutView):
-    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 300, history_text: str = ""):
+    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 300):
         super().__init__(cog, owner_id, guild_id, timeout=timeout)
         self.panel_kind = "launcher"
-        self.history_text = str(history_text or "").strip()
         self._rebuild_items()
 
     def is_components_v2_panel(self) -> bool:
@@ -2657,8 +2576,6 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
     def _intro_text(self) -> str:
         return "### TTS\n**Como funciona**\nCada prefixo escolhe um modo de voz."
 
-    def _history_text(self) -> str:
-        return f"**Últimas alterações**\n{self.history_text or '• Nada recente.'}"
 
     def _rebuild_items(self) -> None:
         try:
@@ -2688,8 +2605,6 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
                     "**Apelido falado**\nEscolha o nome anunciado antes das suas mensagens."
                 ))
                 container.add_item(self._button_row(spoken_button))
-            container.add_item(self._separator())
-            container.add_item(discord.ui.TextDisplay(self._history_text()))
             self.add_item(container)
             return
 
@@ -3549,8 +3464,7 @@ class TTSStatusView(_BaseTTSView):
 
         target_user_id = int(self.target_user_id or interaction.user.id)
         target_user_name = str(self.target_user_name or self.cog._member_panel_name(interaction.user))
-        history_entry = f"{self.cog._panel_actor_name(interaction)} resetou as próprias configurações de TTS para os padrões do servidor"
-        await self.cog._reset_user_tts_and_refresh(interaction.guild.id, target_user_id, history_entry=history_entry)
+        await self.cog._reset_user_tts_and_refresh(interaction.guild.id, target_user_id)
 
         refreshed = await self.cog._build_status_embed(
             interaction.guild.id,

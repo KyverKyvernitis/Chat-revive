@@ -34,11 +34,6 @@ _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
         "display": ("set lang",),
         "accepts_argument": True,
     },
-    "owner_dm_test": {
-        "aliases": ("testdm",),
-        "display": ("testdm",),
-        "accepts_argument": False,
-    },
     "panel_user": {
         "aliases": ("tts", "panel", "painel", "p"),
         "display": ("tts", "panel", "p"),

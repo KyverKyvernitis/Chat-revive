@@ -829,19 +829,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             else ""
         )
 
-    async def _resolve_voice_failure_dm_target(self) -> discord.User | None:
-        # Depois que o owner foi validado neste boot, reaproveitamos o ID para não
-        # chamar application_info em toda atualização da mesma DM.
-        if self._voice_failure_dm_target_verified and self._voice_failure_dm_target_id:
-            try:
-                user = self.bot.get_user(self._voice_failure_dm_target_id) or await self.bot.fetch_user(self._voice_failure_dm_target_id)
-                if user is not None:
-                    return user
-            except Exception:
-                self._voice_failure_dm_target_verified = False
+    async def _resolve_voice_failure_dm_target(
+        self,
+        *,
+        preferred_user: discord.abc.User | None = None,
+    ) -> discord.abc.User | None:
+        """Resolve um único destinatário canônico para as DMs privadas do dono.
 
-        configured_owner_id = 0
-        bot_owner_id = 0
+        Prioridade: ID configurado explicitamente -> ``bot.owner_id`` -> owner do
+        Team/aplicativo retornado pelo Discord. Nunca transforma a lista ampla de owners em destinatários, evitando
+        fan-out deste canal privado para uma equipe inteira.
+        """
         try:
             configured_owner_id = int(getattr(config, "TTS_VOICE_FAILURE_DM_USER_ID", 0) or 0)
         except Exception:
@@ -851,59 +849,81 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         except Exception:
             bot_owner_id = 0
 
-        app_owner = None
-        official_owner_id = 0
-        try:
-            app = await self.bot.application_info()
-            app_owner = getattr(app, "owner", None)
-            official_owner_id = int(getattr(app_owner, "id", 0) or 0)
-        except Exception as e:
-            print(f"[tts_voice] não consegui obter application_info para DM de incidente: {e}")
+        preferred_id = int(getattr(preferred_user, "id", 0) or 0)
+        canonical_id = configured_owner_id or bot_owner_id
+        canonical_object: discord.abc.User | None = None
 
-        candidate_ids: list[int] = []
+        # Se não há ID explícito, reaproveita o alvo já validado neste boot.
+        if canonical_id <= 0 and self._voice_failure_dm_target_verified and self._voice_failure_dm_target_id:
+            canonical_id = int(self._voice_failure_dm_target_id)
 
-        def add_candidate(raw: int) -> None:
+        # Só consulta application_info quando realmente não existe uma fonte local.
+        # Para apps pertencentes a Team, o owner da Team é o único usuário escolhido.
+        if canonical_id <= 0:
             try:
-                parsed = int(raw or 0)
-            except Exception:
-                parsed = 0
-            if parsed > 0 and parsed not in candidate_ids:
-                candidate_ids.append(parsed)
+                app = await self.bot.application_info()
+                team = getattr(app, "team", None)
+                team_owner = getattr(team, "owner", None) if team is not None else None
+                app_owner = getattr(app, "owner", None)
+                canonical_object = team_owner or app_owner
+                canonical_id = int(getattr(canonical_object, "id", 0) or 0)
+            except Exception as e:
+                print(f"[tts_voice] não consegui obter application_info para DM do dono: {e}")
+                return None
 
-        if official_owner_id > 0:
-            # Regra forte: app.owner é a fonte de verdade. Team members e IDs administrativos
-            # adicionais nunca entram no fan-out deste canal privado.
-            add_candidate(official_owner_id)
-        else:
-            # Fallback explícito para incidentes em que a própria consulta à API do
-            # Discord falhou. TTS_VOICE_FAILURE_DM_USER_ID deve ser o ID do dono.
-            add_candidate(configured_owner_id)
-            add_candidate(bot_owner_id)
+        if canonical_id <= 0:
+            return None
 
-        for user_id in candidate_ids:
-            try:
-                user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-                if user is not None:
-                    self._voice_failure_dm_target_id = user_id
-                    self._voice_failure_dm_target_verified = True
-                    return user
-            except Exception:
-                continue
-
-        if official_owner_id > 0 and app_owner is not None:
-            self._voice_failure_dm_target_id = official_owner_id
+        # No `_testdm`, a própria mensagem já traz um User/Member válido. Evita
+        # fetch desnecessário e faz o teste continuar funcional mesmo se o cache
+        # global de usuários estiver frio.
+        if preferred_user is not None and preferred_id == canonical_id:
+            self._voice_failure_dm_target_id = canonical_id
             self._voice_failure_dm_target_verified = True
-            return app_owner
+            return preferred_user
+
+        try:
+            user = self.bot.get_user(canonical_id)
+            if user is None:
+                user = await self.bot.fetch_user(canonical_id)
+            if user is not None:
+                self._voice_failure_dm_target_id = canonical_id
+                self._voice_failure_dm_target_verified = True
+                return user
+        except Exception as e:
+            # Se application_info já devolveu o objeto canônico, ele ainda pode
+            # enviar DM sem depender de um segundo request de fetch_user.
+            if canonical_object is None or int(getattr(canonical_object, "id", 0) or 0) != canonical_id:
+                print(f"[tts_voice] não consegui resolver usuário do dono para DM | owner={canonical_id} error={e}")
+                return None
+
+        if canonical_object is not None and int(getattr(canonical_object, "id", 0) or 0) == canonical_id:
+            self._voice_failure_dm_target_id = canonical_id
+            self._voice_failure_dm_target_verified = True
+            return canonical_object
         return None
 
     def _build_owner_dm_test_view(self, message: discord.Message) -> discord.ui.LayoutView:
         guild = getattr(message, "guild", None)
         channel = getattr(message, "channel", None)
-        guild_name = _shorten(str(getattr(guild, "name", None) or "servidor desconhecido"), 120)
-        guild_id = int(getattr(guild, "id", 0) or 0)
-        channel_name = _shorten(str(getattr(channel, "name", None) or "canal desconhecido"), 120)
+        channel_name = _shorten(str(getattr(channel, "name", None) or "mensagem privada"), 120)
         channel_id = int(getattr(channel, "id", 0) or 0)
         executed_at = int(time.time())
+
+        if guild is None:
+            origin = (
+                "**Contexto**  mensagem privada com o bot\n"
+                f"**Canal**  {channel_name} · `{channel_id}`\n"
+                f"**Executado**  <t:{executed_at}:F> · <t:{executed_at}:R>"
+            )
+        else:
+            guild_name = _shorten(str(getattr(guild, "name", None) or "servidor desconhecido"), 120)
+            guild_id = int(getattr(guild, "id", 0) or 0)
+            origin = (
+                f"**Servidor**  {guild_name} · `{guild_id}`\n"
+                f"**Canal**  {channel_name} · `{channel_id}`\n"
+                f"**Executado**  <t:{executed_at}:F> · <t:{executed_at}:R>"
+            )
 
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(
@@ -911,36 +931,54 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 discord.ui.TextDisplay(
                     "# ✅ Teste de notificações\n"
                     "`DIAGNÓSTICO` `OWNER DM`\n"
-                    "O canal privado de alertas do bot conseguiu entregar esta mensagem em Components V2."
+                    "A entrega privada para o dono do bot está funcionando em Components V2."
                 ),
                 discord.ui.Separator(),
                 discord.ui.TextDisplay(
                     "## Entrega\n"
-                    "**Destino**  proprietário oficial do aplicativo\n"
+                    "**Destino**  dono configurado do bot\n"
                     "**Formato**  Discord Components V2\n"
                     "**Interação**  nenhuma ação necessária"
                 ),
                 discord.ui.Separator(),
-                discord.ui.TextDisplay(
-                    "## Origem\n"
-                    f"**Servidor**  {guild_name} · `{guild_id}`\n"
-                    f"**Canal**  {channel_name} · `{channel_id}`\n"
-                    f"**Executado**  <t:{executed_at}:F> · <t:{executed_at}:R>"
-                ),
+                discord.ui.TextDisplay(f"## Origem\n{origin}"),
                 accent_color=discord.Color.green(),
             )
         )
         return view
 
+    def _build_owner_dm_test_failure_view(self) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(
+                    "# ⚠️ Teste de DM falhou\n"
+                    "Você foi reconhecido como o dono do bot, mas o Discord recusou ou não concluiu o envio da DM.\n"
+                    "-# O erro técnico completo ficou somente nos logs do bot"
+                ),
+                accent_color=discord.Color.orange(),
+            )
+        )
+        return view
+
     async def _prefix_test_owner_dm(self, message: discord.Message) -> None:
-        """Envia uma DM de diagnóstico somente quando o autor é o destinatário oficial dos incidentes."""
-        author_id = int(getattr(getattr(message, "author", None), "id", 0) or 0)
+        """Envia a DM de diagnóstico e permanece invisível para qualquer outro usuário."""
+        author = getattr(message, "author", None)
+        author_id = int(getattr(author, "id", 0) or 0)
         if author_id <= 0:
             return
 
-        target = await self._resolve_voice_failure_dm_target()
+        # Rejeição barata antes de qualquer request: quando existe um dono
+        # explicitamente configurado, usuários comuns nem chegam ao resolver.
+        try:
+            configured_owner_id = int(getattr(config, "TTS_VOICE_FAILURE_DM_USER_ID", 0) or 0)
+        except Exception:
+            configured_owner_id = 0
+        if configured_owner_id > 0 and author_id != configured_owner_id:
+            return
+
+        target = await self._resolve_voice_failure_dm_target(preferred_user=author)
         if target is None or int(getattr(target, "id", 0) or 0) != author_id:
-            # O comando é propositalmente invisível para qualquer outro usuário.
             return
 
         try:
@@ -950,8 +988,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             print(f"[tts_voice] DM de teste entregue ao dono | owner={author_id}")
         except Exception as e:
-            # Nunca responde no canal: até uma falha do teste permanece privada nos logs.
-            print(f"[tts_voice] falha ao enviar DM de teste ao dono | owner={author_id} error={e}")
+            print(
+                f"[tts_voice] falha ao enviar DM de teste ao dono | "
+                f"owner={author_id} error={type(e).__name__}: {e}"
+            )
+            # O único feedback fora da DM ocorre quando o próprio dono executou
+            # o teste e a DM falhou. É temporário e também usa Components V2.
+            if getattr(message, "guild", None) is not None:
+                with contextlib.suppress(Exception):
+                    await message.reply(
+                        view=self._build_owner_dm_test_failure_view(),
+                        mention_author=False,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                        delete_after=15,
+                    )
+
+    @commands.command(name="testdm", hidden=True)
+    async def test_owner_dm_command(self, ctx: commands.Context, *, extra: str = "") -> None:
+        """Comando prefixado privado para validar a entrega de DM ao dono do bot."""
+        # Aceita o comando somente sem argumentos; entradas parecidas são
+        # consumidas silenciosamente e nunca viram texto para o TTS.
+        if str(extra or "").strip():
+            return
+        await self._prefix_test_owner_dm(ctx.message)
 
     def _voice_incident_human_duration(self, seconds: float) -> str:
         total = max(0, int(round(seconds)))

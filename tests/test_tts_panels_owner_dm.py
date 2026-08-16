@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import ast
-import asyncio
 import unittest
 from pathlib import Path
 
-from cogs.tts.prefix import (
-    PrefixControlCommand,
-    dispatch_prefix_control_command,
-    match_prefix_control_command,
-)
+from cogs.tts.prefix import match_prefix_control_command
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,36 +69,16 @@ class TTSPrefixAliasRegressionTests(unittest.TestCase):
                 checked += 1
         self.assertEqual(checked, 7)
 
-    def test_testdm_is_exact_configurable_prefix_command(self):
-        command = match_prefix_control_command("_testdm", "_")
-        self.assertIsNotNone(command)
-        self.assertEqual(command.kind, "owner_dm_test")
-        self.assertEqual(command.argument, "")
+    def test_testdm_is_not_routed_by_tts_prefix_dispatcher(self):
+        # `_testdm` agora é um comando real do commands.Bot. Manter uma segunda
+        # rota no listener do TTS faria bot.py executar o teste duas vezes.
+        self.assertIsNone(match_prefix_control_command("_testdm", "_"))
+        self.assertIsNone(match_prefix_control_command("!testdm", "!"))
 
-        custom = match_prefix_control_command("!testdm", "!")
-        self.assertIsNotNone(custom)
-        self.assertEqual(custom.kind, "owner_dm_test")
-
-        self.assertIsNone(match_prefix_control_command("_testdm agora", "_"))
-        self.assertIsNone(match_prefix_control_command("_testdm", "!"))
-
-    def test_testdm_dispatch_is_consumed_without_falling_into_tts(self):
-        class FakeCog:
-            def __init__(self):
-                self.called = False
-
-            async def _prefix_test_owner_dm(self, message):
-                self.called = True
-                self.message = message
-
-        cog = FakeCog()
-        message = object()
-        consumed = asyncio.run(
-            dispatch_prefix_control_command(cog, message, PrefixControlCommand("owner_dm_test"))
-        )
-        self.assertTrue(consumed)
-        self.assertTrue(cog.called)
-        self.assertIs(cog.message, message)
+        aliases = (ROOT / "cogs" / "tts" / "aliases.py").read_text(encoding="utf-8")
+        prefix = (ROOT / "cogs" / "tts" / "prefix.py").read_text(encoding="utf-8")
+        self.assertNotIn("owner_dm_test", aliases)
+        self.assertNotIn("owner_dm_test", prefix)
 
 
 class TTSOwnerDMRegressionTests(unittest.TestCase):
@@ -118,19 +93,48 @@ class TTSOwnerDMRegressionTests(unittest.TestCase):
         self.assertEqual(len(nodes), 1, name)
         return ast.get_source_segment(self.cog_text, nodes[0]) or ""
 
-    def test_owner_dm_test_reuses_canonical_owner_and_is_channel_silent(self):
+    def test_owner_dm_test_reuses_canonical_owner_and_rejects_other_users_first(self):
         source = self._function_source("_prefix_test_owner_dm", async_def=True)
-        self.assertIn("await self._resolve_voice_failure_dm_target()", source)
+        self.assertIn("configured_owner_id > 0 and author_id != configured_owner_id", source)
+        self.assertIn("preferred_user=author", source)
         self.assertIn('getattr(target, "id", 0)', source)
         self.assertIn("!= author_id", source)
         self.assertIn("await target.send(", source)
         self.assertIn("allowed_mentions=discord.AllowedMentions.none()", source)
 
-        # Nem sucesso nem falha respondem no canal; usuários não autorizados
-        # só chegam ao return silencioso.
-        self.assertNotIn("message.channel.send", source)
+        # Só o dono reconhecido pode chegar ao feedback de falha. Usuário comum
+        # retorna antes do resolver e nunca recebe resposta/reação.
+        reject_pos = source.index("configured_owner_id > 0 and author_id != configured_owner_id")
+        resolve_pos = source.index("_resolve_voice_failure_dm_target")
+        self.assertLess(reject_pos, resolve_pos)
         self.assertNotIn("add_reaction", source)
-        self.assertNotIn("message.reply", source)
+
+    def test_testdm_is_a_real_hidden_prefix_command_and_works_in_dm(self):
+        nodes = [
+            node for node in ast.walk(self.cog_tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "test_owner_dm_command"
+        ]
+        self.assertEqual(len(nodes), 1)
+        node = nodes[0]
+        decorators = [ast.get_source_segment(self.cog_text, dec) or "" for dec in node.decorator_list]
+        self.assertTrue(any('commands.command(name="testdm", hidden=True)' in dec for dec in decorators))
+        source = ast.get_source_segment(self.cog_text, node) or ""
+        self.assertIn("ctx.message", source)
+        self.assertNotIn("ctx.guild", source)
+
+        # bot.py encaminha primeiro ao gate do TTS e, em seguida, sempre chama
+        # process_commands; como `_testdm` saiu do dispatcher TTS, não há dupla DM.
+        bot_source = (ROOT / "bot.py").read_text(encoding="utf-8")
+        self.assertIn("await self._dispatch_tts_message_bridge(message)", bot_source)
+        self.assertIn("await self.process_commands(message)", bot_source)
+
+    def test_owner_dm_resolver_prefers_explicit_owner_and_handles_team_owner(self):
+        source = self._function_source("_resolve_voice_failure_dm_target", async_def=True)
+        self.assertIn("canonical_id = configured_owner_id or bot_owner_id", source)
+        self.assertIn('team_owner = getattr(team, "owner", None)', source)
+        self.assertIn("canonical_object = team_owner or app_owner", source)
+        self.assertIn("preferred_id == canonical_id", source)
+        self.assertNotIn("owner_ids", source)
 
     def test_owner_dm_test_is_components_v2_without_buttons_or_incident_side_effects(self):
         builder = self._function_source("_build_owner_dm_test_view", async_def=False)
@@ -142,6 +146,11 @@ class TTSOwnerDMRegressionTests(unittest.TestCase):
         self.assertNotIn("discord.ui.ActionRow", builder)
 
         handler = self._function_source("_prefix_test_owner_dm", async_def=True)
+        failure_builder = self._function_source("_build_owner_dm_test_failure_view", async_def=False)
+        self.assertIn("discord.ui.LayoutView(timeout=None)", failure_builder)
+        self.assertIn("discord.ui.Container(", failure_builder)
+        self.assertNotIn("discord.ui.Button", failure_builder)
+        self.assertNotIn("discord.ui.ActionRow", failure_builder)
         for forbidden in (
             "_ensure_connected",
             "_reserve_voice_failure_alert",

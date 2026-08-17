@@ -112,6 +112,15 @@ _VOICE_FAILURE_EVENT_RETENTION_SECONDS = 15 * 60
 _VOICE_INCIDENT_EDIT_MIN_INTERVAL_SECONDS = 12.0
 _VOICE_INCIDENT_REOPEN_WINDOW_SECONDS = 10 * 60
 _VOICE_INCIDENT_STATE_RETENTION_SECONDS = 60 * 60
+# Telemetria nunca pode competir com síntese/voz por recursos. O produtor usa
+# put_nowait() em uma fila curta e um único consumidor faz a correlação. Em uma
+# tempestade, eventos excedentes são descartados da telemetria — nunca do TTS.
+_VOICE_INCIDENT_REPORT_QUEUE_MAXSIZE = 96
+_VOICE_INCIDENT_WORKER_YIELD_EVERY = 16
+_VOICE_FAILURE_GUILD_EVENT_MAX = 48
+_VOICE_FAILURE_GLOBAL_EVENT_MAX = 192
+_VOICE_INCIDENT_RECOVERY_STABILITY_SECONDS = 1.4
+_VOICE_INCIDENT_BOOT_CONTEXT_SECONDS = 3 * 60
 
 
 class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_description="Comandos de texto para fala"):
@@ -145,15 +154,22 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._voice_failure_events_global: dict[str, list[tuple[float, int]]] = {}
         self._voice_incidents: dict[tuple[str, int, str], dict[str, object]] = {}
         self._voice_incident_recovery_tasks: dict[int, asyncio.Task] = {}
-        self._voice_incident_report_tasks: set[asyncio.Task] = set()
+        self._voice_incident_report_queue: asyncio.Queue = asyncio.Queue(maxsize=_VOICE_INCIDENT_REPORT_QUEUE_MAXSIZE)
+        self._voice_incident_report_worker_task: asyncio.Task | None = None
+        self._voice_incident_dropped_reports: int = 0
+        self._voice_incident_last_drop_log_mono: float = 0.0
+        self._voice_incident_boot_mono: float = time.monotonic()
+        self._voice_incident_shutdown: bool = False
         self._voice_failure_dm_target_id: int | None = None
         self._voice_failure_dm_target_verified: bool = False
         self._voice_auto_restore_enabled: bool = bool(getattr(config, "TTS_VOICE_AUTO_RESTORE_ENABLED", True))
 
     async def cog_load(self):
+        self._voice_incident_shutdown = False
         self._prime_tts_runtime()
         await self._load_edge_voices()
         self._ensure_tts_agent_health_task()
+        self._ensure_voice_incident_report_worker()
         if TTS_BOOT_WARMUP_ENABLED:
             asyncio.create_task(self._boot_warmup())
         if self._voice_auto_restore_enabled:
@@ -162,6 +178,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             print("[tts_voice] restore automático de call desativado por TTS_VOICE_AUTO_RESTORE_ENABLED=false")
 
     def cog_unload(self):
+        self._voice_incident_shutdown = True
         self._cancel_tts_agent_health_task()
         self._shutdown_tts_runtime()
         close_phone_worker_session = getattr(self, "_close_phone_worker_http_session", None)
@@ -177,9 +194,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         for recovery_task in list(getattr(self, "_voice_incident_recovery_tasks", {}).values()):
             if recovery_task is not None and not recovery_task.done():
                 recovery_task.cancel()
-        for report_task in list(getattr(self, "_voice_incident_report_tasks", set())):
-            if report_task is not None and not report_task.done():
-                report_task.cancel()
+        report_worker = getattr(self, "_voice_incident_report_worker_task", None)
+        if report_worker is not None and not report_worker.done():
+            report_worker.cancel()
 
     async def _get_root_command_ids_cached(self, guild: discord.Guild | None = None, *, ttl_seconds: float = 600.0) -> dict[str, int]:
         return await fetch_root_command_ids_cached(
@@ -442,18 +459,61 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             "severity": "critical",
         }
 
+    def _voice_failure_context_profile(self, context: str) -> dict[str, object]:
+        """Classifica impacto sem I/O e sem heurística externa.
+
+        O perfil usa apenas o caminho que já estava sendo executado. Isso deixa a
+        DM mais útil sem adicionar health-check, consulta ao Mongo ou request ao
+        Discord no hot path do TTS.
+        """
+        raw = str(context or "entrada na call").strip()
+        lowered = raw.lower()
+        if "entrada automática do tts" in lowered:
+            return {
+                "stage": "conexão de voz antes da reprodução",
+                "source": "mensagem TTS solicitada por usuário",
+                "impact": "user_blocking",
+                "impact_text": "Uma tentativa real de TTS não conseguiu chegar à reprodução na call",
+                "threshold_multiplier": 1,
+            }
+        if "entrada manual" in lowered:
+            return {
+                "stage": "conexão de voz solicitada manualmente",
+                "source": "painel/comando de entrada",
+                "impact": "operator_action",
+                "impact_text": "Uma ação manual de entrada na call falhou",
+                "threshold_multiplier": 1,
+            }
+        if "restore automático" in lowered or "restore em runtime" in lowered:
+            return {
+                "stage": "restauração automática da sessão de voz",
+                "source": "recuperação em background",
+                "impact": "background",
+                "impact_text": "Falha observada em recuperação automática; impacto ao usuário ainda não foi confirmado",
+                # Restore é útil como evidência, mas uma única guild precisa de
+                # persistência maior antes de interromper o dono por DM.
+                "threshold_multiplier": 2,
+            }
+        return {
+            "stage": "conexão de voz",
+            "source": "subsistema de voz",
+            "impact": "unknown",
+            "impact_text": "Impacto funcional ainda não determinado",
+            "threshold_multiplier": 1,
+        }
+
     def _prune_voice_incident_tracking(self, now: float) -> None:
         retention_floor = now - _VOICE_FAILURE_EVENT_RETENTION_SECONDS
         for key, values in list(self._voice_failure_events_by_guild.items()):
             kept = [stamp for stamp in values if stamp >= retention_floor]
             if kept:
-                self._voice_failure_events_by_guild[key] = kept
+                self._voice_failure_events_by_guild[key] = kept[-_VOICE_FAILURE_GUILD_EVENT_MAX:]
             else:
                 self._voice_failure_events_by_guild.pop(key, None)
         for category, values in list(self._voice_failure_events_global.items()):
             kept = [(stamp, gid) for stamp, gid in values if stamp >= retention_floor]
             if kept:
-                self._voice_failure_events_global[category] = kept
+                self._voice_failure_events_global[category] = kept[-_VOICE_FAILURE_GLOBAL_EVENT_MAX:]
             else:
                 self._voice_failure_events_global.pop(category, None)
 
@@ -507,8 +567,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             "recovered_guild_ids": set(),
             "peak_guilds": max(1, len(affected)),
             "recurrences": 0,
+            "user_impact_seen": False,
+            "operator_impact_seen": False,
+            "last_stage": "conexão de voz",
+            "last_source": "subsistema de voz",
+            "last_impact": "unknown",
+            "last_impact_text": "Impacto funcional ainda não determinado",
+            "opened_after_boot_seconds": None,
             "message": None,
             "last_edit_mono": 0.0,
+            "last_sync_attempt_mono": 0.0,
             "closed_mono": 0.0,
             "closed_epoch": 0.0,
             "last_reason": "",
@@ -598,8 +666,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         *,
         reason: str,
         exc: BaseException | None,
+        context: str = "entrada na call",
     ) -> dict[str, object] | None:
         policy = self._voice_failure_policy(reason, exc)
+        context_profile = self._voice_failure_context_profile(context)
         if bool(policy.get("suppress")):
             return None
 
@@ -612,13 +682,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         guild_key = (guild_id, category)
         guild_events = self._voice_failure_events_by_guild.setdefault(guild_key, [])
         guild_events.append(now)
+        if len(guild_events) > _VOICE_FAILURE_GUILD_EVENT_MAX:
+            del guild_events[:-_VOICE_FAILURE_GUILD_EVENT_MAX]
         global_events = self._voice_failure_events_global.setdefault(category, [])
         global_events.append((now, guild_id))
+        if len(global_events) > _VOICE_FAILURE_GLOBAL_EVENT_MAX:
+            del global_events[:-_VOICE_FAILURE_GLOBAL_EVENT_MAX]
 
         window = max(1.0, float(policy.get("window") or 300.0))
         recent_guild = [stamp for stamp in guild_events if stamp >= now - window]
         direct_count = len(recent_guild)
         threshold = max(0, int(policy.get("threshold") or 0))
+        threshold_multiplier = max(1, int(context_profile.get("threshold_multiplier") or 1))
+        effective_threshold = threshold * threshold_multiplier if threshold > 0 else 0
 
         global_window = max(1.0, float(policy.get("global_window") or window))
         recent_global = [(stamp, gid) for stamp, gid in global_events if stamp >= now - global_window]
@@ -641,7 +717,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             # Quando a mesma falha já aparece em várias guilds, o incidente global
             # é mais útil do que uma sequência de alertas locais.
             trigger_scope = "global"
-        elif threshold > 0 and direct_count >= threshold:
+        elif effective_threshold > 0 and direct_count >= effective_threshold:
             trigger_scope = "guild"
 
         global_incident_key = self._voice_incident_key("global", 0, category)
@@ -816,12 +892,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         context: str,
     ) -> None:
         guild_id = int(getattr(guild, "id", 0) or 0)
+        profile = self._voice_failure_context_profile(context)
+        impact = str(profile.get("impact") or "unknown")
         incident["last_guild_id"] = guild_id
         incident["last_guild_name"] = str(getattr(guild, "name", None) or "servidor desconhecido")
         incident["last_channel_name"] = self._voice_channel_name(voice_channel)
         incident["last_reason"] = _shorten(str(reason or "falha de voz não classificada"), 1000)
         incident["last_context"] = _shorten(str(context or "entrada na call"), 500)
         incident["last_exception"] = _shorten(self._format_voice_exception(exc), 900)
+        incident["last_stage"] = str(profile.get("stage") or "conexão de voz")
+        incident["last_source"] = str(profile.get("source") or "subsistema de voz")
+        incident["last_impact"] = impact
+        incident["last_impact_text"] = str(profile.get("impact_text") or "Impacto funcional ainda não determinado")
+        if impact == "user_blocking":
+            incident["user_impact_seen"] = True
+        elif impact == "operator_action":
+            incident["operator_impact_seen"] = True
+
+        opened_mono = float(incident.get("cycle_started_mono") or incident.get("opened_mono") or 0.0)
+        boot_mono = float(getattr(self, "_voice_incident_boot_mono", 0.0) or 0.0)
+        if opened_mono > 0.0 and boot_mono > 0.0:
+            after_boot = max(0.0, opened_mono - boot_mono)
+            incident["opened_after_boot_seconds"] = after_boot if after_boot <= _VOICE_INCIDENT_BOOT_CONTEXT_SECONDS else None
+
         category = str(incident.get("category") or "")
         incident["last_permissions"] = (
             _shorten(self._voice_permissions_report(guild, voice_channel), 900)
@@ -909,6 +1002,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         channel_name = _shorten(str(getattr(channel, "name", None) or "mensagem privada"), 120)
         channel_id = int(getattr(channel, "id", 0) or 0)
         executed_at = int(time.time())
+        report_queue = getattr(self, "_voice_incident_report_queue", None)
+        queue_size = int(report_queue.qsize()) if isinstance(report_queue, asyncio.Queue) else 0
+        queue_max = int(getattr(report_queue, "maxsize", 0) or _VOICE_INCIDENT_REPORT_QUEUE_MAXSIZE)
+        report_worker = getattr(self, "_voice_incident_report_worker_task", None)
+        worker_ok = isinstance(report_worker, asyncio.Task) and not report_worker.done()
+        dropped_reports = max(0, int(getattr(self, "_voice_incident_dropped_reports", 0) or 0))
 
         if guild is None:
             origin = (
@@ -939,6 +1038,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     "**Destino**  dono configurado do bot\n"
                     "**Formato**  Discord Components V2\n"
                     "**Interação**  nenhuma ação necessária"
+                ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(
+                    "## Pipeline de incidentes\n"
+                    f"**Worker**  {'ativo' if worker_ok else 'inativo'}\n"
+                    f"**Fila**  `{queue_size}/{queue_max}`\n"
+                    f"**Telemetria descartada por proteção de carga**  `{dropped_reports}`\n"
+                    "-# Este teste não abre, fecha ou altera incidentes reais"
                 ),
                 discord.ui.Separator(),
                 discord.ui.TextDisplay(f"## Origem\n{origin}"),
@@ -1022,6 +1129,33 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         hours, minutes = divmod(minutes, 60)
         return f"{hours} h" if minutes == 0 else f"{hours} h {minutes} min"
 
+    def _voice_incident_impact_score(self, incident: dict[str, object]) -> int:
+        """Score local e determinístico; serve para ordenar urgência, não para I/O."""
+        policy = dict(incident.get("policy") or {})
+        affected = incident.get("affected_guild_ids")
+        affected_count = len(affected) if isinstance(affected, set) else 1
+        cycle_events = max(0, int(incident.get("cycle_event_count") or 0))
+        recurrences = max(0, int(incident.get("recurrences") or 0))
+        started = float(incident.get("cycle_started_mono") or time.monotonic())
+        duration = max(0.0, time.monotonic() - started)
+
+        score = min(8, cycle_events)
+        score += min(9, max(0, affected_count - 1) * 3)
+        score += min(6, recurrences * 2)
+        if bool(incident.get("user_impact_seen")):
+            score += 5
+        elif bool(incident.get("operator_impact_seen")):
+            score += 2
+        elif str(incident.get("last_impact") or "") == "background":
+            score = max(0, score - 2)
+        if str(policy.get("severity") or "high") == "critical":
+            score += 5
+        if duration >= 15 * 60:
+            score += 5
+        elif duration >= 5 * 60:
+            score += 3
+        return max(0, min(30, int(score)))
+
     def _voice_incident_effective_severity(self, incident: dict[str, object]) -> str:
         policy = dict(incident.get("policy") or {})
         if str(policy.get("severity") or "high") == "critical":
@@ -1030,7 +1164,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         affected_count = len(affected) if isinstance(affected, set) else 1
         duration = max(0.0, time.monotonic() - float(incident.get("cycle_started_mono") or time.monotonic()))
         cycle_events = max(0, int(incident.get("cycle_event_count") or 0))
-        if affected_count >= 5 or (duration >= 15 * 60 and cycle_events >= 10):
+        if self._voice_incident_impact_score(incident) >= 20 or affected_count >= 5 or (duration >= 15 * 60 and cycle_events >= 10):
             return "critical"
         return "high"
 
@@ -1047,7 +1181,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             "voice_state": "O controlador de voz continua limpando estados órfãos e tentando reconectar sem ativar o loop paralelo do discord.py.",
             "unexpected": "Consulte `tts_voice` e o traceback correspondente. Repetição de erro inesperado pode indicar regressão de código.",
         }
-        return recommendations.get(category, recommendations["unexpected"])
+        recommendation = recommendations.get(category, recommendations["unexpected"])
+        if bool(incident.get("user_impact_seen")):
+            return recommendation + " Há impacto funcional confirmado em pelo menos uma tentativa real de TTS."
+        if str(incident.get("last_impact") or "") == "background":
+            return recommendation + " Até agora o sinal veio apenas da recuperação em background; não há impacto funcional confirmado."
+        return recommendation
 
     def _build_owner_voice_incident_view(self, incident: dict[str, object]) -> discord.ui.LayoutView:
         status = str(incident.get("status") or "active")
@@ -1151,7 +1290,33 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         reason = _shorten(str(incident.get("last_reason") or label), 950)
         context = _shorten(str(incident.get("last_context") or "entrada na call"), 450)
-        diagnosis = f"**Sinal detectado**\n{reason}\n\n**Origem**\n{context}"
+        stage = _shorten(str(incident.get("last_stage") or "conexão de voz"), 160)
+        source = _shorten(str(incident.get("last_source") or "subsistema de voz"), 160)
+        if bool(incident.get("user_impact_seen")):
+            impact_text = "Confirmado: ao menos uma tentativa real de TTS não conseguiu chegar à reprodução na call"
+        elif bool(incident.get("operator_impact_seen")):
+            impact_text = "Confirmado em ação manual de entrada na call; ainda sem falha de reprodução TTS confirmada"
+        else:
+            impact_text = _shorten(str(incident.get("last_impact_text") or "Impacto funcional ainda não determinado"), 320)
+        impact_score = self._voice_incident_impact_score(incident)
+        priority = "crítica" if severity == "critical" else "alta"
+        quick_read = (
+            f"**Etapa**  {stage}\n"
+            f"**Origem do sinal**  {source}\n"
+            f"**Impacto funcional**  {impact_text}\n"
+            f"**Prioridade calculada**  {priority} · score `{impact_score}/30`"
+        )
+        opened_after_boot = incident.get("opened_after_boot_seconds")
+        if isinstance(opened_after_boot, (int, float)):
+            quick_read += f"\n**Contexto de inicialização**  padrão começou ~{max(0, int(opened_after_boot))} s após carregar o TTS"
+        dropped_reports = max(0, int(getattr(self, "_voice_incident_dropped_reports", 0) or 0))
+        if dropped_reports:
+            quick_read += (
+                f"\n**Proteção de carga**  `{dropped_reports}` evento(s) de telemetria excedente(s) "
+                "foram descartados desde o boot; síntese e voz não foram bloqueadas"
+            )
+
+        diagnosis = f"{quick_read}\n\n**Sinal detectado**\n{reason}\n\n**Contexto técnico**\n{context}"
 
         technical = str(incident.get("last_exception") or "").strip()
         if technical and technical != "sem exceção técnica; falhou em pré-checagem ou retornou None":
@@ -1203,10 +1368,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         async with io_lock:
             now = time.monotonic()
             last_edit = float(incident.get("last_edit_mono") or 0.0)
-            if not force and last_edit > 0.0 and now - last_edit < _VOICE_INCIDENT_EDIT_MIN_INTERVAL_SECONDS:
+            last_attempt = float(incident.get("last_sync_attempt_mono") or 0.0)
+            last_activity = max(last_edit, last_attempt)
+            if not force and last_activity > 0.0 and now - last_activity < _VOICE_INCIDENT_EDIT_MIN_INTERVAL_SECONDS:
                 self._schedule_owner_voice_incident_refresh(incident)
                 return
 
+            # Também limita tentativas que falharam antes de produzir/editarem
+            # uma mensagem, evitando martelar a API do Discord se a DM estiver
+            # bloqueada ou o owner estiver temporariamente irresolvível.
+            incident["last_sync_attempt_mono"] = now
             target = await self._resolve_voice_failure_dm_target()
             if target is None:
                 print(f"[tts_voice] incidente sem DM: dono do bot não encontrado | id={incident.get('incident_id')}")
@@ -1248,9 +1419,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 return
 
         last_edit = float(incident.get("last_edit_mono") or 0.0)
-        delay = 0.0 if force or last_edit <= 0.0 else max(
+        last_attempt = float(incident.get("last_sync_attempt_mono") or 0.0)
+        last_activity = max(last_edit, last_attempt)
+        delay = 0.0 if force or last_activity <= 0.0 else max(
             0.0,
-            _VOICE_INCIDENT_EDIT_MIN_INTERVAL_SECONDS - (time.monotonic() - last_edit),
+            _VOICE_INCIDENT_EDIT_MIN_INTERVAL_SECONDS - (time.monotonic() - last_activity),
         )
 
         async def _runner() -> None:
@@ -1268,6 +1441,48 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         incident["_refresh_task"] = asyncio.create_task(_runner())
 
+    def _ensure_voice_incident_report_worker(self) -> None:
+        if bool(getattr(self, "_voice_incident_shutdown", False)):
+            return
+        task = getattr(self, "_voice_incident_report_worker_task", None)
+        if isinstance(task, asyncio.Task) and not task.done():
+            return
+
+        async def _worker() -> None:
+            queue = self._voice_incident_report_queue
+            processed_since_yield = 0
+            while True:
+                event = await queue.get()
+                try:
+                    await self._maybe_notify_owner_voice_incident(
+                        event["guild"],
+                        event["voice_channel"],
+                        reason=str(event.get("reason") or "falha de voz não classificada"),
+                        exc=event.get("exc"),
+                        context=str(event.get("context") or "entrada na call"),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as report_error:
+                    guild_id = int(getattr(event.get("guild"), "id", 0) or 0)
+                    print(
+                        f"[tts_voice] falha isolada no pipeline de incidente; conexão não foi afetada | "
+                        f"guild={guild_id} error={type(report_error).__name__}: {report_error}"
+                    )
+                finally:
+                    queue.task_done()
+                processed_since_yield += 1
+                if processed_since_yield >= _VOICE_INCIDENT_WORKER_YIELD_EVERY:
+                    processed_since_yield = 0
+                    # Mesmo a classificação sendo barata, uma tempestade não
+                    # ganha um tick inteiro do event loop sobre reprodução/voz.
+                    await asyncio.sleep(0)
+
+        self._voice_incident_report_worker_task = asyncio.create_task(
+            _worker(),
+            name="tts-voice-incident-worker",
+        )
+
     def _schedule_voice_failure_report(
         self,
         guild: discord.Guild,
@@ -1277,29 +1492,39 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         exc: BaseException | None = None,
         context: str = "entrada na call",
     ) -> None:
-        """Agenda telemetria/DM sem jamais bloquear o caminho de conexão de voz."""
-        guild_id = int(getattr(guild, "id", 0) or 0)
-
-        async def _runner() -> None:
-            try:
-                await self._maybe_notify_owner_voice_incident(
-                    guild,
-                    voice_channel,
-                    reason=reason,
-                    exc=exc,
-                    context=context,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as report_error:
+        """Enfileira telemetria em O(1), sem await e sem criar task por falha."""
+        if bool(getattr(self, "_voice_incident_shutdown", False)):
+            return
+        try:
+            self._ensure_voice_incident_report_worker()
+            self._voice_incident_report_queue.put_nowait(
+                {
+                    "guild": guild,
+                    "voice_channel": voice_channel,
+                    "reason": str(reason or "falha de voz não classificada"),
+                    "exc": exc,
+                    "context": str(context or "entrada na call"),
+                }
+            )
+        except asyncio.QueueFull:
+            # Sob tempestade, preservar o TTS é mais importante que preservar
+            # cada amostra de telemetria. Os eventos já enfileirados bastam para
+            # disparar os limiares e o contador aparece na DM para transparência.
+            self._voice_incident_dropped_reports = max(0, int(self._voice_incident_dropped_reports)) + 1
+            now = time.monotonic()
+            if now - float(self._voice_incident_last_drop_log_mono or 0.0) >= 30.0:
+                self._voice_incident_last_drop_log_mono = now
                 print(
-                    f"[tts_voice] falha isolada no pipeline de incidente; conexão não foi afetada | "
-                    f"guild={guild_id} error={type(report_error).__name__}: {report_error}"
+                    f"[tts_voice] fila de incidentes cheia; telemetria excedente descartada sem afetar conexão | "
+                    f"dropped={self._voice_incident_dropped_reports}"
                 )
-
-        task = asyncio.create_task(_runner(), name=f"tts-voice-incident-report:{guild_id}")
-        self._voice_incident_report_tasks.add(task)
-        task.add_done_callback(self._voice_incident_report_tasks.discard)
+        except Exception as report_error:
+            # O observador nunca pode transformar uma falha de telemetria em
+            # falha de TTS/voz.
+            print(
+                f"[tts_voice] falha isolada ao enfileirar incidente; conexão não foi afetada | "
+                f"error={type(report_error).__name__}: {report_error}"
+            )
 
     async def _maybe_notify_owner_voice_incident(
         self,
@@ -1314,7 +1539,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if guild_id <= 0:
             return
 
-        decision = self._reserve_voice_failure_alert(guild_id, reason=reason, exc=exc)
+        decision = self._reserve_voice_failure_alert(guild_id, reason=reason, exc=exc, context=context)
         if decision is None:
             return
         incident = decision.get("state")
@@ -1331,12 +1556,38 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         )
         action = str(decision.get("action") or "update")
         if action in {"open", "reopen", "promote"}:
-            # O primeiro alerta e mudanças importantes aparecem imediatamente.
-            await self._sync_owner_voice_incident_message(incident, force=True)
+            # Nem a primeira DM espera I/O aqui: o worker de classificação volta
+            # imediatamente à fila e a sincronização fica deduplicada por incidente.
+            self._schedule_owner_voice_incident_refresh(incident, force=True)
         else:
             # Falhas adicionais só atualizam a mesma DM, com debounce para não
             # consumir rate-limit nem criar carga perceptível no bot.
             self._schedule_owner_voice_incident_refresh(incident)
+
+    def _voice_connection_matches_target(self, guild: discord.Guild, voice_channel) -> bool:
+        vc = self._get_voice_client_for_guild(guild)
+        healthy_channel = self._voice_client_channel(vc) if vc is not None else None
+        if vc is None or not self._voice_client_is_connected(vc) or healthy_channel is None:
+            return False
+        expected_channel_id = int(getattr(voice_channel, "id", 0) or 0)
+        healthy_channel_id = int(getattr(healthy_channel, "id", 0) or 0)
+        return expected_channel_id <= 0 or healthy_channel_id == expected_channel_id
+
+    def _voice_incident_has_failure_since(self, guild_id: int, since_mono: float) -> bool:
+        gid = int(guild_id)
+        for incident in self._voice_incidents.values():
+            if not isinstance(incident, dict) or str(incident.get("status") or "") not in {"active", "reopened"}:
+                continue
+            scope = str(incident.get("scope") or "guild")
+            if scope == "guild":
+                key = incident.get("key")
+                relevant = isinstance(key, tuple) and len(key) >= 2 and int(key[1] or 0) == gid
+            else:
+                affected = incident.get("affected_guild_ids")
+                relevant = isinstance(affected, set) and gid in affected
+            if relevant and float(incident.get("last_failure_mono") or 0.0) > float(since_mono):
+                return True
+        return False
 
     def _schedule_voice_incident_recovery(self, guild: discord.Guild, voice_channel, *, context: str) -> None:
         guild_id = int(getattr(guild, "id", 0) or 0)
@@ -1366,9 +1617,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         async def _runner() -> None:
             try:
-                # Um pequeno atraso evita marcar recuperação no meio do handshake
-                # disparado por voice_state_update. Não afeta o caminho do TTS.
+                # Histerese: duas observações locais saudáveis separadas evitam
+                # fechar/reabrir a DM quando a sessão só estabilizou por instantes.
+                # Não há request extra e nada aqui está no caminho do playback.
                 await asyncio.sleep(0.8)
+                if not self._voice_connection_matches_target(guild, voice_channel):
+                    return
+                stable_since = time.monotonic()
+                await asyncio.sleep(_VOICE_INCIDENT_RECOVERY_STABILITY_SECONDS)
+                if self._voice_incident_has_failure_since(guild_id, stable_since):
+                    return
                 await self._mark_voice_incidents_recovered(guild, voice_channel, context=context)
             except asyncio.CancelledError:
                 raise
@@ -1385,13 +1643,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if guild_id <= 0:
             return
 
+        if not self._voice_connection_matches_target(guild, voice_channel):
+            return
         vc = self._get_voice_client_for_guild(guild)
         healthy_channel = self._voice_client_channel(vc) if vc is not None else None
-        if vc is None or not self._voice_client_is_connected(vc) or healthy_channel is None:
-            return
-        expected_channel_id = int(getattr(voice_channel, "id", 0) or 0)
-        healthy_channel_id = int(getattr(healthy_channel, "id", 0) or 0)
-        if expected_channel_id > 0 and healthy_channel_id != expected_channel_id:
+        if healthy_channel is None:
             return
 
         now = time.monotonic()

@@ -185,8 +185,113 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
         ]
         self.assertEqual(len(schedulers), 1)
         scheduler_source = ast.get_source_segment(text, schedulers[0]) or ""
-        self.assertIn("asyncio.create_task", scheduler_source)
-        self.assertIn("pipeline de incidente; conexão não foi afetada", scheduler_source)
+        self.assertIn("put_nowait", scheduler_source)
+        self.assertIn("asyncio.QueueFull", scheduler_source)
+        self.assertFalse(any(isinstance(node, ast.Await) for node in ast.walk(schedulers[0])))
+        self.assertNotIn("asyncio.create_task", scheduler_source)
+        self.assertIn("conexão não foi afetada", scheduler_source)
+
+        workers = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_ensure_voice_incident_report_worker"
+        ]
+        self.assertEqual(len(workers), 1)
+        worker_source = ast.get_source_segment(text, workers[0]) or ""
+        self.assertIn("asyncio.create_task", worker_source)
+        self.assertIn("tts-voice-incident-worker", worker_source)
+        self.assertIn("await asyncio.sleep(0)", worker_source)
+
+
+    def test_incident_pipeline_has_bounded_memory_and_never_spawns_task_per_failure(self):
+        text = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
+        self.assertIn("_VOICE_INCIDENT_REPORT_QUEUE_MAXSIZE = 96", text)
+        self.assertIn("_VOICE_INCIDENT_WORKER_YIELD_EVERY = 16", text)
+        self.assertIn("_VOICE_FAILURE_GUILD_EVENT_MAX = 48", text)
+        self.assertIn("_VOICE_FAILURE_GLOBAL_EVENT_MAX = 192", text)
+        self.assertIn("asyncio.Queue(maxsize=_VOICE_INCIDENT_REPORT_QUEUE_MAXSIZE)", text)
+        self.assertIn("del guild_events[:-_VOICE_FAILURE_GUILD_EVENT_MAX]", text)
+        self.assertIn("del global_events[:-_VOICE_FAILURE_GLOBAL_EVENT_MAX]", text)
+        self.assertNotIn("_voice_incident_report_tasks", text)
+
+    def test_incident_context_distinguishes_user_impact_from_background_restore(self):
+        text = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        profiles = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_voice_failure_context_profile"
+        ]
+        self.assertEqual(len(profiles), 1)
+        profile_source = ast.get_source_segment(text, profiles[0]) or ""
+        self.assertIn('"entrada automática do tts"', profile_source)
+        self.assertIn('"impact": "user_blocking"', profile_source)
+        self.assertIn('"restore automático"', profile_source)
+        self.assertIn('"impact": "background"', profile_source)
+        self.assertIn('"threshold_multiplier": 2', profile_source)
+
+        reserves = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_reserve_voice_failure_alert"
+        ]
+        self.assertEqual(len(reserves), 1)
+        reserve_source = ast.get_source_segment(text, reserves[0]) or ""
+        self.assertIn("effective_threshold = threshold * threshold_multiplier", reserve_source)
+        self.assertIn("direct_count >= effective_threshold", reserve_source)
+
+    def test_incident_dm_explains_stage_functional_impact_and_load_protection(self):
+        text = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        builders = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_build_owner_voice_incident_view"
+        ]
+        self.assertEqual(len(builders), 1)
+        source = ast.get_source_segment(text, builders[0]) or ""
+        self.assertIn("**Etapa**", source)
+        self.assertIn("**Impacto funcional**", source)
+        self.assertIn("**Prioridade calculada**", source)
+        self.assertIn("**Contexto de inicialização**", source)
+        self.assertIn("**Proteção de carga**", source)
+        self.assertNotIn("discord.ui.Button", source)
+        self.assertNotIn("discord.ui.ActionRow", source)
+
+    def test_recovery_requires_stable_local_voice_state_before_closing_incident(self):
+        text = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        schedulers = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_schedule_voice_incident_recovery"
+        ]
+        self.assertEqual(len(schedulers), 1)
+        source = ast.get_source_segment(text, schedulers[0]) or ""
+        self.assertIn("_voice_connection_matches_target", source)
+        self.assertIn("_VOICE_INCIDENT_RECOVERY_STABILITY_SECONDS", source)
+        self.assertIn("_voice_incident_has_failure_since", source)
+        self.assertIn("duas observações locais saudáveis", source)
+
+    def test_failed_owner_dm_attempts_are_debounced_too(self):
+        text = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
+        self.assertIn('"last_sync_attempt_mono": 0.0', text)
+        self.assertIn('incident["last_sync_attempt_mono"] = now', text)
+        self.assertIn("last_activity = max(last_edit, last_attempt)", text)
+        self.assertIn("evitando martelar a API do Discord", text)
+
+    def test_incident_classification_does_not_wait_for_discord_dm_io(self):
+        text = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        handlers = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_maybe_notify_owner_voice_incident"
+        ]
+        self.assertEqual(len(handlers), 1)
+        source = ast.get_source_segment(text, handlers[0]) or ""
+        self.assertNotIn("await self._sync_owner_voice_incident_message", source)
+        self.assertIn("self._schedule_owner_voice_incident_refresh(incident, force=True)", source)
 
     def test_audio_worker_auto_join_uses_current_incident_reporting_keyword(self):
         audio_text = (ROOT / "cogs" / "tts" / "audio.py").read_text(encoding="utf-8")

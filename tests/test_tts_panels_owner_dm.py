@@ -142,6 +142,9 @@ class TTSOwnerDMRegressionTests(unittest.TestCase):
         self.assertIn("discord.ui.Container(", builder)
         self.assertIn("discord.ui.TextDisplay(", builder)
         self.assertIn("discord.ui.Separator()", builder)
+        self.assertIn("## Pipeline de incidentes", builder)
+        self.assertIn("Telemetria descartada por proteção de carga", builder)
+        self.assertIn("Este teste não abre, fecha ou altera incidentes reais", builder)
         self.assertNotIn("discord.ui.Button", builder)
         self.assertNotIn("discord.ui.ActionRow", builder)
 

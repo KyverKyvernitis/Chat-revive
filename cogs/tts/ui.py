@@ -1443,7 +1443,7 @@ async def _save_tts_modal_updates(
         view.message = panel_message
         await cog._panel_update_after_change(
             interaction,
-            embed=cog._make_embed("TTS", "Cada prefixo escolhe um modo de voz.", ok=True),
+            embed=cog._make_embed("TTS", "Escolha o motor pelo prefixo da mensagem.", ok=True),
             view=view,
             title=success_title,
             description=success_description,
@@ -2424,7 +2424,7 @@ async def _reset_public_launcher_select(interaction: discord.Interaction, panel)
         view.message = message
         await cog._edit_panel_message_payload(
             message,
-            embed=cog._make_embed("TTS", "Cada prefixo escolhe um modo de voz.", ok=True),
+            embed=cog._make_embed("TTS", "Escolha o motor pelo prefixo da mensagem.", ok=True),
             view=view,
         )
     except Exception as e:
@@ -2433,7 +2433,7 @@ async def _reset_public_launcher_select(interaction: discord.Interaction, panel)
 
 
 class TTSPublicLauncherButton(discord.ui.Button):
-    def __init__(self, *, action: str, label: str, emoji: str):
+    def __init__(self, *, action: str, label: str, emoji: str | None = None):
         super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.secondary)
         self.action = str(action)
 
@@ -2549,6 +2549,7 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
             and hasattr(discord.ui, "Container")
             and hasattr(discord.ui, "TextDisplay")
             and hasattr(discord.ui, "ActionRow")
+            and hasattr(discord.ui, "Section")
         )
 
     def _spoken_name_enabled(self) -> bool:
@@ -2567,14 +2568,8 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
         except TypeError:
             return discord.ui.Separator()
 
-    @staticmethod
-    def _button_row(button: discord.ui.Button):
-        row = discord.ui.ActionRow()
-        row.add_item(button)
-        return row
-
     def _intro_text(self) -> str:
-        return "### TTS\n**Como funciona**\nCada prefixo escolhe um modo de voz."
+        return "### TTS\nEscolha o motor pelo prefixo da mensagem"
 
 
     def _rebuild_items(self) -> None:
@@ -2583,35 +2578,47 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
         except Exception:
             pass
 
-        edge_button = TTSPublicLauncherButton(action="edge", label="Configurar Edge", emoji="🔊")
-        gtts_button = TTSPublicLauncherButton(action="gtts", label="Configurar gTTS", emoji="🔤")
-        spoken_button = TTSPublicLauncherButton(action="spoken_name", label="Alterar apelido", emoji="🪪")
         spoken_name_enabled = self._spoken_name_enabled()
 
         if self.is_components_v2_panel():
+            edge_button = TTSPublicLauncherButton(action="edge", label="Configurar")
+            gtts_button = TTSPublicLauncherButton(action="gtts", label="Configurar")
             container = discord.ui.Container(
                 discord.ui.TextDisplay(self._intro_text()),
                 self._separator(),
-                discord.ui.TextDisplay("**Edge**\nVoz natural. Use: `,texto`"),
-                self._button_row(edge_button),
+                discord.ui.Section(
+                    discord.ui.TextDisplay(
+                        "**Edge**\nVoz mais personalizável (é mais lenta) · Prefixo `,`"
+                    ),
+                    accessory=edge_button,
+                ),
                 self._separator(),
-                discord.ui.TextDisplay("**gTTS**\nVoz simples. Use: `.texto`"),
-                self._button_row(gtts_button),
+                discord.ui.Section(
+                    discord.ui.TextDisplay(
+                        "**gTTS**\nVoz mais simples (é mais rápida) · Prefixo `.`"
+                    ),
+                    accessory=gtts_button,
+                ),
                 accent_color=discord.Color.blurple(),
             )
             if spoken_name_enabled:
+                spoken_button = TTSPublicLauncherButton(action="spoken_name", label="Alterar")
                 container.add_item(self._separator())
-                container.add_item(discord.ui.TextDisplay(
-                    "**Apelido falado**\nEscolha o nome anunciado antes das suas mensagens."
+                container.add_item(discord.ui.Section(
+                    discord.ui.TextDisplay(
+                        "**Apelido falado**\nEscolha o nome anunciado antes das suas mensagens"
+                    ),
+                    accessory=spoken_button,
                 ))
-                container.add_item(self._button_row(spoken_button))
             self.add_item(container)
             return
 
-        self.add_item(edge_button)
-        self.add_item(gtts_button)
+        # Fallback legado: mantém rótulos completos porque os botões não têm
+        # uma Section ao lado para indicar a qual motor pertencem.
+        self.add_item(TTSPublicLauncherButton(action="edge", label="Configurar Edge"))
+        self.add_item(TTSPublicLauncherButton(action="gtts", label="Configurar gTTS"))
         if spoken_name_enabled:
-            self.add_item(spoken_button)
+            self.add_item(TTSPublicLauncherButton(action="spoken_name", label="Alterar apelido"))
 
     async def _open_action(self, interaction: discord.Interaction, action: str) -> None:
         if interaction.guild is None:

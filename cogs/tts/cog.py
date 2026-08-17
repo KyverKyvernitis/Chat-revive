@@ -4249,7 +4249,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     await interaction.response.defer(ephemeral=True, thinking=False)
                 await self._edit_panel_message_payload(
                     message_to_edit,
-                    embed=self._make_embed("TTS", "Cada prefixo escolhe um modo de voz.", ok=True),
+                    embed=self._make_embed("TTS", "Escolha o motor pelo prefixo da mensagem.", ok=True),
                     view=launcher_view,
                 )
                 await interaction.followup.send(
@@ -4658,7 +4658,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             panel_kind = "launcher"
             embed = self._make_embed(
                 "TTS",
-                "Cada prefixo escolhe um modo de voz. Use os botões para abrir seus ajustes.",
+                "Escolha o motor pelo prefixo da mensagem.",
                 ok=True,
             )
             view = self._build_public_tts_launcher_view(message.guild.id, timeout=300)

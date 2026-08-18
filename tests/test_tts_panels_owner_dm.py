@@ -121,9 +121,10 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         base = self._class_source(self.ui_text, self.ui_tree, "_BaseTTSLayoutView")
         self.assertIn('if self.panel_kind == "launcher":', base)
         self.assertIn(
-            'Essa configuração não é sua, use o comando `_tts` para configurar a sua voz',
+            'command_hint = await self.cog._get_panel_prefix_hint(self.guild_id, "launcher")',
             base,
         )
+        self.assertIn('Essa configuração não é sua, use o comando {command_hint} para configurar a sua voz', base)
         self.assertIn("allowed_mentions=discord.AllowedMentions.none()", base)
 
     def test_launcher_description_and_sections_match_the_compact_design(self):
@@ -161,6 +162,59 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(self.ui_text.count('owner_id=int(state.get("owner_id", 0) or 0)'), 2)
         self.assertIn('owner_id=int(state.get("owner_id", 0) or 0)', self.cog_text)
         self.assertIn("self._guild_defaults, self._user_settings = self._load_launcher_settings()", self.ui_text)
+
+    def test_expired_interaction_uses_server_prefix_and_short_tts_message(self):
+        prefix_nodes = [
+            node for node in ast.walk(self.cog_tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_get_panel_prefix_hint"
+        ]
+        self.assertEqual(len(prefix_nodes), 1)
+        prefix_source = ast.get_source_segment(self.cog_text, prefix_nodes[0]) or ""
+        self.assertIn('"launcher": "tts"', prefix_source)
+        self.assertIn('"user": "tts"', prefix_source)
+        self.assertIn('get_guild_tts_defaults(guild_id)', prefix_source)
+        self.assertIn('(guild_defaults or {}).get("bot_prefix")', prefix_source)
+
+        expired_nodes = [
+            node for node in ast.walk(self.cog_tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_build_expired_panel_message"
+        ]
+        self.assertEqual(len(expired_nodes), 1)
+        expired_source = ast.get_source_segment(self.cog_text, expired_nodes[0]) or ""
+        self.assertIn("<:osaka:1539137127852539944>| Essa interação expirou", expired_source)
+        self.assertIn("{prefix_hint} novamente para usar esse botão", expired_source)
+        self.assertNotIn("ficou aberto por tempo demais", expired_source)
+        self.assertNotIn("gere um painel novo", expired_source)
+
+        self.assertIn("_fallback_expired_panel_message(self.panel_kind)", self.ui_text)
+
+    def test_update_confirmation_is_compact_components_v2(self):
+        builder_nodes = [
+            node for node in ast.walk(self.cog_tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_build_tts_notice_view"
+        ]
+        self.assertEqual(len(builder_nodes), 1)
+        builder = ast.get_source_segment(self.cog_text, builder_nodes[0]) or ""
+        self.assertIn('getattr(discord.ui, "LayoutView", None)', builder)
+        self.assertIn('getattr(discord.ui, "Container", None)', builder)
+        self.assertIn('getattr(discord.ui, "TextDisplay", None)', builder)
+        self.assertIn('lines.append(f"-# {compact_description}")', builder)
+        self.assertIn('accent_color=discord.Color.green() if ok else discord.Color.red()', builder)
+
+        updater_nodes = [
+            node for node in ast.walk(self.cog_tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_panel_update_after_change"
+        ]
+        self.assertEqual(len(updater_nodes), 1)
+        updater = ast.get_source_segment(self.cog_text, updater_nodes[0]) or ""
+        self.assertIn("await self._send_tts_notice(", updater)
+
+        edge = self._class_source(self.ui_text, self.ui_tree, "EdgeSettingsModal")
+        gtts = self._class_source(self.ui_text, self.ui_tree, "GTTSSettingsModal")
+        self.assertIn('details.append(f"Velocidade · {human_rate(normalized)}")', edge)
+        self.assertIn('details.append(f"Tom · {human_pitch(normalized)}")', edge)
+        self.assertIn('success_description=" · ".join(details)', edge)
+        self.assertIn('success_description=f"Idioma · {human_language_name(code)}"', gtts)
 
 
 class TTSEdgeModalVoiceCatalogRegressionTests(unittest.TestCase):

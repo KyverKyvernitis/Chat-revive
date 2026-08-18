@@ -2481,6 +2481,68 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return make_embed(title, description, ok=ok)
 
+    @staticmethod
+    def _compact_tts_notice_description(description: object) -> str:
+        parts: list[str] = []
+        for raw_line in str(description or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[•\-]\s*", "", line)
+            if ": " in line and " · " not in line:
+                label, value = line.split(": ", 1)
+                line = f"{label.strip()} · {value.strip()}"
+            parts.append(line.rstrip("."))
+        return " · ".join(part for part in parts if part)
+
+    def _build_tts_notice_view(self, title: str, description: str, *, ok: bool = True):
+        layout_cls = getattr(discord.ui, "LayoutView", None)
+        container_cls = getattr(discord.ui, "Container", None)
+        text_display_cls = getattr(discord.ui, "TextDisplay", None)
+        if layout_cls is None or container_cls is None or text_display_cls is None:
+            return None
+
+        compact_description = self._compact_tts_notice_description(description)
+        marker = "✓" if ok else "✕"
+        lines = [f"**{marker} {str(title or '').strip()}**"]
+        if compact_description:
+            lines.append(f"-# {compact_description}")
+
+        view = layout_cls(timeout=None)
+        view.add_item(
+            container_cls(
+                text_display_cls("\n".join(lines)),
+                accent_color=discord.Color.green() if ok else discord.Color.red(),
+            )
+        )
+        return view
+
+    async def _send_tts_notice(
+        self,
+        interaction: discord.Interaction,
+        *,
+        title: str,
+        description: str,
+        ok: bool = True,
+    ) -> None:
+        view = self._build_tts_notice_view(title, description, ok=ok)
+        common = {
+            "ephemeral": True,
+            "allowed_mentions": discord.AllowedMentions.none(),
+        }
+        if view is not None:
+            if interaction.response.is_done():
+                await interaction.followup.send(view=view, **common)
+            else:
+                await interaction.response.send_message(view=view, **common)
+            return
+
+        embed = self._make_embed(title, description, ok=ok)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, **common)
+        else:
+            await interaction.response.send_message(embed=embed, **common)
+
     def _is_components_v2_panel_view(self, view: discord.ui.View | None) -> bool:
         checker = getattr(view, "is_components_v2_panel", None)
         if not callable(checker):
@@ -3622,11 +3684,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     async def _get_panel_prefix_hint(self, guild_id: int, panel_kind: str) -> str:
         prefix_command = {
-            "user": "panel",
+            "launcher": "tts",
+            "user": "tts",
             "server": "panel_server",
-            "toggle": "panel_toggles",
-        }.get(panel_kind, "panel")
-        bot_prefix = getattr(config, "BOT_PREFIX", "_")
+            "toggle": "toggle_panel",
+        }.get(panel_kind, "tts")
+        bot_prefix = getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_"))
 
         db = self._get_db()
         if db is not None and hasattr(db, "get_guild_tts_defaults"):
@@ -3644,12 +3707,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return build_expired_panel_embed(slash_mention=slash_mention, prefix_hint=prefix_hint)
 
     async def _build_expired_panel_message(self, guild_id: int, panel_kind: str) -> str:
-        slash_mention = await self._get_panel_command_mention(guild_id, panel_kind)
         prefix_hint = await self._get_panel_prefix_hint(guild_id, panel_kind)
         return (
-            "Essa interação já expirou porque esse comando ficou aberto por tempo demais.\n\n"
-            f"Para abrir um novo painel, tente usar {slash_mention} novamente"
-            f" — ou, se preferir, {prefix_hint}."
+            "<:osaka:1539137127852539944>| Essa interação expirou, você terá que usar o comando "
+            f"{prefix_hint} novamente para usar esse botão"
         )
 
     def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None) -> discord.ui.View:
@@ -4254,10 +4315,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     embed=self._make_embed("TTS", TTS_LAUNCHER_DESCRIPTION, ok=True),
                     view=launcher_view,
                 )
-                await interaction.followup.send(
-                    embed=self._make_embed(title, description or "Salvo.", ok=True),
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
+                await self._send_tts_notice(
+                    interaction,
+                    title=title,
+                    description=description or "Salvo",
+                    ok=True,
                 )
                 return
             except Exception as e:

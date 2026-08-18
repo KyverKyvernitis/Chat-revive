@@ -22,10 +22,29 @@ from .utils.embed import build_settings_panel_text_from_embed, human_voice_name,
 
 TTS_PANEL_EXPIRE_AFTER_SECONDS = 180.0
 TTS_PANEL_DISPATCH_TIMEOUT_SECONDS = 86400.0
+TTS_EXPIRED_EMOJI = "<:osaka:1539137127852539944>"
 TTS_LAUNCHER_DESCRIPTION = (
     "Tem dois modos de texto para voz, cada um com um prefixo diferente. "
     "Escolha qual quer configurar"
 )
+
+
+def _fallback_panel_command_hint(panel_kind: str) -> str:
+    prefix = str(getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_")) or "_")
+    command = {
+        "launcher": "tts",
+        "user": "tts",
+        "server": "panel_server",
+        "toggle": "toggle_panel",
+    }.get(str(panel_kind or "user"), "tts")
+    return f"`{prefix}{command}`"
+
+
+def _fallback_expired_panel_message(panel_kind: str) -> str:
+    return (
+        f"{TTS_EXPIRED_EMOJI}| Essa interação expirou, você terá que usar o comando "
+        f"{_fallback_panel_command_hint(panel_kind)} novamente para usar esse botão"
+    )
 
 class _BaseTTSView(discord.ui.View):
     def __init__(
@@ -58,10 +77,7 @@ class _BaseTTSView(discord.ui.View):
             try:
                 message = await self.cog._build_expired_panel_message(self.guild_id, self.panel_kind)
             except Exception:
-                message = (
-                    "Essa interação já expirou porque esse comando ficou aberto por tempo demais.\n\n"
-                    "Para continuar, abra o comando novamente e gere um painel novo."
-                )
+                message = _fallback_expired_panel_message(self.panel_kind)
             if interaction.response.is_done():
                 await interaction.followup.send(message, ephemeral=True)
             else:
@@ -1503,10 +1519,11 @@ async def _save_tts_modal_updates(
             target_message=panel_message,
         )
     else:
-        await interaction.response.send_message(
-            embed=cog._make_embed(success_title, success_description, ok=True),
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
+        await cog._send_tts_notice(
+            interaction,
+            title=success_title,
+            description=success_description,
+            ok=True,
         )
 
     if server:
@@ -1662,10 +1679,10 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
                 return
             updates["voice"] = selected_voice
             if selected_language != self.current_language and adjusted_voice:
-                details.append(f"• Idioma: {selected_language}")
-                details.append(f"• Voz ajustada: {human_voice_name(selected_voice)}")
+                details.append(f"Idioma · {human_language_name(selected_language)}")
+                details.append(f"Voz · {human_voice_name(selected_voice)}")
             else:
-                details.append(f"• Voz: {human_voice_name(selected_voice)}")
+                details.append(f"Voz · {human_voice_name(selected_voice)}")
         elif selected_language != self.current_language:
             picked_voice = _pick_first_edge_voice_for_language(self.cog, selected_language, self.current_voice)
             if not picked_voice:
@@ -1676,8 +1693,8 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
                 return
             if picked_voice != self.current_voice:
                 updates["voice"] = picked_voice
-                details.append(f"• Idioma: {selected_language}")
-                details.append(f"• Voz ajustada: {human_voice_name(picked_voice)}")
+                details.append(f"Idioma · {human_language_name(selected_language)}")
+                details.append(f"Voz · {human_voice_name(picked_voice)}")
 
         rate = _single_component_value(getattr(self, "rate", None), self.current_rate)
         if rate:
@@ -1688,7 +1705,7 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
             current_rate = self.cog._normalize_rate_value(self.current_rate) or self.current_rate
             if str(normalized) != str(current_rate):
                 updates["rate"] = normalized
-                details.append(f"• Velocidade: {human_rate(normalized)}")
+                details.append(f"Velocidade · {human_rate(normalized)}")
 
         pitch = _single_component_value(getattr(self, "pitch", None), self.current_pitch)
         if pitch:
@@ -1699,7 +1716,7 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
             current_pitch = self.cog._normalize_pitch_value(self.current_pitch) or self.current_pitch
             if str(normalized) != str(current_pitch):
                 updates["pitch"] = normalized
-                details.append(f"• Tom: {human_pitch(normalized)}")
+                details.append(f"Tom · {human_pitch(normalized)}")
 
 
         await _save_tts_modal_updates(
@@ -1709,7 +1726,7 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
             server=self.server,
             updates=updates,
             success_title="Edge atualizado",
-            success_description="\n".join(details) if details else "Nada mudou.",
+            success_description=" · ".join(details) if details else "Nada mudou",
             target_user_id=self.target_user_id,
             target_user_name=self.target_user_name,
         )
@@ -1798,7 +1815,7 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
             server=self.server,
             updates=updates,
             success_title="gTTS atualizado",
-            success_description=f"• Idioma: {human_language_name(code)}" if updates else "Nada mudou.",
+            success_description=f"Idioma · {human_language_name(code)}" if updates else "Nada mudou",
             target_user_id=self.target_user_id,
             target_user_name=self.target_user_name,
         )
@@ -2523,10 +2540,7 @@ class _BaseTTSLayoutView(_TTS_LAYOUT_VIEW_CLS):
             try:
                 message = await self.cog._build_expired_panel_message(self.guild_id, self.panel_kind)
             except Exception:
-                message = (
-                    "Essa interação já expirou porque esse comando ficou aberto por tempo demais.\n\n"
-                    "Para continuar, abra o comando novamente e gere um painel novo."
-                )
+                message = _fallback_expired_panel_message(self.panel_kind)
             if interaction.response.is_done():
                 await interaction.followup.send(message, ephemeral=True)
             else:
@@ -2537,8 +2551,12 @@ class _BaseTTSLayoutView(_TTS_LAYOUT_VIEW_CLS):
             return True
         if interaction.user.id != self.owner_id:
             if self.panel_kind == "launcher":
+                try:
+                    command_hint = await self.cog._get_panel_prefix_hint(self.guild_id, "launcher")
+                except Exception:
+                    command_hint = _fallback_panel_command_hint("launcher")
                 await interaction.response.send_message(
-                    "Essa configuração não é sua, use o comando `_tts` para configurar a sua voz",
+                    f"Essa configuração não é sua, use o comando {command_hint} para configurar a sua voz",
                     ephemeral=True,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )

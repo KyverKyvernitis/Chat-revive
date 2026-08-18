@@ -1004,23 +1004,37 @@ def _edge_language_options(cog: "TTSVoice", current: str = "") -> list[discord.S
         for v in list(getattr(cog, "edge_voice_cache", []) or []) + sorted(getattr(cog, "edge_voice_names", set()) or set())
         if str(v or "").strip()
     })
+    discovered_set = set(discovered)
     seen: set[str] = set()
     options: list[discord.SelectOption] = []
     for code in preferred + discovered:
         code = str(code or "").strip()
         if not code or code in seen:
             continue
+        # Quando o catálogo do Edge está carregado, não inventa idiomas que
+        # atualmente não tenham nenhuma voz disponível nele.
+        if discovered_set and code not in discovered_set:
+            continue
         seen.add(code)
         options.append(discord.SelectOption(label=_shorten(code, 100), description="Idioma Edge", value=code, default=(code == current)))
         if len(options) >= 25:
             break
-    return options or [discord.SelectOption(label="pt-BR", description="Idioma Edge", value="pt-BR", default=True)]
+    # Catálogo indisponível: mantém somente o idioma atual para o fallback do
+    # modal continuar utilizável sem fabricar uma lista de vozes.
+    return options or [discord.SelectOption(label=_shorten(current, 100), description="Idioma Edge", value=current, default=True)]
 
 
 def _edge_voice_options_for_language(cog: "TTSVoice", *, language: str, current: str = "") -> list[discord.SelectOption]:
     language = str(language or _edge_language_from_voice(current)).strip() or "pt-BR"
     current = str(current or "").strip()
-    voices_source = list(getattr(cog, "edge_voice_cache", []) or []) + sorted(getattr(cog, "edge_voice_names", set()) or set())
+    voices_source = {
+        str(v or "").strip()
+        for v in list(getattr(cog, "edge_voice_cache", []) or []) + sorted(getattr(cog, "edge_voice_names", set()) or set())
+        if str(v or "").strip()
+    }
+    available = {v for v in voices_source if _edge_voice_matches_language(v, language)}
+    # A ordem preferida é apenas cosmética. Uma voz só entra no modal se ela
+    # também existir no catálogo retornado pelo edge_tts.list_voices().
     preferred = [
         "pt-BR-FranciscaNeural",
         "pt-BR-AntonioNeural",
@@ -1039,10 +1053,10 @@ def _edge_voice_options_for_language(cog: "TTSVoice", *, language: str, current:
         "pt-BR-YaraNeural",
     ]
     candidates: list[str] = []
-    if current and _edge_voice_matches_language(current, language):
+    if current in available:
         candidates.append(current)
-    candidates.extend([v for v in preferred if _edge_voice_matches_language(v, language)])
-    candidates.extend([v for v in voices_source if _edge_voice_matches_language(str(v), language)])
+    candidates.extend([v for v in preferred if v in available])
+    candidates.extend(sorted(available))
     seen: set[str] = set()
     voices: list[str] = []
     for voice in candidates:
@@ -1053,10 +1067,8 @@ def _edge_voice_options_for_language(cog: "TTSVoice", *, language: str, current:
         voices.append(voice)
         if len(voices) >= 25:
             break
-    if not voices and current:
-        voices = [current]
     if not voices:
-        voices = ["pt-BR-FranciscaNeural"]
+        return []
     has_current = current and any(v == current for v in voices)
     options: list[discord.SelectOption] = []
     for idx, voice in enumerate(voices[:25]):
@@ -1074,8 +1086,8 @@ def _edge_voice_options_for_language(cog: "TTSVoice", *, language: str, current:
 def _pick_first_edge_voice_for_language(cog: "TTSVoice", language: str, current: str = "") -> str:
     options = _edge_voice_options_for_language(cog, language=language, current=current)
     if not options:
-        return str(current or "pt-BR-FranciscaNeural")
-    return str(getattr(options[0], "value", None) or getattr(options[0], "label", None) or current or "pt-BR-FranciscaNeural")
+        return ""
+    return str(getattr(options[0], "value", None) or getattr(options[0], "label", None) or "")
 
 
 def _top_edge_voice_options(cog: "TTSVoice", current: str = "") -> list[discord.SelectOption]:
@@ -1523,15 +1535,23 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
         if not _modal_label_available():
             return False
         try:
+            language_options = _edge_language_options(self.cog, self.current_language)
+            voice_options = _edge_voice_options_for_language(
+                self.cog,
+                language=self.current_language,
+                current=self.current_voice,
+            )
+            if not voice_options:
+                return False
             language_select = _make_modal_select(
                 "edge_language",
                 placeholder="Idioma Edge",
-                options=_edge_language_options(self.cog, self.current_language),
+                options=language_options,
             )
             voice_select = _make_modal_select(
                 "edge_voice",
                 placeholder="Escolha a voz Edge",
-                options=_edge_voice_options_for_language(self.cog, language=self.current_language, current=self.current_voice),
+                options=voice_options,
             )
             ok = _add_modal_label_item(
                 self,
@@ -1629,6 +1649,12 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
         adjusted_voice = ""
         if selected_language and selected_voice and not _edge_voice_matches_language(selected_voice, selected_language):
             adjusted_voice = _pick_first_edge_voice_for_language(self.cog, selected_language, self.current_voice)
+            if not adjusted_voice:
+                await interaction.response.send_message(
+                    embed=self.cog._make_embed("Idioma indisponível", "Não encontrei uma voz Edge disponível para esse idioma.", ok=False),
+                    ephemeral=True,
+                )
+                return
             selected_voice = adjusted_voice
         if selected_voice and str(selected_voice) != str(self.current_voice):
             if selected_voice not in self.cog.edge_voice_names and selected_voice not in self.cog.edge_voice_cache:
@@ -1642,7 +1668,13 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
                 details.append(f"• Voz: {human_voice_name(selected_voice)}")
         elif selected_language != self.current_language:
             picked_voice = _pick_first_edge_voice_for_language(self.cog, selected_language, self.current_voice)
-            if picked_voice and picked_voice != self.current_voice:
+            if not picked_voice:
+                await interaction.response.send_message(
+                    embed=self.cog._make_embed("Idioma indisponível", "Não encontrei uma voz Edge disponível para esse idioma.", ok=False),
+                    ephemeral=True,
+                )
+                return
+            if picked_voice != self.current_voice:
                 updates["voice"] = picked_voice
                 details.append(f"• Idioma: {selected_language}")
                 details.append(f"• Voz ajustada: {human_voice_name(picked_voice)}")
@@ -2669,7 +2701,7 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
             ]
             summary = self._gtts_summary()
         if summary:
-            lines.append(summary)
+            lines.append(f"-# {summary}")
         return "\n".join(lines)
 
     def _rebuild_items(self) -> None:

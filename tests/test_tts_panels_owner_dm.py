@@ -151,6 +151,7 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         self.assertLess(rate_pos, pitch_pos)
         self.assertIn('self._is_personal_difference("language", "pt-br")', launcher)
         self.assertIn('return " · ".join(part for part in parts if part)', launcher)
+        self.assertIn('lines.append(f"-# {summary}")', launcher)
         self.assertIn("if not personal:\n            return False", launcher)
         self.assertIn("!= self._normalized_setting(key, server)", launcher)
         self.assertNotIn("+ ajustes", launcher)
@@ -160,6 +161,43 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(self.ui_text.count('owner_id=int(state.get("owner_id", 0) or 0)'), 2)
         self.assertIn('owner_id=int(state.get("owner_id", 0) or 0)', self.cog_text)
         self.assertIn("self._guild_defaults, self._user_settings = self._load_launcher_settings()", self.ui_text)
+
+
+class TTSEdgeModalVoiceCatalogRegressionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ui_text = (ROOT / "cogs" / "tts" / "ui.py").read_text(encoding="utf-8")
+        cls.ui_tree = ast.parse(cls.ui_text)
+
+    @classmethod
+    def _function_source(cls, name: str) -> str:
+        nodes = [node for node in ast.walk(cls.ui_tree) if isinstance(node, ast.FunctionDef) and node.name == name]
+        if len(nodes) != 1:
+            raise AssertionError(f"função {name}: esperado 1, encontrado {len(nodes)}")
+        return ast.get_source_segment(cls.ui_text, nodes[0]) or ""
+
+    def test_modal_never_injects_preferred_voices_outside_live_edge_catalog(self):
+        source = self._function_source("_edge_voice_options_for_language")
+        self.assertIn("available = {v for v in voices_source", source)
+        self.assertIn("candidates.extend([v for v in preferred if v in available])", source)
+        self.assertIn("candidates.extend(sorted(available))", source)
+        self.assertIn("if current in available:", source)
+        self.assertIn("if not voices:\n        return []", source)
+        self.assertNotIn('voices = ["pt-BR-FranciscaNeural"]', source)
+
+    def test_language_selector_only_advertises_languages_present_in_loaded_catalog(self):
+        source = self._function_source("_edge_language_options")
+        self.assertIn("discovered_set = set(discovered)", source)
+        self.assertIn("if discovered_set and code not in discovered_set", source)
+
+    def test_guided_edge_modal_falls_back_if_no_verified_voice_exists(self):
+        nodes = [node for node in ast.walk(self.ui_tree) if isinstance(node, ast.ClassDef) and node.name == "EdgeSettingsModal"]
+        self.assertEqual(len(nodes), 1)
+        source = ast.get_source_segment(self.ui_text, nodes[0]) or ""
+        self.assertIn("voice_options = _edge_voice_options_for_language", source)
+        self.assertIn("if not voice_options:\n                return False", source)
+        self.assertIn('"Idioma indisponível"', source)
+
 
 
 class TTSOwnerDMRegressionTests(unittest.TestCase):

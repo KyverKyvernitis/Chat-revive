@@ -74,6 +74,7 @@ from .ui import (
     EdgePrefixModal,
     SpokenNameModal,
     IgnoreRoleConfigView,
+    TTS_LAUNCHER_DESCRIPTION,
     TTSPublicLauncherView,
     TTSMainPanelView,
     TTSStatusView,
@@ -3654,8 +3655,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None) -> discord.ui.View:
         return TTSMainPanelView(self, owner_id, guild_id, server=server, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
 
-    def _build_public_tts_launcher_view(self, guild_id: int, *, timeout: float = 300) -> discord.ui.View:
-        return TTSPublicLauncherView(self, 0, guild_id, timeout=timeout)
+    def _build_public_tts_launcher_view(self, guild_id: int, *, owner_id: int = 0, timeout: float = 300) -> discord.ui.View:
+        return TTSPublicLauncherView(self, int(owner_id or 0), guild_id, timeout=timeout)
 
     def _member_panel_name(self, member: discord.abc.User | None) -> str:
         if member is None:
@@ -4242,6 +4243,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             try:
                 launcher_view = self._build_public_tts_launcher_view(
                     getattr(getattr(message_to_edit, "guild", None), "id", getattr(interaction.guild, "id", 0)),
+                    owner_id=int(state.get("owner_id", 0) or 0),
                     timeout=300,
                 )
                 launcher_view.message = message_to_edit
@@ -4249,7 +4251,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     await interaction.response.defer(ephemeral=True, thinking=False)
                 await self._edit_panel_message_payload(
                     message_to_edit,
-                    embed=self._make_embed("TTS", "Escolha o motor pelo prefixo da mensagem.", ok=True),
+                    embed=self._make_embed("TTS", TTS_LAUNCHER_DESCRIPTION, ok=True),
                     view=launcher_view,
                 )
                 await interaction.followup.send(
@@ -4658,10 +4660,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             panel_kind = "launcher"
             embed = self._make_embed(
                 "TTS",
-                "Escolha o motor pelo prefixo da mensagem.",
+                TTS_LAUNCHER_DESCRIPTION,
                 ok=True,
             )
-            view = self._build_public_tts_launcher_view(message.guild.id, timeout=300)
+            view = self._build_public_tts_launcher_view(
+                message.guild.id,
+                owner_id=message.author.id,
+                timeout=300,
+            )
 
         if await self._check_prefix_panel_cooldown(message, panel_kind):
             return True

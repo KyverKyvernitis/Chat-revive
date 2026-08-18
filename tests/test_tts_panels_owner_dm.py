@@ -81,6 +81,87 @@ class TTSPrefixAliasRegressionTests(unittest.TestCase):
         self.assertNotIn("owner_dm_test", prefix)
 
 
+class TTSLauncherPersonalRegressionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ui_text = (ROOT / "cogs" / "tts" / "ui.py").read_text(encoding="utf-8")
+        cls.cog_text = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
+        cls.ui_tree = ast.parse(cls.ui_text)
+        cls.cog_tree = ast.parse(cls.cog_text)
+
+    @staticmethod
+    def _class_source(text: str, tree: ast.AST, name: str) -> str:
+        nodes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == name]
+        if len(nodes) != 1:
+            raise AssertionError(f"classe {name}: esperado 1, encontrado {len(nodes)}")
+        return ast.get_source_segment(text, nodes[0]) or ""
+
+    def test_launcher_is_owned_by_the_user_who_called_tts(self):
+        handlers = [
+            node for node in ast.walk(self.cog_tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_send_prefix_panel"
+        ]
+        self.assertGreaterEqual(len(handlers), 1)
+        source = ast.get_source_segment(self.cog_text, sorted(handlers, key=lambda node: node.lineno)[-1]) or ""
+        launcher_pos = source.index('panel_kind = "launcher"')
+        launcher_source = source[launcher_pos:]
+        self.assertIn("owner_id=message.author.id", launcher_source)
+        self.assertIn('"owner_id": message.author.id', launcher_source)
+
+        builder_nodes = [
+            node for node in ast.walk(self.cog_tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_build_public_tts_launcher_view"
+        ]
+        self.assertEqual(len(builder_nodes), 1)
+        builder = ast.get_source_segment(self.cog_text, builder_nodes[0]) or ""
+        self.assertIn("owner_id: int = 0", builder)
+        self.assertIn("TTSPublicLauncherView(self, int(owner_id or 0)", builder)
+
+    def test_launcher_rejects_other_users_with_the_short_tts_hint(self):
+        base = self._class_source(self.ui_text, self.ui_tree, "_BaseTTSLayoutView")
+        self.assertIn('if self.panel_kind == "launcher":', base)
+        self.assertIn(
+            'Essa configuração não é sua, use o comando `_tts` para configurar a sua voz',
+            base,
+        )
+        self.assertIn("allowed_mentions=discord.AllowedMentions.none()", base)
+
+    def test_launcher_description_and_sections_match_the_compact_design(self):
+        launcher = self._class_source(self.ui_text, self.ui_tree, "TTSPublicLauncherView")
+        self.assertIn("TTS_LAUNCHER_DESCRIPTION", launcher)
+        self.assertIn("Voz mais personalizável (é mais lenta)", launcher)
+        self.assertIn("Voz mais simples (é mais rápida)", launcher)
+        self.assertIn('label="Configurar"', launcher)
+        self.assertIn('self._server_setting("edge_prefix", ",")', launcher)
+        self.assertIn('self._server_setting("gtts_prefix", ".")', launcher)
+        self.assertNotIn("Como funciona", launcher)
+
+        self.assertIn(
+            '"Tem dois modos de texto para voz, cada um com um prefixo diferente. "',
+            self.ui_text,
+        )
+        self.assertNotIn("Escolha o motor pelo prefixo da mensagem", self.ui_text + self.cog_text)
+
+    def test_summary_shows_every_real_user_difference_and_never_collapses_it(self):
+        launcher = self._class_source(self.ui_text, self.ui_tree, "TTSPublicLauncherView")
+        voice_pos = launcher.index('self._is_personal_difference("voice"')
+        rate_pos = launcher.index('self._is_personal_difference("rate"')
+        pitch_pos = launcher.index('self._is_personal_difference("pitch"')
+        self.assertLess(voice_pos, rate_pos)
+        self.assertLess(rate_pos, pitch_pos)
+        self.assertIn('self._is_personal_difference("language", "pt-br")', launcher)
+        self.assertIn('return " · ".join(part for part in parts if part)', launcher)
+        self.assertIn("if not personal:\n            return False", launcher)
+        self.assertIn("!= self._normalized_setting(key, server)", launcher)
+        self.assertNotIn("+ ajustes", launcher)
+        self.assertNotIn("Configuração padrão", launcher)
+
+    def test_launcher_refresh_keeps_owner_and_reloads_summary_after_save(self):
+        self.assertGreaterEqual(self.ui_text.count('owner_id=int(state.get("owner_id", 0) or 0)'), 2)
+        self.assertIn('owner_id=int(state.get("owner_id", 0) or 0)', self.cog_text)
+        self.assertIn("self._guild_defaults, self._user_settings = self._load_launcher_settings()", self.ui_text)
+
+
 class TTSOwnerDMRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

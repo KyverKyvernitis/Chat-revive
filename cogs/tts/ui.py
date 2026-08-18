@@ -22,6 +22,10 @@ from .utils.embed import build_settings_panel_text_from_embed, human_voice_name,
 
 TTS_PANEL_EXPIRE_AFTER_SECONDS = 180.0
 TTS_PANEL_DISPATCH_TIMEOUT_SECONDS = 86400.0
+TTS_LAUNCHER_DESCRIPTION = (
+    "Tem dois modos de texto para voz, cada um com um prefixo diferente. "
+    "Escolha qual quer configurar"
+)
 
 class _BaseTTSView(discord.ui.View):
     def __init__(
@@ -1439,11 +1443,15 @@ async def _save_tts_modal_updates(
 
     state = cog._public_panel_states.get(message_id or 0, {}) if message_id else {}
     if panel_message is not None and state.get("panel_kind") == "launcher":
-        view = cog._build_public_tts_launcher_view(interaction.guild.id, timeout=300)
+        view = cog._build_public_tts_launcher_view(
+            interaction.guild.id,
+            owner_id=int(state.get("owner_id", 0) or 0),
+            timeout=300,
+        )
         view.message = panel_message
         await cog._panel_update_after_change(
             interaction,
-            embed=cog._make_embed("TTS", "Escolha o motor pelo prefixo da mensagem.", ok=True),
+            embed=cog._make_embed("TTS", TTS_LAUNCHER_DESCRIPTION, ok=True),
             view=view,
             title=success_title,
             description=success_description,
@@ -2420,11 +2428,15 @@ async def _reset_public_launcher_select(interaction: discord.Interaction, panel)
         return
 
     try:
-        view = cog._build_public_tts_launcher_view(guild.id, timeout=300)
+        view = cog._build_public_tts_launcher_view(
+            guild.id,
+            owner_id=int(state.get("owner_id", 0) or 0),
+            timeout=300,
+        )
         view.message = message
         await cog._edit_panel_message_payload(
             message,
-            embed=cog._make_embed("TTS", "Escolha o motor pelo prefixo da mensagem.", ok=True),
+            embed=cog._make_embed("TTS", TTS_LAUNCHER_DESCRIPTION, ok=True),
             view=view,
         )
     except Exception as e:
@@ -2492,14 +2504,21 @@ class _BaseTTSLayoutView(_TTS_LAYOUT_VIEW_CLS):
         if self.owner_id == 0:
             return True
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                embed=self.cog._make_embed(
-                    "Painel bloqueado",
-                    "Só quem abriu esse painel pode usar esses botões e menus.",
-                    ok=False,
-                ),
-                ephemeral=True,
-            )
+            if self.panel_kind == "launcher":
+                await interaction.response.send_message(
+                    "Essa configuração não é sua, use o comando `_tts` para configurar a sua voz",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                await interaction.response.send_message(
+                    embed=self.cog._make_embed(
+                        "Painel bloqueado",
+                        "Só quem abriu esse painel pode usar esses botões e menus.",
+                        ok=False,
+                    ),
+                    ephemeral=True,
+                )
             return False
         return True
 
@@ -2540,6 +2559,7 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
     def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 300):
         super().__init__(cog, owner_id, guild_id, timeout=timeout)
         self.panel_kind = "launcher"
+        self._guild_defaults, self._user_settings = self._load_launcher_settings()
         self._rebuild_items()
 
     def is_components_v2_panel(self) -> bool:
@@ -2552,14 +2572,27 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
             and hasattr(discord.ui, "Section")
         )
 
-    def _spoken_name_enabled(self) -> bool:
+    def _load_launcher_settings(self) -> tuple[dict, dict]:
+        db = self.cog._get_db()
+        guild_defaults: dict = {}
+        user_settings: dict = {}
+        if db is None:
+            return guild_defaults, user_settings
         try:
-            db = self.cog._get_db()
-            defaults = db.get_guild_tts_defaults(self.guild_id) if db is not None else {}
-            return bool((defaults or {}).get("announce_author", False))
+            if hasattr(db, "get_guild_tts_defaults"):
+                guild_defaults = dict(db.get_guild_tts_defaults(self.guild_id) or {})
         except Exception as e:
-            print(f"[tts_panel] falha ao verificar apelido falado do launcher: {e!r}")
-            return False
+            print(f"[tts_panel] falha ao carregar padrões do launcher: {e!r}")
+        if self.owner_id > 0:
+            try:
+                if hasattr(db, "get_user_tts"):
+                    user_settings = dict(db.get_user_tts(self.guild_id, self.owner_id) or {})
+            except Exception as e:
+                print(f"[tts_panel] falha ao carregar ajustes pessoais do launcher: {e!r}")
+        return guild_defaults, user_settings
+
+    def _spoken_name_enabled(self) -> bool:
+        return bool((self._guild_defaults or {}).get("announce_author", False))
 
     @staticmethod
     def _separator():
@@ -2569,8 +2602,75 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
             return discord.ui.Separator()
 
     def _intro_text(self) -> str:
-        return "### TTS\nEscolha o motor pelo prefixo da mensagem"
+        return f"### TTS\n{TTS_LAUNCHER_DESCRIPTION}"
 
+    @staticmethod
+    def _clean_setting(value: object) -> str:
+        return str(value or "").strip()
+
+    def _server_setting(self, key: str, fallback: str) -> str:
+        return self._clean_setting((self._guild_defaults or {}).get(key)) or str(fallback or "")
+
+    def _normalized_setting(self, key: str, value: object) -> str:
+        text = self._clean_setting(value)
+        if key == "rate":
+            normalized = self.cog._normalize_rate_value(text)
+            return str(normalized or text).strip().lower()
+        if key == "pitch":
+            normalized = self.cog._normalize_pitch_value(text)
+            return str(normalized or text).strip().lower()
+        if key == "language":
+            return text.replace("_", "-").lower()
+        if key == "voice":
+            return text.lower()
+        return text
+
+    def _is_personal_difference(self, key: str, fallback: str) -> bool:
+        personal = self._clean_setting((self._user_settings or {}).get(key))
+        if not personal:
+            return False
+        server = self._server_setting(key, fallback)
+        return self._normalized_setting(key, personal) != self._normalized_setting(key, server)
+
+    @staticmethod
+    def _code(value: object) -> str:
+        text = str(value or "").strip().replace("`", "")
+        return f"`{text}`" if text else ""
+
+    def _edge_summary(self) -> str:
+        parts: list[str] = []
+        if self._is_personal_difference("voice", str(getattr(config, "EDGE_TTS_VOICE", "pt-BR-FranciscaNeural") or "pt-BR-FranciscaNeural")):
+            parts.append(f"Voz: {self._code(human_voice_name(self._user_settings.get('voice')))}")
+        if self._is_personal_difference("rate", "+0%"):
+            parts.append(f"Velocidade: {self._code(self.cog._normalize_rate_value(self._user_settings.get('rate')) or self._user_settings.get('rate'))}")
+        if self._is_personal_difference("pitch", "+0Hz"):
+            parts.append(f"Tom: {self._code(self.cog._normalize_pitch_value(self._user_settings.get('pitch')) or self._user_settings.get('pitch'))}")
+        return " · ".join(part for part in parts if part)
+
+    def _gtts_summary(self) -> str:
+        if not self._is_personal_difference("language", "pt-br"):
+            return ""
+        language = human_language_name(self._user_settings.get("language"))
+        return f"Idioma: {self._code(language)}"
+
+    def _engine_text(self, *, engine: str) -> str:
+        if engine == "edge":
+            prefix = self._server_setting("edge_prefix", ",")
+            lines = [
+                "**Edge**",
+                f"Voz mais personalizável (é mais lenta) · Prefixo {self._code(prefix)}",
+            ]
+            summary = self._edge_summary()
+        else:
+            prefix = self._server_setting("gtts_prefix", ".")
+            lines = [
+                "**gTTS**",
+                f"Voz mais simples (é mais rápida) · Prefixo {self._code(prefix)}",
+            ]
+            summary = self._gtts_summary()
+        if summary:
+            lines.append(summary)
+        return "\n".join(lines)
 
     def _rebuild_items(self) -> None:
         try:
@@ -2587,16 +2687,12 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
                 discord.ui.TextDisplay(self._intro_text()),
                 self._separator(),
                 discord.ui.Section(
-                    discord.ui.TextDisplay(
-                        "**Edge**\nVoz mais personalizável (é mais lenta) · Prefixo `,`"
-                    ),
+                    discord.ui.TextDisplay(self._engine_text(engine="edge")),
                     accessory=edge_button,
                 ),
                 self._separator(),
                 discord.ui.Section(
-                    discord.ui.TextDisplay(
-                        "**gTTS**\nVoz mais simples (é mais rápida) · Prefixo `.`"
-                    ),
+                    discord.ui.TextDisplay(self._engine_text(engine="gtts")),
                     accessory=gtts_button,
                 ),
                 accent_color=discord.Color.blurple(),

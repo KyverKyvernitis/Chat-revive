@@ -41,6 +41,7 @@ MUSIC_AGENT_START_COMMAND="${MUSIC_AGENT_START_COMMAND:-$WORKER_DIR/start-phone-
 MAINT_LOCK_DIR="${PHONE_WORKER_MAINT_LOCK_DIR:-$WORKER_DIR/.phone-worker-maintenance.lock}"
 MAINT_LOG_FILE="${PHONE_WORKER_MAINT_LOG_FILE:-$WORKER_DIR/phone-worker-maintenance.log}"
 DEPS_STATE_DIR="${PHONE_WORKER_DEPS_STATE_DIR:-$WORKER_DIR/.dependency-install}"
+APK_BUILDER_ENV_CHANGED=0
 
 log() {
   printf '[phone-worker-start] %s\n' "$*"
@@ -261,6 +262,35 @@ append_csv_env_value() {
   else
     upsert_env_value "$key" "$item"
   fi
+}
+
+csv_env_has() {
+  local value="${1:-}"
+  local item="${2:-}"
+  printf '%s' "$value" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$item"
+}
+
+apk_builder_toolchain_ready() {
+  local cmd
+  for cmd in java javac jar gradle aapt2; do
+    command -v "$cmd" >/dev/null 2>&1 || return 1
+  done
+  local sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/android-sdk}}"
+  [[ -s "$sdk/platforms/android-34/android.jar" ]]
+}
+
+ensure_apk_builder_env_if_ready() {
+  truthy "${PHONE_WORKER_APK_BUILD_ENABLED:-true}" || return 0
+  truthy "${PHONE_WORKER_AUTO_APK_BUILDER_CAPABILITY:-true}" || return 0
+  safe_mode_enabled && return 0
+  apk_builder_toolchain_ready || return 0
+  if csv_env_has "${CORE_WORKER_ROLES:-}" apk-builder && csv_env_has "${CORE_WORKER_CAPABILITIES:-}" apk-builder; then
+    return 0
+  fi
+  append_csv_env_value CORE_WORKER_ROLES apk-builder
+  append_csv_env_value CORE_WORKER_CAPABILITIES apk-builder
+  APK_BUILDER_ENV_CHANGED=1
+  log "toolchain Android validado; capacidade apk-builder reparada sem trocar o perfil atual"
 }
 
 ensure_music_worker_env_if_needed() {
@@ -622,6 +652,7 @@ run_post_start_maintenance_async() {
 }
 
 ensure_music_worker_env_if_needed
+ensure_apk_builder_env_if_ready
 cleanup_stale_heavy_dependency_builds
 cleanup_heavy_services_for_safe_mode
 
@@ -629,7 +660,11 @@ count="$(worker_pid_count)"
 if health_ok && [[ "$count" -le 1 ]]; then
   running_ver="$(running_version)"
   file_ver="$(file_version)"
-  if [[ -n "$running_ver" && -n "$file_ver" ]] && version_lt "$running_ver" "$file_ver"; then
+  if [[ "$APK_BUILDER_ENV_CHANGED" == "1" ]]; then
+    log "capacidade apk-builder alterada; reiniciando para anunciar o novo contrato"
+    write_status "restart_for_apk_builder_capability $(now_iso)"
+    kill_worker_processes
+  elif [[ -n "$running_ver" && -n "$file_ver" ]] && version_lt "$running_ver" "$file_ver"; then
     log "worker online está desatualizado; runtime=$running_ver arquivo=$file_ver; reiniciando"
     write_status "restart_for_update runtime=$running_ver file=$file_ver $(now_iso)"
     kill_worker_processes

@@ -46,6 +46,16 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("teto_renderer/renderer.py", 0o644),
     ("scripts/validate-teto-assets.py", 0o755),
 )
+PHONE_WORKER_UPDATE_ARCHIVE_MIN_VERSION = "1.10.39"
+PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example"})
+PHONE_WORKER_SOURCE_FILES = tuple(
+    item for item in PHONE_WORKER_FILES if item[0] not in PHONE_WORKER_SOURCE_HASH_EXCLUDED
+)
+# O primeiro salto precisa funcionar até em agents anteriores à inclusão de
+# apk_identity/Teto na allowlist. O núcleo novo inicia sem esses módulos,
+# anuncia zip-v1 e então recebe o runtime completo no segundo poll.
+PHONE_WORKER_LEGACY_BOOTSTRAP_FILES = frozenset({"phone_worker.py"})
+PHONE_WORKER_LEGACY_RESPONSE_BUDGET_BYTES = 1000 * 1024
 
 PENDING_PATH = ROOT / "data" / "core_worker_automation_pending.json"
 STATUS_PATH = ROOT / "data" / "core_worker_automation_status.json"
@@ -157,13 +167,27 @@ def _hash_tree(root: Path, *, exclude_dirs: set[str] | None = None) -> str:
     return digest.hexdigest()
 
 
+def _hash_phone_worker_files(root: Path) -> str:
+    """Hash estável do runtime instalado; documentação/exemplo não bloqueiam boot."""
+    digest = hashlib.sha256()
+    for name, _mode in sorted(PHONE_WORKER_SOURCE_FILES):
+        path = root / name
+        if not path.is_file():
+            return ""
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(_sha256_file(path).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def _current_fingerprints() -> dict[str, Any]:
     phone_dir = ROOT / "deploy" / "termux" / "phone-worker"
     android_dir = ROOT / "android" / "core-worker-app"
     version_name, version_code = _read_android_version()
     return {
         "phone_worker_version": _read_phone_worker_version(),
-        "phone_worker_hash": _hash_tree(phone_dir),
+        "phone_worker_hash": _hash_phone_worker_files(phone_dir),
         "apk_versionName": version_name,
         "apk_versionCode": version_code,
         "apk_source_hash": _hash_tree(android_dir, exclude_dirs={"build", ".gradle", "releases"}),
@@ -228,13 +252,22 @@ def _public_base_url() -> str:
     return f"http://IP_TAILSCALE_DA_VPS:{port}"
 
 
+def _core_worker_release_dir() -> Path:
+    configured = str(os.getenv("CORE_WORKER_APK_DIR") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return ROOT / "android" / "core-worker-app" / "releases"
+
+
 def _build_worker_update_payload(*, scripts_only: bool = False) -> dict[str, Any]:
     src = ROOT / "deploy" / "termux" / "phone-worker"
     targets = PHONE_WORKER_FILES if not scripts_only else tuple(item for item in PHONE_WORKER_FILES if item[0].endswith(".sh"))
     files: list[dict[str, Any]] = []
+    missing: list[str] = []
     for name, mode in targets:
         path = src / name
         if not path.is_file():
+            missing.append(name)
             continue
         raw = path.read_bytes()
         files.append({
@@ -243,15 +276,137 @@ def _build_worker_update_payload(*, scripts_only: bool = False) -> dict[str, Any
             "sha256": hashlib.sha256(raw).hexdigest(),
             "data_b64": base64.b64encode(raw).decode("ascii"),
         })
+    if missing:
+        raise RuntimeError("arquivos obrigatórios do phone-worker ausentes: " + ", ".join(missing[:8]))
     if not files:
         raise RuntimeError("nenhum arquivo do phone-worker encontrado")
+    source_hash = _hash_phone_worker_files(src) if not scripts_only else ""
     return {
         "version": _read_phone_worker_version(),
+        "source_hash": source_hash,
         "restart": not scripts_only,
         "scripts_only": scripts_only,
         "auto": True,
         "source": "vps-updater",
+        "update_transport": "inline-b64-v1",
+        "ensure_apk_builder": _env_bool("CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED", True),
         "files": files,
+    }
+
+
+def _build_legacy_worker_bootstrap_payload(inline_payload: dict[str, Any]) -> dict[str, Any]:
+    """Primeiro salto aceito pela allowlist e pelo leitor JSON dos agents antigos."""
+    source_files = inline_payload.get("files")
+    files = []
+    if isinstance(source_files, list):
+        files = [
+            dict(item)
+            for item in source_files
+            if isinstance(item, dict)
+            and str(item.get("target") or "") in PHONE_WORKER_LEGACY_BOOTSTRAP_FILES
+        ]
+    present = {str(item.get("target") or "") for item in files}
+    missing = sorted(PHONE_WORKER_LEGACY_BOOTSTRAP_FILES - present)
+    if missing:
+        raise RuntimeError("bootstrap legado incompleto: " + ", ".join(missing))
+    for item in files:
+        raw_size = len(base64.b64decode(str(item.get("data_b64") or "").encode("ascii"), validate=True))
+        if raw_size > 512 * 1024:
+            raise RuntimeError(f"{item.get('target')} excede o limite do agent legado")
+    bootstrap_source_hash = str(files[0].get("sha256") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", bootstrap_source_hash):
+        raise RuntimeError("hash do bootstrap legado ausente/inválido")
+    result = {
+        "version": inline_payload.get("version"),
+        "restart": True,
+        "scripts_only": False,
+        "auto": inline_payload.get("auto", True),
+        "source": inline_payload.get("source") or "vps-updater",
+        "update_transport": "inline-bootstrap-v1",
+        "bootstrap_stage": True,
+        "bootstrap_complete": False,
+        "bootstrap_source_hash": bootstrap_source_hash,
+        "target_source_hash": inline_payload.get("source_hash"),
+        "files": files,
+    }
+    encoded_bytes = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if encoded_bytes > PHONE_WORKER_LEGACY_RESPONSE_BUDGET_BYTES:
+        raise RuntimeError(
+            f"bootstrap legado excede orçamento JSON: {encoded_bytes} > {PHONE_WORKER_LEGACY_RESPONSE_BUDGET_BYTES}"
+        )
+    return result
+
+
+def _write_deterministic_zip_member(zf: zipfile.ZipFile, name: str, raw: bytes, mode: int) -> None:
+    info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = (int(mode) & 0xFFFF) << 16
+    zf.writestr(info, raw, compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
+
+
+def _build_worker_update_artifact_payload(inline_payload: dict[str, Any]) -> dict[str, Any]:
+    """Publica um ZIP imutável; agents novos não carregam ~1 MiB no registry."""
+    files = inline_payload.get("files")
+    if not isinstance(files, list) or not files:
+        raise RuntimeError("payload inline sem arquivos para gerar artefato")
+    release_dir = _core_worker_release_dir()
+    release_dir.mkdir(parents=True, exist_ok=True)
+    manifest_files: list[dict[str, Any]] = []
+    decoded: list[tuple[str, int, bytes, str]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            raise ValueError("item inválido no payload do phone-worker")
+        target = str(item.get("target") or "").strip().replace("\\", "/")
+        raw = base64.b64decode(str(item.get("data_b64") or "").encode("ascii"), validate=True)
+        sha = hashlib.sha256(raw).hexdigest()
+        if sha != str(item.get("sha256") or "").strip().lower():
+            raise ValueError(f"sha256 divergente antes de empacotar {target}")
+        mode = int(item.get("mode") or 0o644)
+        decoded.append((target, mode, raw, sha))
+        manifest_files.append({"target": target, "mode": mode, "bytes": len(raw), "sha256": sha})
+    manifest = {
+        "schema": "core-phone-worker-update-v1",
+        "version": str(inline_payload.get("version") or ""),
+        "source_hash": str(inline_payload.get("source_hash") or ""),
+        "files": manifest_files,
+    }
+    manifest_raw = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    tmp = release_dir / f".phone-worker-update-{os.getpid()}-{time.time_ns()}.tmp"
+    with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        _write_deterministic_zip_member(zf, "phone-worker-update.json", manifest_raw, 0o644)
+        for target, mode, raw, _sha in sorted(decoded):
+            _write_deterministic_zip_member(zf, target, raw, mode)
+    archive_sha = _sha256_file(tmp)
+    source_hash = str(inline_payload.get("source_hash") or archive_sha)
+    version_slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(inline_payload.get("version") or "unknown")).strip("-.") or "unknown"
+    filename = f"phone-worker-update-{version_slug}-{source_hash[:12]}-{archive_sha[:12]}.zip"
+    path = release_dir / filename
+    if path.is_file() and _sha256_file(path) == archive_sha:
+        tmp.unlink()
+    else:
+        tmp.replace(path)
+    now = time.time()
+    old_archives = sorted(
+        (candidate for candidate in release_dir.glob("phone-worker-update-*.zip") if candidate != path),
+        key=lambda candidate: candidate.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in old_archives[8:]:
+        if now - stale.stat().st_mtime >= 86400:
+            with contextlib.suppress(Exception):
+                stale.unlink()
+    return {
+        "version": inline_payload.get("version"),
+        "source_hash": inline_payload.get("source_hash"),
+        "restart": inline_payload.get("restart", True),
+        "scripts_only": inline_payload.get("scripts_only", False),
+        "auto": inline_payload.get("auto", True),
+        "source": inline_payload.get("source") or "vps-updater",
+        "ensure_apk_builder": bool(inline_payload.get("ensure_apk_builder")),
+        "update_transport": "zip-v1",
+        "update_zip_url": f"{_public_base_url()}/core-worker/app/{filename}",
+        "update_zip_sha256": archive_sha,
+        "update_zip_bytes": path.stat().st_size,
     }
 
 
@@ -386,7 +541,7 @@ def _prepare_apk_source_zip() -> dict[str, Any]:
     project = ROOT / "android" / "core-worker-app"
     if not project.is_dir():
         raise FileNotFoundError(str(project))
-    release_dir = project / "releases"
+    release_dir = _core_worker_release_dir()
     release_dir.mkdir(parents=True, exist_ok=True)
     zip_path = release_dir / "source-core-worker-app.zip"
     excluded_dirs = {"build", ".gradle", "releases", ".idea"}
@@ -465,7 +620,7 @@ def _save_pending(data: dict[str, Any]) -> None:
 
 
 def _latest_apk_manifest() -> dict[str, Any]:
-    release_dir = ROOT / "android" / "core-worker-app" / "releases"
+    release_dir = _core_worker_release_dir()
     manifest = release_dir / "latest.json"
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -533,8 +688,75 @@ def _latest_apk_matches(version_code: int, source_fingerprint: str = "") -> bool
     return True
 
 
-def _workers_need_agent_version(snapshot: dict[str, Any], target_version: str) -> bool:
-    """Retorna True só para workers ativos/online abaixo da versão alvo.
+def _worker_source_hash(worker: dict[str, Any] | None) -> str:
+    if not isinstance(worker, dict):
+        return ""
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    health = worker.get("health") if isinstance(worker.get("health"), dict) else {}
+    for value in (
+        worker.get("source_hash"),
+        status.get("source_hash"),
+        status.get("phone_worker_source_hash"),
+        health.get("source_hash"),
+    ):
+        clean = str(value or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", clean):
+            return clean
+    return ""
+
+
+def _worker_needs_agent_update(
+    worker: dict[str, Any] | None,
+    target_version: str,
+    target_source_hash: str = "",
+    *,
+    force: bool = False,
+) -> bool:
+    if not isinstance(worker, dict):
+        return False
+    expected_hash = str(target_source_hash or "").strip().lower()
+    current_hash = _worker_source_hash(worker)
+    current_version = str(worker.get("version") or "")
+    # Nunca faça downgrade automático: force significa reaplicar a fonte da
+    # mesma versão, não substituir um agent que já está adiante do servidor.
+    if current_version and _version_tuple(current_version) > _version_tuple(target_version):
+        return False
+    if not current_version or _version_tuple(current_version) < _version_tuple(target_version):
+        return True
+    # A partir do target que implementa hash, ausência também significa estado
+    # incompleto/desconhecido. Isso mantém o segundo salto do bootstrap pendente
+    # mesmo se o resultado antigo já tiver gravado a nova versão no registry.
+    if expected_hash:
+        return current_hash != expected_hash
+    return bool(force)
+
+
+def _worker_supports_update_archive(worker: dict[str, Any] | None) -> bool:
+    if not isinstance(worker, dict):
+        return False
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    update_status = status.get("worker_update") if isinstance(status.get("worker_update"), dict) else {}
+    declared = (
+        worker.get("worker_update_transports")
+        or status.get("worker_update_transports")
+        or update_status.get("transports")
+        or []
+    )
+    transports = _task_set(declared)
+    return bool(
+        "zip_v1" in transports
+        and _version_tuple(worker.get("version")) >= _version_tuple(PHONE_WORKER_UPDATE_ARCHIVE_MIN_VERSION)
+    )
+
+
+def _workers_need_agent_version(
+    snapshot: dict[str, Any],
+    target_version: str,
+    target_source_hash: str = "",
+    *,
+    force: bool = False,
+) -> bool:
+    """Retorna True só para workers ativos/online fora da versão/fonte alvo.
 
     Workers antigos offline não devem manter o painel preso em "agent pendente".
     Quando um celular voltar online, o heartbeat/process-pending roda de novo e
@@ -550,8 +772,31 @@ def _workers_need_agent_version(snapshot: dict[str, Any], target_version: str) -
             continue
         if not _worker_supports(worker, "worker_update", "phone-worker"):
             continue
-        current = str(worker.get("version") or "")
-        if not current or _version_tuple(current) < _version_tuple(target_version):
+        if _worker_needs_agent_update(worker, target_version, target_source_hash, force=force):
+            return True
+    return False
+
+
+def _registered_workers_need_agent_version(
+    snapshot: dict[str, Any],
+    target_version: str,
+    target_source_hash: str = "",
+    *,
+    force: bool = False,
+) -> bool:
+    """Mantém a pendência para um Termux offline que ainda precisa migrar."""
+    workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
+    for worker in workers:
+        if not isinstance(worker, dict) or worker.get("enabled") is False:
+            continue
+        if not _is_termux_bootstrap_worker(worker):
+            continue
+        roles = {str(item).strip().lower() for item in worker.get("roles") or []}
+        caps = roles | {str(item).strip().lower() for item in worker.get("capabilities") or []}
+        tasks = {str(item).replace("-", "_") for item in worker.get("supported_tasks") or []}
+        if "phone-worker" not in caps or (tasks and "worker_update" not in tasks):
+            continue
+        if _worker_needs_agent_update(worker, target_version, target_source_hash, force=force):
             return True
     return False
 
@@ -724,17 +969,36 @@ def _direct_phone_worker_update_if_needed(payload: dict[str, Any], target_versio
             "summary": "porta direta responde ao APK; worker_update continua reservado ao Termux bootstrap",
         }
     current_version = str(status.get("version") or "")
+    worker_id = str(status.get("worker_id") or "").strip()
+    target_source_hash = str(payload.get("source_hash") or "").strip().lower()
+    current_source_hash = _worker_source_hash(status)
     supported = _task_set(status.get("supported_tasks"))
     if supported and "worker_update" not in supported:
         return {"ok": False, "skipped": True, "current_version": current_version, "summary": "phone-worker direto não declara worker_update"}
-    if not force and current_version and _version_tuple(current_version) >= _version_tuple(target_version):
-        return {"ok": True, "skipped": True, "current_version": current_version, "target_version": target_version, "summary": f"phone-worker direto já está em {current_version}"}
-    body = dict(payload)
+    if not _worker_needs_agent_update(status, target_version, target_source_hash, force=force):
+        return {
+            "ok": True,
+            "skipped": True,
+            "current_version": current_version,
+            "current_source_hash": current_source_hash,
+            "worker_id": worker_id,
+            "target_version": target_version,
+            "target_source_hash": target_source_hash,
+            "summary": f"phone-worker direto já está em {current_version} com a fonte esperada",
+        }
+    body = (
+        _build_worker_update_artifact_payload(payload)
+        if _worker_supports_update_archive(status)
+        else _build_legacy_worker_bootstrap_payload(payload)
+    )
     body["task"] = "worker_update"
     body.setdefault("source", "vps-updater-direct")
     result = _direct_phone_worker_request("/task", payload=body, timeout=45.0)
     result.setdefault("current_version", current_version)
+    result.setdefault("current_source_hash", current_source_hash)
+    result.setdefault("worker_id", worker_id)
     result.setdefault("target_version", target_version)
+    result.setdefault("target_source_hash", target_source_hash)
     if result.get("ok") is False:
         result.setdefault("summary", "update direto falhou")
     else:
@@ -818,6 +1082,20 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
     bootstrap_worker_id = _bootstrap_worker_id_for_runtime(snapshot, requested_worker_id) if requested_worker_id else ""
     payload = _build_worker_update_payload()
     target_version = str(payload.get("version") or "desconhecida")
+    target_source_hash = str(payload.get("source_hash") or "").strip().lower()
+    artifact_payload: dict[str, Any] | None = None
+    bootstrap_payload: dict[str, Any] | None = None
+
+    def payload_for(worker: dict[str, Any]) -> dict[str, Any]:
+        nonlocal artifact_payload, bootstrap_payload
+        if not _worker_supports_update_archive(worker):
+            if bootstrap_payload is None:
+                bootstrap_payload = _build_legacy_worker_bootstrap_payload(payload)
+            return bootstrap_payload
+        if artifact_payload is None:
+            artifact_payload = _build_worker_update_artifact_payload(payload)
+        return artifact_payload
+
     direct_update = {}
     direct_target = next((w for w in workers if str(w.get("worker_id") or "") == bootstrap_worker_id), None) if bootstrap_worker_id else None
     if not requested_worker_id or (isinstance(direct_target, dict) and _is_termux_bootstrap_worker(direct_target)):
@@ -827,7 +1105,9 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
     pending["agent_update"] = {
         "type": "worker_update",
         "target_version": target_version,
-        "payload": payload,
+        "target_source_hash": target_source_hash,
+        "pending": True,
+        "force_same_version": bool(force),
         "created_at": float((pending.get("agent_update") or {}).get("created_at") or time.time()) if isinstance(pending.get("agent_update"), dict) else time.time(),
         "updated_at": time.time(),
         "message": "agent update pendente; será aplicado quando workers compatíveis aparecerem",
@@ -851,8 +1131,16 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
             skipped.append(f"{name}: incompatível/offline")
             continue
         current_version = str(worker.get("version") or "")
-        if not force and current_version and _version_tuple(current_version) >= _version_tuple(target_version):
-            skipped.append(f"{name}: já em {current_version}")
+        if not _worker_needs_agent_update(worker, target_version, target_source_hash, force=force):
+            skipped.append(f"{name}: já em {current_version} com a fonte esperada")
+            continue
+        direct_worker_id = str(direct_update.get("worker_id") or "").strip()
+        if (
+            bool(direct_update.get("ok"))
+            and not bool(direct_update.get("skipped"))
+            and direct_worker_id == worker_id
+        ):
+            skipped.append(f"{name}: update direto enviado")
             continue
         if _active_job_exists(job_type="worker_update", target_worker_id=worker_id, summary_contains=target_version):
             skipped.append(f"{name}: job já pendente")
@@ -860,7 +1148,7 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
         try:
             result = registry.create_job(
                 job_type="worker_update",
-                payload=payload,
+                payload=payload_for(worker),
                 created_by_id=0,
                 created_by_name="VPS updater",
                 target_worker_id=worker_id,
@@ -874,27 +1162,37 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
             queued.append(f"{name}:{job.get('job_id') or 'job'}")
         except Exception as exc:
             errors.append(f"{name}: {type(exc).__name__}: {_short(exc, 120)}")
-    # Se nenhum worker ativo precisa da versão alvo, limpar a pendência para o
-    # painel não ficar preso em "agent X pendente" por causa de registros offline
-    # ou duplicatas antigas. Se algum voltar online desatualizado, process-pending
-    # recria o job automaticamente no heartbeat/poll.
+    # Só limpe quando nenhum Termux registrado precisar da fonte. Um celular
+    # offline mantém a pendência sem job; ao voltar, o primeiro poll retoma o
+    # bootstrap em vez de depender do scan ocioso de 15 minutos.
     refreshed_snapshot = _load_registry_snapshot()
-    termux_registered = any(
-        isinstance(item, dict) and item.get("enabled") is not False and _is_termux_bootstrap_worker(item)
-        for item in refreshed_snapshot.get("workers") or []
-    )
-    direct_confirmed = bool(direct_update.get("ok"))
+    direct_sent = bool(direct_update.get("ok")) and not bool(direct_update.get("skipped"))
+    current_pending = _load_pending()
+    pending_item = current_pending.get("agent_update") if isinstance(current_pending.get("agent_update"), dict) else {}
+    if pending_item:
+        pending_item["phase"] = (
+            "job_queued"
+            if queued or direct_sent or any("job já pendente" in item for item in skipped)
+            else "waiting_worker"
+        )
+        pending_item["updated_at"] = time.time()
+        current_pending["agent_update"] = pending_item
+        _save_pending(current_pending)
     if (
         not queued
         and not errors
-        and not _workers_need_agent_version(refreshed_snapshot, target_version)
-        and (not termux_registered or direct_confirmed)
+        and not _registered_workers_need_agent_version(
+            refreshed_snapshot,
+            target_version,
+            target_source_hash,
+            force=force,
+        )
     ):
         pending = _load_pending()
         pending.pop("agent_update", None)
         _save_pending(pending)
-        return {"ok": True, "target_version": target_version, "queued": [], "skipped": skipped[:16], "errors": [], "pending": False, "direct_update": direct_update, "message": "todos os agents ativos já estão atualizados"}
-    return {"ok": True, "target_version": target_version, "queued": queued, "skipped": skipped[:16], "errors": errors[:10], "pending": True, "direct_update": direct_update}
+        return {"ok": True, "target_version": target_version, "target_source_hash": target_source_hash, "queued": [], "skipped": skipped[:16], "errors": [], "pending": False, "direct_update": direct_update, "message": "todos os agents ativos já estão atualizados"}
+    return {"ok": True, "target_version": target_version, "target_source_hash": target_source_hash, "queued": queued, "skipped": skipped[:16], "errors": errors[:10], "pending": True, "direct_update": direct_update}
 
 _APK_BUILD_PERMANENT_ERROR_RE = re.compile(
     r"(compiledebugjavawithjavac|javac|unclosed string literal|cannot find symbol|"
@@ -1329,7 +1627,7 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         "message": "build do APK pendente; será executado quando um worker apk-builder/turbo estiver online",
     }
     if isinstance(previous_apk_pending, dict):
-        for key in ("last_queued_at", "last_queued_versionCode", "last_queued_source_fingerprint", "last_job_id"):
+        for key in ("last_queued_at", "last_queued_versionCode", "last_queued_source_fingerprint", "last_job_id", "retry_after_agent_update"):
             if key in previous_apk_pending:
                 pending_item[key] = previous_apk_pending[key]
     pending["apk_build"] = pending_item
@@ -1400,6 +1698,7 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         return item
     if _active_job_exists(job_type="apk_build_debug", summary_contains=version_name):
         item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
+        item.pop("retry_after_agent_update", None)
         item.update({
             "ok": True,
             "pending": True,
@@ -1424,6 +1723,7 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         )
         pending = _load_pending()
         item = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
+        item.pop("retry_after_agent_update", None)
         item.update({
             "ok": True,
             "pending": True,
@@ -1482,6 +1782,33 @@ def _budget_exceeded(started: float) -> bool:
     return (time.monotonic() - started) >= _automation_time_budget_seconds()
 
 
+def _mark_apk_waiting_for_agent_update(current: dict[str, Any]) -> dict[str, Any]:
+    pending = _load_pending()
+    previous = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
+    item = dict(previous)
+    for stale_key in ("blocked_by_recent_failure", "permanent_failure", "retry_after_seconds", "last_failure_detail", "last_failed_job_id"):
+        item.pop(stale_key, None)
+    item.update({
+        "type": "apk_build_debug",
+        "ok": True,
+        "pending": True,
+        "phase": "waiting_worker_update",
+        "transient": True,
+        "error": "",
+        "versionName": str(current.get("apk_versionName") or ""),
+        "versionCode": int(current.get("apk_versionCode") or 0),
+        "requiredAgentVersion": str(current.get("phone_worker_version") or ""),
+        "requiredAgentSourceHash": str(current.get("phone_worker_hash") or ""),
+        "retry_after_agent_update": True,
+        "created_at": float(previous.get("created_at") or time.time()),
+        "updated_at": time.time(),
+        "message": "build do APK aguardando o agent corrigido antes de tentar novamente",
+    })
+    pending["apk_build"] = item
+    _save_pending(pending)
+    return item
+
+
 def process_pending(*, worker_id: str = "") -> dict[str, Any]:
     started = time.monotonic()
     pending = _load_pending()
@@ -1494,8 +1821,10 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
     # gravadas, salvo opt-in explícito para autodetectar APK.
     current: dict[str, Any] = {
         "phone_worker_version": _read_phone_worker_version(),
+        "phone_worker_hash": _hash_phone_worker_files(ROOT / "deploy" / "termux" / "phone-worker"),
     }
     target_agent = str(current.get("phone_worker_version") or "")
+    target_agent_hash = str(current.get("phone_worker_hash") or "")
     version_name, apk_version_code = _read_android_version()
     current["apk_versionName"] = version_name
     current["apk_versionCode"] = apk_version_code
@@ -1506,11 +1835,18 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
     else:
         result["boot_repair"] = {"ok": True, "skipped": "disabled_by_default"}
 
-    agent_needed = False if _budget_exceeded(started) else _workers_need_agent_version(snapshot, target_agent)
+    agent_pending = pending.get("agent_update") if isinstance(pending.get("agent_update"), dict) else {}
+    force_agent = bool(agent_pending.get("force_same_version"))
+    agent_needed = False if _budget_exceeded(started) else _workers_need_agent_version(
+        snapshot,
+        target_agent,
+        target_agent_hash,
+        force=force_agent,
+    )
     if not _budget_exceeded(started) and (pending.get("agent_update") or agent_needed):
-        result["agent_update"] = queue_agent_updates(force=False, only_worker_id=worker_id)
+        result["agent_update"] = queue_agent_updates(force=force_agent, only_worker_id=worker_id)
         if agent_needed:
-            result["agent_update_detected"] = {"target_version": target_agent, "reason": "worker abaixo da versão esperada"}
+            result["agent_update_detected"] = {"target_version": target_agent, "target_source_hash": target_agent_hash, "reason": "worker abaixo da versão/hash esperados"}
     elif pending.get("agent_update") or agent_needed:
         result["agent_update"] = {"ok": True, "skipped": "time_budget_exceeded"}
 
@@ -1521,12 +1857,7 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
         current["apk_source_hash"] = apk_source_hash
         apk_needed = _apk_needs_build(apk_version_code, apk_source_hash)
     apk_requested = bool(pending.get("apk_build") or apk_needed)
-    compatible_builder_online = any(
-        _worker_supports(worker, "apk_build_debug", "apk-builder")
-        for worker in snapshot.get("workers") or []
-        if isinstance(worker, dict)
-    )
-    waiting_for_agent_upgrade = bool(agent_needed and not compatible_builder_online)
+    waiting_for_agent_upgrade = bool(agent_needed)
     if not _budget_exceeded(started) and apk_requested and waiting_for_agent_upgrade:
         current_pending = _load_pending()
         item = current_pending.get("apk_build") if isinstance(current_pending.get("apk_build"), dict) else {}
@@ -1539,6 +1870,8 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
             "transient": True,
             "error": "",
             "targetWorkerVersion": target_agent,
+            "targetWorkerSourceHash": target_agent_hash,
+            "retry_after_agent_update": True,
             "updated_at": time.time(),
             "message": f"build do APK aguardando o worker atualizar para {target_agent}",
         })
@@ -1546,7 +1879,11 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
         _save_pending(current_pending)
         result["apk_build"] = item
     elif not _budget_exceeded(started) and apk_requested:
-        result["apk_build"] = queue_apk_build()
+        apk_pending = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
+        retry_after_agent_update = bool(apk_pending.get("retry_after_agent_update"))
+        result["apk_build"] = queue_apk_build(manual=retry_after_agent_update)
+        if retry_after_agent_update:
+            result["apk_retry_reason"] = "agent_updated"
         if apk_needed:
             result["apk_build_detected"] = {"versionCode": apk_version_code, "reason": "latest.json ausente/antigo ou source divergente"}
     elif apk_requested:
@@ -1569,12 +1906,17 @@ def after_update(force_agent: bool = False) -> int:
     previous = _load_state()
     phone_hash_changed = bool(previous.get("phone_worker_hash") and previous.get("phone_worker_hash") != current.get("phone_worker_hash"))
     apk_hash_changed = bool(previous.get("apk_source_hash") and previous.get("apk_source_hash") != current.get("apk_source_hash"))
-    phone_changed = (
+    phone_source_changed = (
         _has_changed(changed, "deploy/termux/phone-worker/")
         or force_agent
         or phone_hash_changed
-        or _workers_need_agent_version(snapshot, str(current.get("phone_worker_version") or ""))
     )
+    workers_need_agent = _workers_need_agent_version(
+        snapshot,
+        str(current.get("phone_worker_version") or ""),
+        str(current.get("phone_worker_hash") or ""),
+    )
+    phone_changed = bool(phone_source_changed or workers_need_agent)
     apk_changed = (
         _has_changed(changed, "android/core-worker-app/")
         or apk_hash_changed
@@ -1589,30 +1931,44 @@ def after_update(force_agent: bool = False) -> int:
         "apk_source_hash_changed": apk_hash_changed,
         "phone_worker_changed": phone_changed,
         "apk_changed": apk_changed,
-        "workers_need_agent": _workers_need_agent_version(snapshot, str(current.get("phone_worker_version") or "")),
+        "workers_need_agent": workers_need_agent,
         "apk_needs_build": _apk_needs_build(int(current.get("apk_versionCode") or 0), str(current.get("apk_source_hash") or "")),
         "started_at": time.time(),
         "base_url": _public_base_url(),
     }
-    if phone_changed and _env_bool("CORE_WORKER_AUTO_AGENT_UPDATE_ENABLED", True):
-        status["agent_update"] = queue_agent_updates(force=force_agent)
+    agent_auto_enabled = _env_bool("CORE_WORKER_AUTO_AGENT_UPDATE_ENABLED", True)
+    apk_auto_enabled = _env_bool("CORE_WORKER_AUTO_APK_BUILD_ENABLED", True)
+    if phone_changed and agent_auto_enabled:
+        status["agent_update"] = queue_agent_updates(force=bool(force_agent or phone_source_changed))
     elif phone_changed:
         status["agent_update"] = {"ok": True, "skipped": ["desativado por CORE_WORKER_AUTO_AGENT_UPDATE_ENABLED=false"]}
 
-    if apk_changed and _env_bool("CORE_WORKER_AUTO_APK_BUILD_ENABLED", True):
-        status["apk_build"] = queue_apk_build()
+    if apk_changed and apk_auto_enabled:
+        if phone_changed and agent_auto_enabled:
+            status["apk_build"] = _mark_apk_waiting_for_agent_update(current)
+        else:
+            status["apk_build"] = queue_apk_build()
     elif apk_changed:
         status["apk_build"] = {"ok": True, "skipped": ["desativado por CORE_WORKER_AUTO_APK_BUILD_ENABLED=false"]}
 
     status["boot_repair"] = queue_boot_repairs()
 
+    failed_components = [
+        key
+        for key in ("agent_update", "apk_build", "boot_repair")
+        if isinstance(status.get(key), dict)
+        and status[key].get("ok") is False
+        and not bool(status[key].get("pending"))
+    ]
+    status["failed_components"] = failed_components
+    status["ok"] = not failed_components
     status["finished_at"] = time.time()
     write_status(status)
     state = dict(current)
     state["updated_at"] = status["finished_at"]
     _save_state(state)
     print(json.dumps(status, ensure_ascii=False, separators=(",", ":")))
-    return 0
+    return 0 if status["ok"] else 2
 
 
 def main() -> int:

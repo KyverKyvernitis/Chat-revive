@@ -3823,6 +3823,24 @@ def _core_worker_automation_has_explicit_pending() -> bool:
     return False
 
 
+def _core_worker_automation_transition_is_urgent() -> bool:
+    """Transições agent -> APK precisam reagir no próximo poll, não em 15 min."""
+    try:
+        data = _load_json_cached(_core_worker_automation_pending_path(), {})
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        return False
+    agent = data.get("agent_update") if isinstance(data.get("agent_update"), dict) else {}
+    apk = data.get("apk_build") if isinstance(data.get("apk_build"), dict) else {}
+    apk_phase = str(apk.get("phase") or "")
+    return bool(
+        str(agent.get("phase") or "") in {"job_queued", "restart_pending"}
+        or apk_phase == "waiting_worker_update"
+        or (apk.get("retry_after_agent_update") and apk_phase not in {"waiting_builder", "enqueue_failed", "queued"})
+    )
+
+
 def _core_worker_automation_recently_finished(cooldown: float) -> bool:
     try:
         data = _load_json_cached(_core_worker_automation_status_path(), {})
@@ -3848,7 +3866,14 @@ def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
     worker_id = str(worker_id or "").strip()
     key = _automation_worker_key(worker_id)
     now = time.time()
-    cooldown = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_COOLDOWN_SECONDS", 900.0, minimum=300.0, maximum=3600.0)
+    explicit_pending = _core_worker_automation_has_explicit_pending()
+    idle_cooldown = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_COOLDOWN_SECONDS", 900.0, minimum=300.0, maximum=3600.0)
+    if explicit_pending and _core_worker_automation_transition_is_urgent():
+        cooldown = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_TRANSITION_COOLDOWN_SECONDS", 8.0, minimum=2.0, maximum=60.0)
+    elif explicit_pending:
+        cooldown = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_ACTIVE_COOLDOWN_SECONDS", 60.0, minimum=10.0, maximum=300.0)
+    else:
+        cooldown = idle_cooldown
     max_runtime = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_MAX_RUNTIME_SECONDS", 45.0, minimum=10.0, maximum=180.0)
 
     script = os.path.join(os.getcwd(), "scripts", "core-worker-automation.py")
@@ -3859,7 +3884,7 @@ def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
     # Se houver agent_update/apk_build pendente, o processo ainda roda; se o último
     # scan acabou agora e não há pendência explícita, o próximo scan fica para o
     # cooldown persistido em disco.
-    if not _core_worker_automation_has_explicit_pending() and _core_worker_automation_recently_finished(cooldown):
+    if not explicit_pending and _core_worker_automation_recently_finished(idle_cooldown):
         _log_pending_automation_skip(key, f"recent_scan_no_pending cooldown<{cooldown:.0f}s")
         return
 

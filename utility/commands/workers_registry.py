@@ -20,6 +20,19 @@ DEFAULT_JOB_TTL_SECONDS = 900
 DEFAULT_JOB_LEASE_SECONDS = 120
 DEFAULT_JOB_HISTORY_LIMIT = 8
 DEFAULT_JOB_PAYLOAD_MAX_STRING = 256 * 1024
+DEFAULT_JOB_PAYLOAD_MAX_OPAQUE_STRING = 2 * 1024 * 1024
+
+# Campos binários autenticados precisam ultrapassar o limite de texto comum.
+# O limite maior é aplicado somente ao payload de jobs, nunca a heartbeat,
+# status, logs ou campos de usuário. Isso mantém compatibilidade com agents
+# antigos durante o bootstrap sem liberar strings arbitrárias gigantes.
+JOB_PAYLOAD_OPAQUE_STRING_KEYS = frozenset({
+    "data_b64",
+    "googleServicesJsonB64",
+    "google_services_json_b64",
+    "apkSigningKeystoreB64",
+    "apk_signing_keystore_b64",
+})
 
 CORE_WORKER_JOB_TYPES = {
     'ping',
@@ -296,31 +309,58 @@ def _merge_worker_status(worker: dict[str, Any], incoming: object) -> None:
     worker["status"] = _safe_dict(merged, max_items=18, max_string=1024)
 
 
-def _safe_dict(value: object, *, max_items: int = 32, max_string: int = 8192) -> dict[str, Any]:
+def _safe_dict(
+    value: object,
+    *,
+    max_items: int = 32,
+    max_string: int = 8192,
+    opaque_string_keys: frozenset[str] | None = None,
+    max_opaque_string: int | None = None,
+) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
+    opaque_keys = opaque_string_keys or frozenset()
+    opaque_limit = max(max_string, int(max_opaque_string or max_string))
     clean: dict[str, Any] = {}
     for key, item in list(value.items())[:max_items]:
         k = _short_text(key, limit=48)
         if not k:
             continue
+        item_limit = opaque_limit if k in opaque_keys else max_string
         if isinstance(item, str):
-            clean[k] = item if len(item) <= max_string else item[:max_string] + "…[truncated]"
+            clean[k] = item if len(item) <= item_limit else item[:item_limit] + "…[truncated]"
         elif isinstance(item, (int, float, bool)) or item is None:
             clean[k] = item
         elif isinstance(item, list):
             clean_list: list[Any] = []
             for x in item[:24]:
                 if isinstance(x, Mapping):
-                    clean_list.append(_safe_dict(x, max_items=16, max_string=max_string))
+                    clean_list.append(_safe_dict(
+                        x,
+                        max_items=16,
+                        max_string=max_string,
+                        opaque_string_keys=opaque_keys,
+                        max_opaque_string=opaque_limit,
+                    ))
                 elif isinstance(x, (str, int, float, bool)) or x is None:
                     clean_list.append(x if not isinstance(x, str) or len(x) <= max_string else x[:max_string] + "…[truncated]")
             clean[k] = clean_list
         elif isinstance(item, Mapping):
-            clean[k] = _safe_dict(item, max_items=12, max_string=max_string)
+            clean[k] = _safe_dict(
+                item,
+                max_items=12,
+                max_string=max_string,
+                opaque_string_keys=opaque_keys,
+                max_opaque_string=opaque_limit,
+            )
         else:
             clean[k] = _short_text(item, limit=120)
     return clean
+
+
+def _job_payload_opaque_string_limit() -> int:
+    configured = _env_int("CORE_WORKER_JOB_PAYLOAD_MAX_OPAQUE_STRING", DEFAULT_JOB_PAYLOAD_MAX_OPAQUE_STRING)
+    return max(DEFAULT_JOB_PAYLOAD_MAX_STRING, min(8 * 1024 * 1024, configured))
 
 
 
@@ -386,6 +426,7 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "capabilities": capabilities,
         "supported_tasks": supported_tasks,
         "version": _short_text(record.get("version"), limit=48),
+        "source_hash": _short_text(record.get("source_hash"), limit=64),
         "source": _short_text(record.get("source"), limit=32, default="apk"),
         "runtime_kind": _short_text(record.get("runtime_kind"), limit=24),
         "parent_worker_id": _short_text(record.get("parent_worker_id"), limit=64),
@@ -852,6 +893,7 @@ class CoreWorkersRegistry:
                 "supported_tasks": normalize_job_types(payload.get("supported_tasks"), limit=96),
                 "endpoint": endpoint,
                 "version": version,
+                "source_hash": _short_text(payload.get("source_hash"), limit=64),
                 "source": source,
                 "platform": _short_text(payload.get("platform"), limit=32),
                 "runtime_kind": _short_text(payload.get("runtime_kind"), limit=24),
@@ -930,6 +972,8 @@ class CoreWorkersRegistry:
                 record["endpoint"] = _short_text(payload.get("endpoint") or payload.get("base_url") or payload.get("url"), limit=160)
             if payload.get("version"):
                 record["version"] = _short_text(payload.get("version"), limit=48)
+            if payload.get("source_hash"):
+                record["source_hash"] = _short_text(payload.get("source_hash"), limit=64)
             roles = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles"), default=["apk-worker", "diagnostics"]), limit=16)
             capabilities = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), default=roles), limit=24)
             tasks = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=96)
@@ -964,7 +1008,7 @@ class CoreWorkersRegistry:
             record["updated_at"] = ts
             record["last_heartbeat_at"] = ts
             record["remote_addr"] = _short_text(remote_addr, limit=64)
-            for key in ("name", "endpoint", "version", "source", "platform", "runtime_kind", "parent_worker_id", "physical_worker_id"):
+            for key in ("name", "endpoint", "version", "source_hash", "source", "platform", "runtime_kind", "parent_worker_id", "physical_worker_id"):
                 if key in payload:
                     record[key] = _short_text(payload.get(key), limit=160 if key == "endpoint" else 64)
             if _is_apk_runtime_payload(payload) and record.get("parent_worker_id"):
@@ -1110,7 +1154,13 @@ class CoreWorkersRegistry:
         record = {
             "job_id": job_id,
             "type": kind,
-            "payload": _safe_dict(payload or {}, max_items=64, max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING)),
+            "payload": _safe_dict(
+                payload or {},
+                max_items=64,
+                max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING),
+                opaque_string_keys=JOB_PAYLOAD_OPAQUE_STRING_KEYS,
+                max_opaque_string=_job_payload_opaque_string_limit(),
+            ),
             "status": "queued",
             "created_at": ts,
             "updated_at": ts,
@@ -1267,6 +1317,8 @@ class CoreWorkersRegistry:
                 worker["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(worker.get("capabilities")), limit=24)
             if "supported_tasks" in payload:
                 worker["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(worker.get("supported_tasks")), limit=96)
+            if "source_hash" in payload:
+                worker["source_hash"] = _short_text(payload.get("source_hash"), limit=64)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
                 if key not in payload:
                     continue
@@ -1352,7 +1404,13 @@ class CoreWorkersRegistry:
             "job": {
                 "job_id": str(selected.get("job_id") or ""),
                 "type": str(selected.get("type") or ""),
-                "payload": _safe_dict(selected.get("payload"), max_items=64, max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING)),
+                "payload": _safe_dict(
+                    selected.get("payload"),
+                    max_items=64,
+                    max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING),
+                    opaque_string_keys=JOB_PAYLOAD_OPAQUE_STRING_KEYS,
+                    max_opaque_string=_job_payload_opaque_string_limit(),
+                ),
                 "lease_until": selected.get("lease_until"),
                 "attempts": int(selected.get("attempts") or 0),
             },
@@ -1430,6 +1488,8 @@ class CoreWorkersRegistry:
             assigned = str(job.get("worker_id") or "")
             if assigned and assigned != worker_id:
                 raise CoreWorkerRegistryError("job pertence a outro worker", status=403)
+            original_job_payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
+            submitted_result = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
             job["status"] = status
             job["updated_at"] = ts
             job["finished_at"] = ts
@@ -1447,6 +1507,30 @@ class CoreWorkersRegistry:
             worker["updated_at"] = ts
             worker["last_heartbeat_at"] = ts
             worker["remote_addr"] = _short_text(remote_addr, limit=64)
+            if (
+                _normalize_job_type(job.get("type")) == "worker_update"
+                and status == "succeeded"
+                and submitted_result.get("ok") is not False
+            ):
+                applied_version = _short_text(
+                    submitted_result.get("applied_file_version")
+                    or submitted_result.get("target_version")
+                    or original_job_payload.get("version"),
+                    limit=48,
+                )
+                if applied_version:
+                    worker["version"] = applied_version
+                applied_source_hash = str(submitted_result.get("source_hash") or "").strip().lower()
+                if not applied_source_hash and original_job_payload.get("bootstrap_stage") is True:
+                    # O primeiro salto contém somente o núcleo aceito por agents
+                    # antigos. Registre um hash intermediário (nunca o hash final)
+                    # para manter o pacote completo pendente após o reinício.
+                    if original_job_payload.get("bootstrap_complete") is True:
+                        applied_source_hash = str(original_job_payload.get("target_source_hash") or "").strip().lower()
+                    else:
+                        applied_source_hash = str(original_job_payload.get("bootstrap_source_hash") or "").strip().lower()
+                if re.fullmatch(r"[0-9a-f]{64}", applied_source_hash):
+                    worker["source_hash"] = applied_source_hash
             status_dict = _worker_status_dict(worker)
             queue_status = status_dict.get("core_worker_jobs") if isinstance(status_dict.get("core_worker_jobs"), dict) else {}
             queue_status.update({

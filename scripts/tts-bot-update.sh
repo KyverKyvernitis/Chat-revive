@@ -3776,6 +3776,11 @@ classify_changed_files() {
     CORE_WORKER_APK_CHANGED=1
     CORE_WORKER_AUTOMATION_REQUIRED=1
   fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/core-worker-automation\.py|utility/commands/workers_registry\.py|webserver\.py)$'; then
+    # Mudanças no próprio orquestrador/registry também precisam reavaliar as
+    # pendências; antes elas só entravam em vigor no próximo patch Android/Termux.
+    CORE_WORKER_AUTOMATION_REQUIRED=1
+  fi
 }
 
 fast_reload_modules_for_changed_files() {
@@ -4493,8 +4498,8 @@ run_core_worker_post_update_automation() {
     return 0
   fi
 
-  local output
-  output="$(sudo -u ubuntu -H env CORE_WORKER_CHANGED_FILES="$CHANGED_FILES_RAW" "$py" "$REPO_DIR/scripts/core-worker-automation.py" after-update 2>&1 || true)"
+  local output automation_rc=0
+  output="$(sudo -u ubuntu -H env CORE_WORKER_CHANGED_FILES="$CHANGED_FILES_RAW" "$py" "$REPO_DIR/scripts/core-worker-automation.py" after-update 2>&1)" || automation_rc=$?
   logger -t "$LOG_TAG" "Core Worker automation: $output"
 
   local parsed
@@ -4521,7 +4526,11 @@ def brief_apk(obj):
         return 'sem mudanças'
     if obj.get('ok'):
         job = obj.get('job') or {}
-        return f"APK {obj.get('versionName') or '?'}: build job {job.get('job_id') or 'criado'}"
+        if job.get('job_id'):
+            return f"APK {obj.get('versionName') or '?'}: build job {job.get('job_id')}"
+        if obj.get('already_published'):
+            return f"APK {obj.get('versionName') or '?'}: já publicado para esta fonte"
+        return f"APK {obj.get('versionName') or '?'}: {obj.get('message') or obj.get('phase') or 'pendente'}"
     return f"APK {obj.get('versionName') or '?'}: pendente ({obj.get('message') or obj.get('error') or 'sem builder'})"
 print(brief_agent(agent))
 print(brief_apk(apk))
@@ -4534,6 +4543,12 @@ PYJSON
   [[ -n "${CORE_WORKER_AGENT_UPDATE_STATUS//[[:space:]]/}" ]] || CORE_WORKER_AGENT_UPDATE_STATUS="executado; sem resumo"
   [[ -n "${CORE_WORKER_APK_BUILD_STATUS//[[:space:]]/}" ]] || CORE_WORKER_APK_BUILD_STATUS="executado; sem resumo"
   [[ -n "${CORE_WORKER_NOTIFY_STATUS//[[:space:]]/}" ]] || CORE_WORKER_NOTIFY_STATUS="executado"
+  if (( automation_rc != 0 )); then
+    CORE_WORKER_AGENT_UPDATE_STATUS="${CORE_WORKER_AGENT_UPDATE_STATUS} · automação degradada (rc=$automation_rc)"
+    CORE_WORKER_APK_BUILD_STATUS="${CORE_WORKER_APK_BUILD_STATUS} · automação degradada (rc=$automation_rc)"
+    CORE_WORKER_NOTIFY_STATUS="falha da automação registrada; updater principal preservado"
+    logger -t "$LOG_TAG" "Core Worker automation terminou degradada (rc=$automation_rc)"
+  fi
   return 0
 }
 

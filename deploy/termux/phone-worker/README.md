@@ -1,5 +1,19 @@
 # Phone Worker Termux
 
+## Patch 86.2: auto-update e autobuild recuperáveis
+
+A versão `1.10.39` faz a migração em dois estágios. Primeiro envia somente o núcleo
+`phone_worker.py`, abaixo dos limites e da allowlist dos agents antigos; após o
+reinício, esse núcleo anuncia suporte a `zip-v1` e baixa o runtime completo em um ZIP
+imutável, validado por tamanho, manifesto, allowlist e SHA-256. O heartbeat anuncia
+também o hash real do runtime instalado (sem README/exemplo), então uma correção não
+é ignorada só porque a versão ficou igual.
+
+Quando Java, Javac, Jar, Gradle, aapt2 e Android SDK 34 já estão válidos, o start
+repara apenas a role/capability `apk-builder`, sem trocar o perfil atual nem remover
+as funções de mídia. Isso permite retomar o build depois do upgrade do agent sem
+repetir imediatamente uma falha determinística do builder antigo.
+
 ## Patch 86.1: Kasane Teto leve no TTS Agent
 
 A versão `1.10.38` adiciona a engine experimental `teto` ao phone worker. Ela é acionada pelo prefixo ASCII `'` no bot, mas só é anunciada em `available_engines` quando `PHONE_WORKER_TETO_ENABLED=true`, a voicebank UTAU, o resampler e o FFmpeg passam pela validação. Nenhuma voicebank ou binário de terceiros é incluído no repositório ou nos ZIPs de update.
@@ -448,8 +462,11 @@ Variáveis locais opcionais:
 ```env
 PHONE_WORKER_SELF_UPDATE_ENABLED=true
 PHONE_WORKER_UPDATE_RESTART=true
-PHONE_WORKER_UPDATE_MAX_FILE_BYTES=524288
-PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES=1048576
+PHONE_WORKER_UPDATE_MAX_FILE_BYTES=786432
+PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES=2097152
+PHONE_WORKER_UPDATE_ARCHIVE_MAX_BYTES=8388608
+PHONE_WORKER_UPDATE_DOWNLOAD_TIMEOUT_SECONDS=60
+CORE_WORKER_JSON_RESPONSE_MAX_BYTES=4194304
 ```
 
 
@@ -580,4 +597,3 @@ A VPS continua sendo o cérebro. Se nenhum worker estiver online, a VPS deve usa
 Perfil novo opcional:
 
 - `turbo`: modo forte para celular confiável, combinando mídia, builder e auxílio à VPS.
-

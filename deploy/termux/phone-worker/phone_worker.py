@@ -35,19 +35,38 @@ from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
 
-try:
-    from apk_identity import assert_expected_apk_identity, inspect_apk_identity
-except ModuleNotFoundError:
-    _apk_identity_spec = importlib.util.spec_from_file_location(
-        "core_phone_worker_apk_identity",
-        Path(__file__).with_name("apk_identity.py"),
-    )
-    if _apk_identity_spec is None or _apk_identity_spec.loader is None:
-        raise
-    _apk_identity_module = importlib.util.module_from_spec(_apk_identity_spec)
-    _apk_identity_spec.loader.exec_module(_apk_identity_module)
-    assert_expected_apk_identity = _apk_identity_module.assert_expected_apk_identity
-    inspect_apk_identity = _apk_identity_module.inspect_apk_identity
+_APK_IDENTITY_MODULE: Any = None
+
+
+def _load_apk_identity_module() -> Any:
+    """Carrega sob demanda para o bootstrap de um arquivo conseguir reiniciar.
+
+    Agents antigos só conhecem ``phone_worker.py`` na allowlist. O restante do
+    runtime chega por ZIP logo após este núcleo novo subir; nenhuma rotina de APK
+    é executada antes disso.
+    """
+    global _APK_IDENTITY_MODULE
+    if _APK_IDENTITY_MODULE is not None:
+        return _APK_IDENTITY_MODULE
+    try:
+        module = importlib.import_module("apk_identity")
+    except ModuleNotFoundError:
+        path = Path(__file__).with_name("apk_identity.py")
+        spec = importlib.util.spec_from_file_location("core_phone_worker_apk_identity", path)
+        if not path.is_file() or spec is None or spec.loader is None:
+            raise RuntimeError("apk_identity.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    _APK_IDENTITY_MODULE = module
+    return module
+
+
+def inspect_apk_identity(*args: Any, **kwargs: Any) -> Any:
+    return _load_apk_identity_module().inspect_apk_identity(*args, **kwargs)
+
+
+def assert_expected_apk_identity(*args: Any, **kwargs: Any) -> Any:
+    return _load_apk_identity_module().assert_expected_apk_identity(*args, **kwargs)
 
 try:
     from PIL import Image, ImageSequence  # type: ignore
@@ -81,7 +100,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.38"
+PHONE_WORKER_VERSION = "1.10.39"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1370,9 +1389,10 @@ def _post_json_url(url: str, payload: dict[str, Any], *, token: str = "", timeou
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    response_limit = max(1024 * 1024, min(8 * 1024 * 1024, _env_int("CORE_WORKER_JSON_RESPONSE_MAX_BYTES", 4 * 1024 * 1024)))
     try:
         with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
-            raw = resp.read(1024 * 1024)
+            raw = resp.read(response_limit + 1)
             status = int(getattr(resp, "status", 200) or 200)
             _remember_core_worker_network_ok()
     except urllib.error.HTTPError as exc:
@@ -1383,6 +1403,8 @@ def _post_json_url(url: str, payload: dict[str, Any], *, token: str = "", timeou
         _remember_core_worker_network_error(exc)
         raise
     parsed: dict[str, Any]
+    if len(raw) > response_limit:
+        return status, {"ok": False, "error": "resposta JSON da VPS grande demais"}
     try:
         data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
         parsed = data if isinstance(data, dict) else {"ok": False, "error": "resposta não é objeto"}
@@ -1419,9 +1441,17 @@ def _get_json_url(url: str, *, timeout: float = 8.0, max_bytes: int = 1024 * 102
     return status, parsed
 
 
-def _download_url_to_file(url: str, target: Path, *, timeout: float = 35.0, max_bytes: int = 150 * 1024 * 1024) -> dict[str, Any]:
+def _download_url_to_file(
+    url: str,
+    target: Path,
+    *,
+    timeout: float = 35.0,
+    max_bytes: int = 150 * 1024 * 1024,
+    accept: str = "application/vnd.android.package-archive,*/*",
+    size_label: str = "APK",
+) -> dict[str, Any]:
     headers = {
-        "Accept": "application/vnd.android.package-archive,*/*",
+        "Accept": accept,
         "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
     }
     req = urllib.request.Request(url, headers=headers, method="GET")
@@ -1439,7 +1469,7 @@ def _download_url_to_file(url: str, target: Path, *, timeout: float = 35.0, max_
                     break
                 total += len(chunk)
                 if total > max_bytes:
-                    raise ValueError("APK grande demais para este worker")
+                    raise ValueError(f"{size_label} grande demais para este worker")
                 digest.update(chunk)
                 fh.write(chunk)
     except urllib.error.HTTPError as exc:
@@ -1599,6 +1629,8 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "runtime_kind": "termux",
         "runtime_mode": CORE_WORKER_RUNTIME_MODE,
         "version": PHONE_WORKER_VERSION,
+        "source_hash": _phone_worker_source_hash(),
+        "worker_update_transports": ["inline-b64-v1", "zip-v1"],
         "profile": profile,
         "profile_label": _core_worker_profile_label(profile),
         "safe_mode": safe_mode,
@@ -1624,6 +1656,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "internal_runtime_state": CORE_WORKER_INTERNAL_RUNTIME_STATE,
         },
         "status": {
+            "worker_update": {"transports": ["inline-b64-v1", "zip-v1"]},
             "core_worker_jobs": _core_job_runtime_snapshot(),
             "core_worker_network": _core_worker_network_runtime_snapshot(),
             "music_node": music_node,
@@ -3939,6 +3972,8 @@ def _system_status() -> dict[str, Any]:
         "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
         "name": _default_worker_name(),
         "version": PHONE_WORKER_VERSION,
+        "source_hash": _phone_worker_source_hash(),
+        "worker_update_transports": ["inline-b64-v1", "zip-v1"],
         "profile": _current_core_worker_profile(),
         "profile_label": _core_worker_profile_label(_current_core_worker_profile()),
         "core_worker_heartbeat": _heartbeat_configured(),
@@ -4003,6 +4038,8 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
         "name": _default_worker_name(),
         "version": PHONE_WORKER_VERSION,
+        "source_hash": _phone_worker_source_hash(),
+        "worker_update_transports": ["inline-b64-v1", "zip-v1"],
         "profile": profile,
         "profile_label": _core_worker_profile_label(profile),
         "safe_mode": safe_mode,
@@ -8785,6 +8822,8 @@ def _apk_build_failure_result(
         "sourceFingerprint": source_fingerprint,
         "sourceSha256": source_sha256,
         "notificationId": notification_id,
+        "phoneWorkerVersion": PHONE_WORKER_VERSION,
+        "phoneWorkerSourceHash": _phone_worker_source_hash(),
         "work_dir": str(work_dir),
     }
     if returncode is not None:
@@ -9220,6 +9259,7 @@ def _persist_recovered_apk_artifact(
         "build_successful": True,
         "build_result": "success",
         "phoneWorkerVersion": PHONE_WORKER_VERSION,
+        "phoneWorkerSourceHash": _phone_worker_source_hash(),
         "created_at": time.time(),
         "recovered": True,
         "recoveryReason": reason,
@@ -9776,6 +9816,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             "build_successful": True,
             "build_result": "success",
             "phoneWorkerVersion": PHONE_WORKER_VERSION,
+            "phoneWorkerSourceHash": _phone_worker_source_hash(),
             "created_at": time.time(),
         }
         # A etapa pós-Gradle é tão importante quanto o build: se o APK foi
@@ -9895,6 +9936,38 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "teto_renderer/renderer.py": ("worker", "teto_renderer/renderer.py", 0o644),
     "scripts/validate-teto-assets.py": ("worker", "scripts/validate-teto-assets.py", 0o755),
 }
+_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example"})
+_PHONE_WORKER_SOURCE_HASH_CACHE: dict[str, Any] = {"signature": None, "value": ""}
+_PHONE_WORKER_SOURCE_HASH_LOCK = threading.Lock()
+
+
+def _phone_worker_source_hash() -> str:
+    """Hash do conjunto instalável, ignorando logs, env e arquivos temporários."""
+    entries: list[tuple[str, Path, int, int, int]] = []
+    for target in sorted(_WORKER_UPDATE_TARGETS):
+        if target in _PHONE_WORKER_SOURCE_HASH_EXCLUDED:
+            continue
+        path, _mode = _safe_update_target_path(target)
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return ""
+        if not path.is_file():
+            return ""
+        entries.append((target, path, int(stat_result.st_size), int(stat_result.st_mtime_ns), int(stat_result.st_ino)))
+    signature = tuple((target, size, mtime_ns, inode) for target, _path, size, mtime_ns, inode in entries)
+    with _PHONE_WORKER_SOURCE_HASH_LOCK:
+        if _PHONE_WORKER_SOURCE_HASH_CACHE.get("signature") == signature:
+            return str(_PHONE_WORKER_SOURCE_HASH_CACHE.get("value") or "")
+        digest = hashlib.sha256()
+        for target, path, _size, _mtime_ns, _inode in entries:
+            digest.update(target.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(_sha256_path(path).encode("ascii"))
+            digest.update(b"\n")
+        value = digest.hexdigest()
+        _PHONE_WORKER_SOURCE_HASH_CACHE.update({"signature": signature, "value": value})
+        return value
 
 
 def _normalize_worker_update_target(target: str) -> str:
@@ -9931,33 +10004,153 @@ def _read_phone_worker_version_from_path(path: Path) -> str:
     return match.group(1) if match else ""
 
 
-def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
-    if not _env_bool("PHONE_WORKER_SELF_UPDATE_ENABLED", True):
-        raise PermissionError("self-update do phone-worker desativado por configuração")
+def _load_worker_update_files(payload: dict[str, Any], *, max_file_bytes: int, max_total_bytes: int) -> tuple[list[dict[str, Any]], str]:
+    archive_url = str(payload.get("update_zip_url") or "").strip()
+    if archive_url:
+        parsed = urllib.parse.urlparse(archive_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("update_zip_url inválida")
+        expected_archive_sha = str(payload.get("update_zip_sha256") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_archive_sha):
+            raise ValueError("sha256 do pacote de update ausente/inválido")
+        max_archive_bytes = max(256 * 1024, _env_int("PHONE_WORKER_UPDATE_ARCHIVE_MAX_BYTES", 8 * 1024 * 1024))
+        with tempfile.TemporaryDirectory(prefix="phone-worker-update-") as temp_dir:
+            archive_path = Path(temp_dir) / "update.zip"
+            download = _download_url_to_file(
+                archive_url,
+                archive_path,
+                timeout=max(10.0, _env_float("PHONE_WORKER_UPDATE_DOWNLOAD_TIMEOUT_SECONDS", 60.0)),
+                max_bytes=max_archive_bytes,
+                accept="application/zip,*/*",
+                size_label="pacote de update",
+            )
+            if not download.get("ok"):
+                raise RuntimeError(f"download do update falhou: {_short_text(download.get('error'), limit=160)}")
+            if str(download.get("sha256") or "").lower() != expected_archive_sha:
+                raise ValueError("sha256 divergente no pacote de update")
+            expected_bytes = int(payload.get("update_zip_bytes") or 0)
+            if expected_bytes and int(download.get("bytes") or 0) != expected_bytes:
+                raise ValueError("tamanho divergente no pacote de update")
+            with zipfile.ZipFile(archive_path) as zf:
+                members = [member for member in zf.infolist() if not member.is_dir()]
+                names = [str(member.filename or "").replace("\\", "/") for member in members]
+                if len(names) != len(set(names)) or len(names) > 25:
+                    raise ValueError("pacote de update com membros duplicados/em excesso")
+                if "phone-worker-update.json" not in names:
+                    raise ValueError("manifesto do pacote de update ausente")
+                manifest_info = zf.getinfo("phone-worker-update.json")
+                if manifest_info.file_size > 64 * 1024:
+                    raise ValueError("manifesto do pacote de update grande demais")
+                manifest = json.loads(zf.read(manifest_info).decode("utf-8"))
+                if not isinstance(manifest, dict) or manifest.get("schema") != "core-phone-worker-update-v1":
+                    raise ValueError("schema inválido no pacote de update")
+                manifest_files = manifest.get("files")
+                if not isinstance(manifest_files, list) or not manifest_files or len(manifest_files) > 24:
+                    raise ValueError("lista de arquivos inválida no pacote de update")
+                for key in ("version", "source_hash"):
+                    expected = str(payload.get(key) or "").strip()
+                    actual = str(manifest.get(key) or "").strip()
+                    if expected and actual != expected:
+                        raise ValueError(f"{key} divergente no pacote de update")
+                prepared: list[dict[str, Any]] = []
+                total = 0
+                expected_names = {"phone-worker-update.json"}
+                seen_targets: set[str] = set()
+                for item in manifest_files:
+                    if not isinstance(item, dict):
+                        raise ValueError("item inválido no manifesto de update")
+                    target = _normalize_worker_update_target(str(item.get("target") or ""))
+                    _target_path, allowed_mode = _safe_update_target_path(target)
+                    declared_mode = int(item.get("mode") or allowed_mode)
+                    if declared_mode != allowed_mode:
+                        raise ValueError(f"modo não permitido no update: {target}")
+                    if target in seen_targets:
+                        raise ValueError(f"arquivo duplicado no manifesto: {target}")
+                    seen_targets.add(target)
+                    expected_names.add(target)
+                    info = zf.getinfo(target)
+                    if info.flag_bits & 0x1 or info.file_size > max_file_bytes:
+                        raise ValueError(f"arquivo inválido/grande demais no update: {target}")
+                    raw = zf.read(info)
+                    total += len(raw)
+                    if total > max_total_bytes:
+                        raise ValueError("update grande demais")
+                    sha = hashlib.sha256(raw).hexdigest()
+                    if sha != str(item.get("sha256") or "").strip().lower() or len(raw) != int(item.get("bytes") or -1):
+                        raise ValueError(f"integridade divergente em {target}")
+                    prepared.append({"target": target, "mode": allowed_mode, "sha256": sha, "raw": raw})
+                if set(names) != expected_names:
+                    raise ValueError("pacote de update contém arquivo não declarado")
+                return prepared, "zip-v1"
+
     files = payload.get("files")
     if not isinstance(files, list) or not files:
         raise ValueError("payload de update sem arquivos")
     if len(files) > 24:
         raise ValueError("arquivos demais no update")
-
-    updated: list[dict[str, Any]] = []
-    errors: list[str] = []
+    prepared = []
     total = 0
-    max_file_bytes = max(1024, _env_int("PHONE_WORKER_UPDATE_MAX_FILE_BYTES", 512 * 1024))
-    max_total_bytes = max(max_file_bytes, _env_int("PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES", 1024 * 1024))
-
     for item in files:
         if not isinstance(item, dict):
-            errors.append("item inválido")
-            continue
-        target = str(item.get("target") or item.get("name") or "").strip()
+            raise ValueError("item inválido no update")
+        target = _normalize_worker_update_target(str(item.get("target") or item.get("name") or ""))
+        _target_path, allowed_mode = _safe_update_target_path(target)
+        declared_mode = int(item.get("mode") or allowed_mode)
+        if declared_mode != allowed_mode:
+            raise ValueError(f"modo não permitido no update: {target}")
+        raw = _b64decode(str(item.get("data_b64") or ""), max_bytes=max_file_bytes)
+        total += len(raw)
+        if total > max_total_bytes:
+            raise ValueError("update grande demais")
+        sha = hashlib.sha256(raw).hexdigest()
+        expected = str(item.get("sha256") or "").strip().lower()
+        if expected and expected != sha:
+            raise ValueError(f"sha256 divergente em {target}")
+        prepared.append({"target": target, "mode": allowed_mode, "sha256": sha, "raw": raw})
+    return prepared, "inline-b64-v1"
+
+
+def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
+    if not _env_bool("PHONE_WORKER_SELF_UPDATE_ENABLED", True):
+        raise PermissionError("self-update do phone-worker desativado por configuração")
+    target_source_hash = str(payload.get("source_hash") or "").strip().lower()
+    if target_source_hash and not re.fullmatch(r"[0-9a-f]{64}", target_source_hash):
+        raise ValueError("source_hash do update ausente/inválido")
+    current_source_hash = _phone_worker_source_hash()
+    if target_source_hash and current_source_hash == target_source_hash:
+        result: dict[str, Any] = {
+            "ok": True,
+            "skipped": True,
+            "summary": "update já aplicado; hash da fonte confere",
+            "current_version": PHONE_WORKER_VERSION,
+            "source_hash": current_source_hash,
+        }
+        # Uma entrega pode ser repetida depois de os arquivos terem sido gravados,
+        # mas antes de o watchdog reiniciar o processo antigo. Preserve o restart
+        # no caminho idempotente para nunca ficar executando código anterior.
+        if _env_bool("PHONE_WORKER_UPDATE_RESTART", bool(payload.get("restart", True))):
+            result.update({
+                "deferred_restart": True,
+                "deferred_restart_mode": "watchdog",
+                "_deferred_phone_worker_action": "restart",
+                "_deferred_phone_worker_session": str(os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker"),
+                "_deferred_start_script": str(_best_script("start-phone-worker.sh")),
+                "_deferred_watch_script": str(_best_script("watch-phone-worker.sh")),
+            })
+        return result
+    updated: list[dict[str, Any]] = []
+    errors: list[str] = []
+    max_file_bytes = max(1024, _env_int("PHONE_WORKER_UPDATE_MAX_FILE_BYTES", 768 * 1024))
+    max_total_bytes = max(max_file_bytes, _env_int("PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES", 2 * 1024 * 1024))
+    files, update_transport = _load_worker_update_files(payload, max_file_bytes=max_file_bytes, max_total_bytes=max_total_bytes)
+    total = sum(len(item.get("raw") or b"") for item in files)
+
+    for item in files:
+        target = str(item.get("target") or "").strip()
         try:
             normalized_target = _normalize_worker_update_target(target)
             path, mode = _safe_update_target_path(normalized_target)
-            raw = _b64decode(str(item.get("data_b64") or ""), max_bytes=max_file_bytes)
-            total += len(raw)
-            if total > max_total_bytes:
-                raise ValueError("update grande demais")
+            raw = bytes(item.get("raw") or b"")
             expected = str(item.get("sha256") or "").strip().lower()
             actual = hashlib.sha256(raw).hexdigest()
             if expected and expected != actual:
@@ -9989,6 +10182,17 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
     if errors:
         return {"ok": False, "summary": "update parcial/falhou", "updated": updated, "errors": errors[:8], "total_bytes": total}
 
+    applied_source_hash = _phone_worker_source_hash()
+    if target_source_hash and applied_source_hash != target_source_hash:
+        return {
+            "ok": False,
+            "summary": "update aplicado, mas hash final da fonte divergiu",
+            "updated": updated,
+            "expected_source_hash": target_source_hash,
+            "applied_source_hash": applied_source_hash,
+            "total_bytes": total,
+        }
+
     target_version = _short_text(payload.get("version"), limit=48, default="desconhecida")
     applied_version = _read_phone_worker_version_from_path(_phone_worker_dir() / "phone_worker.py") or target_version
     updated_names = {str(item.get("target") or "") for item in updated}
@@ -10008,6 +10212,8 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
         "applied_file_version": applied_version,
         "applied_music_agent_version": applied_music_agent_version,
         "target_version": target_version,
+        "source_hash": applied_source_hash,
+        "update_transport": update_transport,
         "restart_requested": bool(payload.get("restart", True)),
         "files": [item.get("target") for item in updated],
         "boot_ok": bool(boot_status.get("ok")),
@@ -10025,6 +10231,8 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
         "applied_file_version": applied_version,
         "applied_music_agent_version": applied_music_agent_version,
         "target_version": target_version,
+        "source_hash": applied_source_hash,
+        "update_transport": update_transport,
         "music_agent_restart": music_agent_restart,
         "boot": {"ok": bool(boot_status.get("ok")), "mode": boot_status.get("mode"), "summary": boot_status.get("summary")},
         "shell_autostart": {"ok": bool(shell_status.get("ok")), "summary": shell_status.get("summary"), "changed": bool(shell_status.get("changed"))},

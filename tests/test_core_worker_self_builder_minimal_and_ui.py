@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import base64
+import hashlib
 import importlib.util
 import json
 import re
@@ -45,6 +47,104 @@ def test_phone_worker_update_targets_preserve_nested_paths(tmp_path: Path, monke
     for invalid in ("../renderer.py", "/tmp/renderer.py", "teto_renderer/../renderer.py", "renderer.py"):
         with pytest.raises(ValueError):
             module._normalize_worker_update_target(invalid)
+
+
+def test_phone_worker_update_archive_is_immutable_and_verified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    automation = _load("core_worker_update_archive_build_test", AUTOMATION_PATH)
+    phone_worker = _load("phone_worker_update_archive_read_test", PHONE_WORKER_PATH)
+    raw = b"print('updated')\n"
+    source_hash = "a" * 64
+    inline = {
+        "version": "1.10.39",
+        "source_hash": source_hash,
+        "restart": True,
+        "auto": True,
+        "source": "test",
+        "files": [{
+            "target": "phone_worker.py",
+            "mode": 0o755,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "data_b64": base64.b64encode(raw).decode("ascii"),
+        }],
+    }
+    monkeypatch.delenv("CORE_WORKER_APK_DIR", raising=False)
+    monkeypatch.setattr(automation, "ROOT", tmp_path)
+    monkeypatch.setattr(automation, "_public_base_url", lambda: "https://vps.invalid")
+    artifact = automation._build_worker_update_artifact_payload(inline)
+    artifact_again = automation._build_worker_update_artifact_payload(inline)
+    archive = next((tmp_path / "android/core-worker-app/releases").glob("phone-worker-update-*.zip"))
+
+    def fake_download(_url, target, **_kwargs):
+        target.write_bytes(archive.read_bytes())
+        return {
+            "ok": True,
+            "bytes": target.stat().st_size,
+            "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+        }
+
+    monkeypatch.setattr(phone_worker, "_download_url_to_file", fake_download)
+    files, transport = phone_worker._load_worker_update_files(
+        artifact,
+        max_file_bytes=1024,
+        max_total_bytes=2048,
+    )
+
+    assert transport == "zip-v1"
+    assert files[0]["target"] == "phone_worker.py"
+    assert files[0]["raw"] == raw
+    assert archive.name.endswith(f"-{artifact['update_zip_sha256'][:12]}.zip")
+    assert artifact_again["update_zip_sha256"] == artifact["update_zip_sha256"]
+    assert artifact_again["update_zip_url"] == artifact["update_zip_url"]
+
+
+def test_vps_and_phone_worker_compute_the_same_runtime_source_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    automation = _load("core_worker_source_hash_vps_test", AUTOMATION_PATH)
+    phone_worker = _load("phone_worker_source_hash_phone_test", PHONE_WORKER_PATH)
+    worker_dir = ROOT / "deploy/termux/phone-worker"
+    monkeypatch.setattr(phone_worker, "_phone_worker_dir", lambda: worker_dir)
+
+    assert set(name for name, _mode in automation.PHONE_WORKER_FILES) == set(phone_worker._WORKER_UPDATE_TARGETS)
+    assert automation._hash_phone_worker_files(worker_dir) == phone_worker._phone_worker_source_hash()
+
+
+def test_legacy_agent_gets_small_compatible_core_bootstrap() -> None:
+    automation = _load("core_worker_legacy_bootstrap_test", AUTOMATION_PATH)
+    inline = automation._build_worker_update_payload()
+    bootstrap = automation._build_legacy_worker_bootstrap_payload(inline)
+    encoded = json.dumps(bootstrap, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    assert len(encoded) <= automation.PHONE_WORKER_LEGACY_RESPONSE_BUDGET_BYTES
+    assert len(encoded) < 1024 * 1024
+    assert {item["target"] for item in bootstrap["files"]} == {"phone_worker.py"}
+    assert len(base64.b64decode(bootstrap["files"][0]["data_b64"])) <= 512 * 1024
+    assert bootstrap["bootstrap_stage"] is True
+    assert bootstrap["bootstrap_complete"] is False
+    assert "source_hash" not in bootstrap
+    assert bootstrap["bootstrap_source_hash"] == bootstrap["files"][0]["sha256"]
+    assert bootstrap["target_source_hash"] == inline["source_hash"]
+
+
+def test_bootstrap_core_starts_before_optional_runtime_files_arrive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bootstrap_core = tmp_path / "phone_worker.py"
+    bootstrap_core.write_bytes(PHONE_WORKER_PATH.read_bytes())
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PHONE_WORKER_ENV", str(tmp_path / "missing.env"))
+
+    module = _load("phone_worker_bootstrap_core_only_test", bootstrap_core)
+    original_import_module = module.importlib.import_module
+
+    def import_without_preloaded_identity(name, *args, **kwargs):
+        if name == "apk_identity":
+            raise ModuleNotFoundError(name)
+        return original_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(module.importlib, "import_module", import_without_preloaded_identity)
+
+    assert module.PHONE_WORKER_VERSION == "1.10.39"
+    assert module._APK_IDENTITY_MODULE is None
+    assert bootstrap_core.stat().st_size <= 512 * 1024
+    with pytest.raises(RuntimeError, match="segundo estágio"):
+        module.inspect_apk_identity(tmp_path / "missing.apk")
 
 
 def test_apk_builder_respects_shared_heavy_resource_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

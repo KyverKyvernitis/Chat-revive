@@ -1,8 +1,8 @@
-# Core Worker 0.7.4 — autobuild confiável e publicação validada
+# Core Worker 0.7.5 — launcher Gradle compatível com Android
 
-A versão `0.7.4` usa o Termux somente como **builder bootstrap**, mantendo Termux e APK como runtimes separados durante a transição. O primeiro APK dessa transição é compilado e assinado pelo `phone_worker.py` no celular, com a mesma keystore das versões já instaladas. A VPS não executa Gradle, Android SDK, NDK ou `aapt2`: ela prepara o ZIP de fontes, entrega segredos temporários por job autenticado e publica o APK pronto recebido do celular.
+A versão `0.7.5` usa o Termux somente como **builder bootstrap**, mantendo Termux e APK como runtimes separados durante a transição. O primeiro APK dessa transição é compilado e assinado pelo `phone_worker.py` no celular, com a mesma keystore das versões já instaladas. A VPS não executa Gradle, Android SDK, NDK ou `aapt2`: ela prepara o ZIP de fontes, entrega segredos temporários por job autenticado e publica o APK pronto recebido do celular.
 
-O bundle do toolchain agora usa manifesto v4 com `executablePaths`: o APK restaura as permissões reais de todos os executáveis, incluindo `jdk/lib/jspawnhelper`, antes do preflight e novamente após o fallback de cópia. A publicação lê `packageName`, `versionName` e `versionCode` diretamente do `AndroidManifest.xml` compilado; metadados divergentes ou downgrade preservam o APK e o `latest.json` anteriores.
+O bundle do toolchain agora usa manifesto v5. Além de `executablePaths`, ele normaliza o `DEFAULT_JVM_OPTS` do launcher Gradle para o `/system/bin/sh`, impedindo que o Java interprete `"-Xmx64m"` como classe principal. O APK rejeita bundles antigos sem essa garantia. A publicação lê `packageName`, `versionName` e `versionCode` diretamente do `AndroidManifest.xml` compilado; metadados divergentes ou downgrade preservam o APK e o `latest.json` anteriores.
 
 Durante o bootstrap, o Termux preserva o worker canônico e a porta `8766`; o APK usa o runtime filho `<worker-id>-apk` e a porta `8767`. Isso impede que heartbeats Android sobrescrevam a versão/capabilities do `phone_worker.py` e garante que `worker_update` e o primeiro `apk_build_debug` continuem chegando ao Termux. Pareamentos novos criados diretamente pelo APK permanecem dedicados e usam a porta `8766`.
 
@@ -39,7 +39,7 @@ Se o Android ou o fabricante bloquear qualquer etapa, o APK permanece sem a capa
 
 ```text
 Primeira transição
-VPS prepara fonte/segredos → Termux gera o bundle mínimo e compila/assina → VPS valida a identidade compilada e publica → APK 0.7.4 é instalado
+VPS prepara fonte/segredos → Termux gera o bundle mínimo e compila/assina → VPS valida a identidade compilada e publica → APK 0.7.5 é instalado
 
 Atualizações seguintes
 VPS prepara fonte/segredos → APK compila/assina com o bundle retido → VPS publica → APK atualiza
@@ -64,7 +64,7 @@ bin/aapt2
 runtime-libs/*.so*
 ```
 
-O manifesto usa o schema `core-worker-android-builder-v1`, versão 3, arquitetura ARM64, runtime `termux-bionic-direct` e registra a estratégia `dt-needed-transitive-v1`. O Gradle valida o ZIP antes de empacotá-lo. O APK executa uma validação mais forte após extrair o bundle e não depende do rootfs de Bedrock, PRoot ou de Python externo para buildar.
+O manifesto usa o schema `core-worker-android-builder-v1`, versão 5, arquitetura ARM64, runtime `termux-bionic-direct`, registra a estratégia `dt-needed-transitive-v1` e o launcher `android-sh-unquoted-default-jvm-opts-v1`. O Gradle valida o ZIP antes de empacotá-lo. O APK executa uma validação mais forte após extrair o bundle e não depende do rootfs de Bedrock, PRoot ou de Python externo para buildar.
 
 O APK continua substituindo o Termux no runtime normal: serviço foreground autônomo, fila autenticada `/core-worker/jobs/poll`, resultados em `/core-worker/jobs/result`, API compatível na porta `8767` durante o bootstrap compartilhado (e `8766` em pareamentos APK dedicados), TTS nativo e tarefas allowlist. Não existe shell remoto livre nem comando arbitrário. Bedrock continua condicionado aos binários e preflights próprios.
 
@@ -81,7 +81,7 @@ PHONE_WORKER_APK_SELF_BUILDER_REBUILD=false
 
 Após homologar um autobuild completo, `CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED=false` desativa apenas a manutenção automática do bootstrap. O registry continua preferindo o APK validado e ainda pode usar o Termux manualmente como recuperação enquanto ele estiver registrado.
 
-> As seções abaixo registram patches antigos e podem citar fluxos anteriores. O comportamento atual é o descrito nesta seção 0.7.4.
+> As seções abaixo registram patches antigos e podem citar fluxos anteriores. O comportamento atual é o descrito nesta seção 0.7.5.
 
 ## Patch 86: Core Linux Runtime v1 sem Termux
 

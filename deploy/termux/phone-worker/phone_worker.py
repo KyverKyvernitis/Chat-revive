@@ -100,7 +100,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.39"
+PHONE_WORKER_VERSION = "1.10.40"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -7770,11 +7770,14 @@ def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
                 manifest_version = int(manifest.get("version") or 0)
             except Exception:
                 manifest_version = 0
-            if manifest_version < 4:
-                raise ValueError("bundle antigo: regenere com modos executáveis preservados v4")
+            if manifest_version < 5:
+                raise ValueError("bundle antigo: regenere com launcher Gradle compatível com Android v5")
             runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
             if runtime_libraries.get("strategy") != "dt-needed-transitive-v1":
                 raise ValueError("estratégia de bibliotecas do autobuilder inválida")
+            gradle_launcher = manifest.get("gradleLauncher") if isinstance(manifest.get("gradleLauncher"), dict) else {}
+            if gradle_launcher.get("strategy") != "android-sh-unquoted-default-jvm-opts-v1":
+                raise ValueError("launcher Gradle do autobuilder não é compatível com /system/bin/sh")
             bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
             if bootstrap_smoke.get("ok") is not True:
                 raise ValueError("smoke bootstrap do autobuilder ausente ou reprovado")
@@ -7838,6 +7841,59 @@ def _copy_tree_dereferenced(source: Path, target: Path) -> None:
         ignore_dangling_symlinks=True,
         copy_function=shutil.copy2,
     )
+
+
+_GRADLE_DEFAULT_JVM_OPTS_RE = re.compile(r"(?m)^(?P<prefix>[ \t]*DEFAULT_JVM_OPTS[ \t]*=)[^\r\n]*$")
+
+
+def _parse_gradle_default_jvm_opts(raw_assignment: str) -> list[str]:
+    """Decodifica as duas camadas de quoting usadas pelo launcher do Gradle."""
+    try:
+        outer = shlex.split(str(raw_assignment or ""), posix=True)
+        values = shlex.split(outer[0], posix=True) if len(outer) == 1 else outer
+    except ValueError as exc:
+        raise ValueError(f"DEFAULT_JVM_OPTS inválido no launcher Gradle: {exc}") from exc
+    if len(values) > 32:
+        raise ValueError("DEFAULT_JVM_OPTS contém opções demais")
+    forbidden = set(" \t\r\n'\"\\`$;&|<>(){}[]*?!#~")
+    for value in values:
+        if not value.startswith("-") or len(value) > 512 or any(char in forbidden for char in value):
+            raise ValueError(f"opção JVM não portátil no launcher Gradle: {_short_text(value, limit=120)}")
+    return values
+
+
+def _patch_gradle_launcher_for_android(path: Path) -> dict[str, Any]:
+    """Remove as aspas aninhadas que o ``/system/bin/sh`` repassa ao Java.
+
+    O launcher Unix distribuído pelo Gradle costuma declarar
+    ``DEFAULT_JVM_OPTS='\"-Xmx64m\" \"-Xms64m\"'``. No shell do Android essas
+    aspas podem sobreviver ao pipeline ``xargs``/``eval`` do launcher e o Java
+    tenta carregar ``\"-Xmx64m\"`` como classe principal. Preservamos todas as
+    opções JVM simples declaradas pela distribuição, mas serializamos uma única
+    lista sem aspas internas ou metacaracteres de shell.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"launcher Gradle ausente: {path}")
+    original = path.read_text(encoding="utf-8", errors="strict")
+    matches = list(_GRADLE_DEFAULT_JVM_OPTS_RE.finditer(original))
+    if len(matches) != 1:
+        raise ValueError(
+            "launcher Gradle inesperado: esperado exatamente um DEFAULT_JVM_OPTS, "
+            f"encontrado {len(matches)}"
+        )
+    original_assignment = matches[0].group(0).split("=", 1)[1]
+    default_jvm_opts = _parse_gradle_default_jvm_opts(original_assignment)
+    replacement = matches[0].group("prefix") + "'" + " ".join(default_jvm_opts) + "'"
+    patched = _GRADLE_DEFAULT_JVM_OPTS_RE.sub(replacement, original, count=1)
+    path.write_text(patched, encoding="utf-8")
+    if not os.access(path, os.X_OK):
+        raise ValueError("launcher Gradle perdeu permissão de execução após normalização")
+    return {
+        "strategy": "android-sh-unquoted-default-jvm-opts-v1",
+        "defaultJvmOpts": default_jvm_opts,
+        "changed": patched != original,
+        "sha256": _sha256_path(path),
+    }
 
 
 def _find_termux_java_home(env: dict[str, str]) -> Path:
@@ -8498,6 +8554,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
     try:
         _copy_tree_dereferenced(jdk_home, bundle_root / "jdk")
         _copy_tree_dereferenced(gradle_home, bundle_root / "gradle")
+        gradle_launcher_report = _patch_gradle_launcher_for_android(bundle_root / "gradle/bin/gradle")
 
         sdk_target = bundle_root / "android-sdk"
         _copy_tree_dereferenced(sdk_home / "platforms/android-34", sdk_target / "platforms/android-34")
@@ -8527,7 +8584,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
 
         manifest = {
             "schema": "core-worker-android-builder-v1",
-            "version": 4,
+            "version": 5,
             "arch": "aarch64",
             "runtime": "termux-bionic-direct",
             "generatedBy": f"phone-worker-{PHONE_WORKER_VERSION}",
@@ -8544,6 +8601,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
                 "buildTools": build_tools.name if build_tools is not None else "",
             },
             "runtimeLibraries": runtime_library_report,
+            "gradleLauncher": gradle_launcher_report,
             "bootstrapSmoke": smoke,
             "executablePaths": executable_paths,
             "safety": {
@@ -8569,6 +8627,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
             "androidSdk": str(sdk_home),
             "aapt2": str(aapt2_cmd),
             "runtimeLibraries": runtime_library_report,
+            "gradleLauncher": gradle_launcher_report,
             "bootstrapSmoke": smoke,
         }
     finally:

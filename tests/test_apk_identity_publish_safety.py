@@ -267,7 +267,8 @@ def test_self_builder_restores_jspawnhelper_and_never_builds_on_vps() -> None:
     assert "restoreExecutablePaths(staging, stagedManifest)" in manager
     assert "restoreExecutablePaths(toolchain, new File(toolchain, \"manifest.json\"))" in manager
     assert "jdk/lib/jspawnhelper" in manager
-    assert "executablePaths v4" in manager
+    assert "launcher Gradle Android v5" in manager
+    assert "android-sh-unquoted-default-jvm-opts-v1" in manager
     assert "executablePaths" in gradle
     assert "assembleDebug" not in web
 

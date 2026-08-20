@@ -1,5 +1,13 @@
 # Phone Worker Termux
 
+## Patch 86.3: launcher Gradle portátil no autobuilder
+
+A versão `1.10.40` normaliza o `DEFAULT_JVM_OPTS` no launcher Gradle que entra
+no toolchain privado. O `/system/bin/sh` do Android não preserva a mesma remoção
+de aspas do shell do Termux e podia entregar `"-Xmx64m"` ao Java como se fosse o
+nome da classe principal. O bundle v5 mantém os mesmos limites de memória sem
+aspas internas, executa o smoke no ambiente Android e rejeita bundles v4 antigos.
+
 ## Patch 86.2: auto-update e autobuild recuperáveis
 
 A versão `1.10.39` faz a migração em dois estágios. Primeiro envia somente o núcleo

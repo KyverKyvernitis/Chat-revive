@@ -140,7 +140,7 @@ def test_bootstrap_core_starts_before_optional_runtime_files_arrive(tmp_path: Pa
 
     monkeypatch.setattr(module.importlib, "import_module", import_without_preloaded_identity)
 
-    assert module.PHONE_WORKER_VERSION == "1.10.39"
+    assert module.PHONE_WORKER_VERSION == "1.10.40"
     assert module._APK_IDENTITY_MODULE is None
     assert bootstrap_core.stat().st_size <= 512 * 1024
     with pytest.raises(RuntimeError, match="segundo estágio"):
@@ -228,6 +228,32 @@ def test_self_builder_collects_only_transitive_runtime_libraries(tmp_path: Path,
     assert result["systemProvided"] == ["libc.so", "liblog.so"]
 
 
+def test_gradle_launcher_is_normalized_for_android_system_shell(tmp_path: Path) -> None:
+    module = _load("phone_worker_gradle_launcher_android_test", PHONE_WORKER_PATH)
+    launcher = tmp_path / "gradle/bin/gradle"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        "#!/usr/bin/env sh\n"
+        "DEFAULT_JVM_OPTS='-Dfile.encoding=UTF-8 \"-Xmx64m\" \"-Xms64m\"'\n"
+        "exec \"$JAVA_HOME/bin/java\" $DEFAULT_JVM_OPTS org.gradle.launcher.GradleMain \"$@\"\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+
+    first = module._patch_gradle_launcher_for_android(launcher)
+    second = module._patch_gradle_launcher_for_android(launcher)
+    text = launcher.read_text(encoding="utf-8")
+
+    assert "DEFAULT_JVM_OPTS='-Dfile.encoding=UTF-8 -Xmx64m -Xms64m'" in text
+    assert '"-Xmx64m"' not in text
+    assert first["strategy"] == "android-sh-unquoted-default-jvm-opts-v1"
+    assert first["defaultJvmOpts"] == ["-Dfile.encoding=UTF-8", "-Xmx64m", "-Xms64m"]
+    assert first["changed"] is True
+    assert second["changed"] is False
+    assert first["sha256"] == second["sha256"]
+    assert launcher.stat().st_mode & 0o111
+
+
 
 def test_python_elf_parser_works_without_termux_readelf(tmp_path: Path) -> None:
     module = _load("phone_worker_python_elf_parser_test", PHONE_WORKER_PATH)
@@ -263,6 +289,7 @@ def _builder_bundle(path: Path, *, version: int) -> None:
         "version": version,
         "arch": "aarch64",
         "runtimeLibraries": {"strategy": "dt-needed-transitive-v1"},
+        "gradleLauncher": {"strategy": "android-sh-unquoted-default-jvm-opts-v1"},
         "bootstrapSmoke": {"ok": True},
         "paths": {
             "jdk": "jdk",
@@ -287,8 +314,8 @@ def test_bundle_validation_forces_regeneration_of_old_full_runtime(tmp_path: Pat
     module = _load("phone_worker_bundle_version_test", PHONE_WORKER_PATH)
     old = tmp_path / "old.zip"
     current = tmp_path / "current.zip"
-    _builder_bundle(old, version=3)
-    _builder_bundle(current, version=4)
+    _builder_bundle(old, version=4)
+    _builder_bundle(current, version=5)
 
     rejected = module._apk_self_builder_bundle_valid(old)
     accepted = module._apk_self_builder_bundle_valid(current)
@@ -364,13 +391,14 @@ def test_ui_and_versions_expose_builder_state_without_vps_gradle() -> None:
     gradle = (ANDROID / "app/build.gradle").read_text(encoding="utf-8")
     workers = WORKERS_PATH.read_text(encoding="utf-8")
 
-    assert 'versionCode 122' in gradle
-    assert 'versionName "0.7.4"' in gradle
+    assert 'versionCode 123' in gradle
+    assert 'versionName "0.7.5"' in gradle
     assert 'builderHeroText = smallText("Autobuild: verificando toolchain local")' in activity
     assert '"✅ Autobuild pronto' in activity
     assert 'sectionTitle("Diagnóstico e manutenção")' in activity
     assert 'bottomNavButton("⚙  Core")' in activity
     assert 'runtime_libraries.get("strategy") == "dt-needed-transitive-v1"' in builder
-    assert '"manifestVersion": manifest_version >= 4' in builder
+    assert '"manifestVersion": manifest_version >= 5' in builder
+    assert 'gradle_launcher.get("strategy") == "android-sh-unquoted-default-jvm-opts-v1"' in builder
     assert 'f"**Atualização:** {automation_label}"' in workers
     assert 'discord.ui.ActionRow(refresh, pairing, cleanup_jobs)' not in workers

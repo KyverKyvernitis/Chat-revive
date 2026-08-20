@@ -111,6 +111,7 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
     except Exception:
         manifest_version = 0
     runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
+    gradle_launcher = manifest.get("gradleLauncher") if isinstance(manifest.get("gradleLauncher"), dict) else {}
     bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
     raw_executables = manifest.get("executablePaths") if isinstance(manifest.get("executablePaths"), list) else []
 
@@ -151,9 +152,10 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
     checks = {
         "manifest": manifest_path.is_file(),
         "schema": schema == TOOLCHAIN_SCHEMA,
-        "manifestVersion": manifest_version >= 4,
+        "manifestVersion": manifest_version >= 5,
         "executablePaths": declared_executables_valid,
         "runtimeLibraries": runtime_libraries.get("strategy") == "dt-needed-transitive-v1",
+        "gradleLauncher": gradle_launcher.get("strategy") == "android-sh-unquoted-default-jvm-opts-v1",
         "bootstrapSmoke": bootstrap_smoke.get("ok") is True,
         "arch": arch in {"aarch64", "arm64", "arm64-v8a"},
         "java": java.is_file() and java.stat().st_size > 64 * 1024 and os.access(java, os.X_OK),

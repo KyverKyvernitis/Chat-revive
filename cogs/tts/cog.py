@@ -151,6 +151,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._runtime_voice_restore_suppressed_until: dict[int, float] = {}
         self._expected_voice_channel_ids: dict[int, int] = {}
         self._manual_voice_disconnect_until: dict[int, float] = {}
+        self._voice_post_connect_pending: dict[int, object] = {}
         self._voice_failure_events_by_guild: dict[tuple[int, str], list[float]] = {}
         self._voice_failure_events_global: dict[str, list[tuple[float, int]]] = {}
         self._voice_incidents: dict[tuple[str, int, str], dict[str, object]] = {}
@@ -3056,6 +3057,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         report_failure: bool = False,
         notify_owner_on_failure: bool | None = None,
         failure_context: str = "entrada na call",
+        defer_post_connect: bool = False,
     ) -> Optional[discord.VoiceClient]:
         # Compatibilidade com callers anteriores ao sistema de incidentes.
         # O worker de áudio vive em outro módulo e uma troca unilateral do nome
@@ -3180,15 +3182,77 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             async def _fresh_connect() -> Optional[discord.VoiceClient]:
                 connect_kwargs = await _build_connect_kwargs()
                 new_vc = await voice_channel.connect(**connect_kwargs)
-                await _ensure_expected_voice_state()
-                await self._set_remembered_voice_channel(guild.id, getattr(voice_channel, "id", None))
                 self._remember_expected_voice_channel(guild.id, getattr(voice_channel, "id", None))
                 self._runtime_voice_restore_failures[guild.id] = 0
                 self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
                 self._cancel_runtime_voice_restore(guild.id)
                 self._clear_manual_voice_disconnect(guild.id)
                 print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
-                self._schedule_voice_incident_recovery(guild, voice_channel, context="nova conexão de voz concluída")
+
+                async def _complete_post_connect() -> None:
+                    pending = getattr(self, "_voice_post_connect_pending", None)
+                    try:
+                        settle_delay = (
+                            max(
+                                0.0,
+                                float(getattr(config, "TTS_POST_CONNECT_SETTLE_DELAY_SECONDS", 0.12) or 0.0),
+                            )
+                            if defer_enabled
+                            else 0.0
+                        )
+                        if settle_delay:
+                            await asyncio.sleep(settle_delay)
+                        if defer_enabled:
+                            current_vc = self._get_voice_client_for_guild(guild)
+                            current_channel = self._voice_client_channel(current_vc)
+                            if (
+                                current_vc is not new_vc
+                                or not self._voice_client_is_connected(current_vc)
+                                or getattr(current_channel, "id", None) != getattr(voice_channel, "id", None)
+                            ):
+                                return
+                        await _ensure_expected_voice_state()
+                        await self._set_remembered_voice_channel(
+                            guild.id,
+                            getattr(voice_channel, "id", None),
+                        )
+                        self._schedule_voice_incident_recovery(
+                            guild,
+                            voice_channel,
+                            context="nova conexão de voz concluída",
+                        )
+                    finally:
+                        if isinstance(pending, dict) and pending.get(guild.id) is new_vc:
+                            pending.pop(guild.id, None)
+
+                defer_enabled = bool(
+                    defer_post_connect
+                    and getattr(config, "TTS_DEFER_POST_CONNECT_MAINTENANCE_ENABLED", True)
+                )
+                if defer_enabled:
+                    pending = getattr(self, "_voice_post_connect_pending", None)
+                    if not isinstance(pending, dict):
+                        pending = {}
+                        setattr(self, "_voice_post_connect_pending", pending)
+                    pending[guild.id] = new_vc
+
+                    async def _complete_safely() -> None:
+                        try:
+                            await _complete_post_connect()
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.exception(
+                                "[tts_voice] pós-conexão em background falhou | guild=%s channel=%s",
+                                guild.id,
+                                getattr(voice_channel, "id", None),
+                            )
+
+                    task = self._schedule_tts_background(_complete_safely())
+                    if task is None:
+                        await _complete_post_connect()
+                else:
+                    await _complete_post_connect()
                 return new_vc
 
             try:

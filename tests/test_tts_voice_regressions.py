@@ -36,6 +36,17 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
         legacy_events = (ROOT / "cogs" / "tts" / "events.py").read_text(encoding="utf-8")
         self.assertIn("voice_channel.connect(self_deaf=True, reconnect=False)", legacy_events)
 
+    def test_cold_tts_connection_defers_only_post_connect_maintenance(self):
+        cog_source = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
+        audio_source = (ROOT / "cogs" / "tts" / "audio.py").read_text(encoding="utf-8")
+
+        self.assertIn("defer_post_connect: bool = False", cog_source)
+        self.assertIn("new_vc = await voice_channel.connect(**connect_kwargs)", cog_source)
+        self.assertIn("pending[guild.id] = new_vc", cog_source)
+        self.assertIn("task = self._schedule_tts_background(_complete_safely())", cog_source)
+        self.assertIn("defer_post_connect=True", audio_source)
+        self.assertIn("if not post_connect_is_pending:", audio_source)
+
     def test_nested_text_inputs_do_not_duplicate_component_v2_labels(self):
         tree = ast.parse((ROOT / "cogs" / "tts" / "ui.py").read_text(encoding="utf-8"))
         expected_targets = {"manual_input", "custom_values", "role_input"}

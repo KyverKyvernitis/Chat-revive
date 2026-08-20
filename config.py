@@ -153,10 +153,6 @@ TTS_EDGE_STREAM_CHUNK_BYTES = min(64 * 1024, max(4 * 1024, _parse_int(os.getenv(
 TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("TTS_EDGE_STREAM_PIPE_OPEN_TIMEOUT_SECONDS", "10.0"), 10.0))
 TTS_EDGE_STREAM_PIPE_BYTES = min(1024 * 1024, max(64 * 1024, _parse_int(os.getenv("TTS_EDGE_STREAM_PIPE_BYTES", "131072"), 131072)))
 TTS_EDGE_STREAM_CACHE_BUFFER_BYTES = min(1024 * 1024, max(16 * 1024, _parse_int(os.getenv("TTS_EDGE_STREAM_CACHE_BUFFER_BYTES", "131072"), 131072)))
-# O áudio Edge destinado ao cache fica em memória somente até a síntese acabar;
-# a gravação final ocorre fora do event loop. Dois MiB cobrem com folga as
-# falas aceitas normalmente sem pressionar a VPS de 1 GB.
-TTS_EDGE_STREAM_CACHE_MEMORY_MAX_BYTES = min(8 * 1024 * 1024, max(256 * 1024, _parse_int(os.getenv("TTS_EDGE_STREAM_CACHE_MEMORY_MAX_BYTES", "2097152"), 2097152)))
 TTS_EDGE_ADAPTIVE_PREBUFFER_ENABLED = _parse_bool(os.getenv("TTS_EDGE_ADAPTIVE_PREBUFFER_ENABLED", "true"), True)
 TTS_EDGE_ADAPTIVE_PREBUFFER_MIN_MS = min(TTS_EDGE_STREAM_PREBUFFER_MS, max(100, _parse_int(os.getenv("TTS_EDGE_ADAPTIVE_PREBUFFER_MIN_MS", "160"), 160)))
 TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS = max(TTS_EDGE_STREAM_PREBUFFER_MS, min(1200, _parse_int(os.getenv("TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS", "400"), 400)))
@@ -166,10 +162,9 @@ TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED = _parse_bool(os.getenv("TTS_EDGE_FFMPEG_
 TTS_EDGE_CIRCUIT_BREAKER_ENABLED = _parse_bool(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_ENABLED", "true"), True)
 TTS_EDGE_CIRCUIT_BREAKER_FAILURES = max(2, _parse_int(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_FAILURES", "3"), 3))
 TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = max(5.0, _parse_float(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "15.0"), 15.0))
-# Um prefetch global preserva dois dos três slots Edge padrão para falas atuais.
-# A prioridade é promovida automaticamente quando o item especulativo vira a
-# próxima fala real.
-TTS_EDGE_PREFETCH_CONCURRENCY = max(1, _parse_int(os.getenv("TTS_EDGE_PREFETCH_CONCURRENCY", "1"), 1))
+# No máximo dois prefetches usam os três slots Edge padrão; pelo menos um slot
+# fica livre para uma fala atual de outra guild.
+TTS_EDGE_PREFETCH_CONCURRENCY = max(1, _parse_int(os.getenv("TTS_EDGE_PREFETCH_CONCURRENCY", "2"), 2))
 
 # gTTS: executor limitado mantém a concorrência física correta mesmo quando uma
 # coroutine expira. Os timeouts nativos impedem thread zumbi em requests.
@@ -177,11 +172,6 @@ TTS_GTTS_CONCURRENCY = _parse_int(os.getenv("TTS_GTTS_CONCURRENCY", "1"), 1)
 TTS_GTTS_TIMEOUT_SECONDS = max(5.0, _parse_float(os.getenv("TTS_GTTS_TIMEOUT_SECONDS", "20.0"), 20.0))
 TTS_GTTS_CONNECT_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("TTS_GTTS_CONNECT_TIMEOUT_SECONDS", "3.5"), 3.5))
 TTS_GTTS_READ_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_GTTS_READ_TIMEOUT_SECONDS", "8.0"), 8.0))
-# gTTS 2.5.4 abre uma Session por parte. O executor dedicado permite manter
-# uma sessão por thread, com rotação curta e rollback imediato por flag.
-TTS_GTTS_PERSISTENT_SESSION_ENABLED = _parse_bool(os.getenv("TTS_GTTS_PERSISTENT_SESSION_ENABLED", "true"), True)
-TTS_GTTS_SESSION_TTL_SECONDS = max(10.0, _parse_float(os.getenv("TTS_GTTS_SESSION_TTL_SECONDS", "90.0"), 90.0))
-TTS_GTTS_SESSION_MAX_REQUESTS = max(4, _parse_int(os.getenv("TTS_GTTS_SESSION_MAX_REQUESTS", "64"), 64))
 TTS_GTTS_STREAMING_ENABLED = _parse_bool(os.getenv("TTS_GTTS_STREAMING_ENABLED", "true"), True)
 # Acima de 100 caracteres o gTTS divide o texto em mais de uma requisição; o
 # stream permite tocar a primeira parte enquanto as próximas são sintetizadas.
@@ -189,23 +179,6 @@ TTS_GTTS_STREAM_MIN_CHARS = max(1, _parse_int(os.getenv("TTS_GTTS_STREAM_MIN_CHA
 TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS", "6.0"), 6.0))
 TTS_CACHE_MAINTENANCE_DELAY_SECONDS = max(0.1, _parse_float(os.getenv("TTS_CACHE_MAINTENANCE_DELAY_SECONDS", "0.75"), 0.75))
 TTS_LATENCY_SAMPLE_WINDOW = max(32, _parse_int(os.getenv("TTS_LATENCY_SAMPLE_WINDOW", "256"), 256))
-TTS_PERSISTENT_STATS_FLUSH_SECONDS = max(0.05, _parse_float(os.getenv("TTS_PERSISTENT_STATS_FLUSH_SECONDS", "0.5"), 0.5))
-
-# Em uma call fria, prepara um frame do FFmpeg enquanto a conexão Discord ainda
-# termina. O frame só é contado quando o Discord realmente o solicita.
-TTS_FFMPEG_PRIME_ENABLED = _parse_bool(os.getenv("TTS_FFMPEG_PRIME_ENABLED", "true"), True)
-TTS_FFMPEG_PRIME_TIMEOUT_SECONDS = max(0.25, _parse_float(os.getenv("TTS_FFMPEG_PRIME_TIMEOUT_SECONDS", "1.5"), 1.5))
-# voice_channel.connect() já recebe self_deaf. Em entradas frias do TTS, a
-# confirmação do estado e a persistência podem terminar depois que o playback
-# fica apto, sem atrasar o primeiro frame.
-TTS_DEFER_POST_CONNECT_MAINTENANCE_ENABLED = _parse_bool(
-    os.getenv("TTS_DEFER_POST_CONNECT_MAINTENANCE_ENABLED", "true"),
-    True,
-)
-TTS_POST_CONNECT_SETTLE_DELAY_SECONDS = max(
-    0.0,
-    min(1.0, _parse_float(os.getenv("TTS_POST_CONNECT_SETTLE_DELAY_SECONDS", "0.12"), 0.12)),
-)
 
 # FFmpeg enxuto para reprodução
 TTS_FFMPEG_BEFORE_OPTIONS = (os.getenv("TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin") or "-nostdin").strip()
@@ -625,9 +598,6 @@ WORKER_VOICE_AGENT_CONNECTION_REPORT_TIMEOUT_SECONDS = max(0.6, _parse_float(os.
 # partes menores, permitindo prefetch do próximo áudio durante o playback atual.
 TTS_LONG_TEXT_CHUNK_ENABLED = _parse_bool(os.getenv("TTS_LONG_TEXT_CHUNK_ENABLED", "true"), True)
 TTS_LONG_TEXT_CHUNK_MAX_CHARS = max(160, _parse_int(os.getenv("TTS_LONG_TEXT_CHUNK_MAX_CHARS", "420"), 420))
-# Edge já entrega áudio progressivamente e aceita até 4096 bytes escapados por
-# conexão. O limite conservador reduz novas conexões/FFmpegs em textos longos.
-TTS_EDGE_LONG_TEXT_CHUNK_MAX_BYTES = min(3800, max(512, _parse_int(os.getenv("TTS_EDGE_LONG_TEXT_CHUNK_MAX_BYTES", "3000"), 3000)))
 TTS_LONG_TEXT_CHUNK_MAX_PARTS = max(1, _parse_int(os.getenv("TTS_LONG_TEXT_CHUNK_MAX_PARTS", "8"), 8))
 # Índice do cache local é verificado periodicamente, em vez de varrer todos os
 # arquivos após cada fala.

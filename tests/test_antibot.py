@@ -59,9 +59,9 @@ def test_exact_state_messages_and_user_identity() -> None:
     )
 
     assert render_entry(waiting, now=10.0, cancel_emoji=CANCEL_EMOJI).splitlines() == [
+        f"## {WARNING_EMOJI} Você será banido em 10 segundos se não reagir",
         "<@123>",
         f"Reaja com {CANCEL_EMOJI} para cancelar",
-        f"**{WARNING_EMOJI} Você será banido em 10 segundos se não reagir**",
     ]
     assert render_entry(cancelled, now=2.0, cancel_emoji=CANCEL_EMOJI).splitlines() == [
         "<@124>",
@@ -105,8 +105,11 @@ def test_full_shared_batch_stays_inside_component_text_limit() -> None:
     rendered = render_batch(entries, now=0.0, cancel_emoji=CANCEL_EMOJI)
 
     assert len(rendered) <= MAX_RENDER_TEXT
+    assert not rendered.startswith("# Antibot")
     assert rendered.count("Reaja com") == MAX_ENTRIES_PER_BATCH
-    assert rendered.count("Você será banido em 10 segundos") == MAX_ENTRIES_PER_BATCH
+    assert rendered.count(
+        f"## {WARNING_EMOJI} Você será banido em 10 segundos se não reagir"
+    ) == MAX_ENTRIES_PER_BATCH
 
     staff_entries = [
         ChallengeEntry(

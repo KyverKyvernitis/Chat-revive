@@ -64,9 +64,9 @@ def render_entry(entry: ChallengeEntry, *, now: float, cancel_emoji: str) -> str
         remaining = entry.remaining_seconds(now)
         unit = "segundo" if remaining == 1 else "segundos"
         return (
+            f"## {WARNING_EMOJI} Você será banido em {remaining} {unit} se não reagir\n"
             f"{mention}\n"
-            f"Reaja com {cancel_emoji} para cancelar\n"
-            f"**{WARNING_EMOJI} Você será banido em {remaining} {unit} se não reagir**"
+            f"Reaja com {cancel_emoji} para cancelar"
         )
     if entry.state == STATE_CANCELLED:
         return f"{mention}\nBanimento cancelado"
@@ -88,4 +88,4 @@ def render_entry(entry: ChallengeEntry, *, now: float, cancel_emoji: str) -> str
 
 def render_batch(entries: list[ChallengeEntry], *, now: float, cancel_emoji: str) -> str:
     blocks = [render_entry(entry, now=now, cancel_emoji=cancel_emoji) for entry in entries]
-    return "# Antibot\n\n" + "\n\n".join(blocks)
+    return "\n\n".join(blocks)

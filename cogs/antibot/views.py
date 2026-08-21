@@ -6,6 +6,7 @@ import discord
 
 from .constants import (
     CANCEL_EMOJI,
+    COUNTDOWN_START,
     STATE_BANNED,
     STATE_FAILED,
     STATE_STAFF_JOKE,
@@ -131,7 +132,7 @@ class AntibotPanelView(discord.ui.LayoutView):
             lines.append("Inativo")
         if self.selected_channel_id and self.selected_channel_id != current_channel_id:
             lines.append(f"Selecionado · {selected}")
-        lines.append("Banimento em 10 segundos")
+        lines.append(f"Contagem regressiva · {COUNTDOWN_START} → 1")
         if notice:
             rendered_notice = f"-# {notice}" if notice_ok is True else str(notice)
             lines.extend(["", rendered_notice])

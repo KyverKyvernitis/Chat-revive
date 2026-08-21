@@ -13,7 +13,6 @@ from discord.ext import commands
 from .constants import (
     CANCEL_EMOJI,
     CANCEL_EMOJI_ID,
-    COUNTDOWN_SECONDS,
     DELETE_MESSAGE_SECONDS,
     MAX_ENTRIES_PER_BATCH,
     RENDER_INTERVAL_SECONDS,
@@ -24,7 +23,7 @@ from .constants import (
     STATE_STAFF_JOKE,
     STATE_WAITING,
 )
-from .state import ChallengeEntry
+from .state import ChallengeEntry, render_key
 from .views import AntibotPanelView, batch_view, notice_view, warning_view
 
 
@@ -42,6 +41,7 @@ class TrapSession:
     render_task: asyncio.Task | None = None
     closed: bool = False
     last_render_at: float = 0.0
+    last_render_key: tuple[tuple[int, str, int | None], ...] | None = None
 
 
 class AntibotCog(commands.Cog):
@@ -95,8 +95,8 @@ class AntibotCog(commands.Cog):
                 session.render_task.cancel()
                 tasks.append(session.render_task)
             for entry in session.entries.values():
-                if entry.deadline_handle is not None:
-                    entry.deadline_handle.cancel()
+                if entry.ban_handle is not None:
+                    entry.ban_handle.cancel()
                 if entry.ban_task is not None:
                     entry.ban_task.cancel()
                     tasks.append(entry.ban_task)
@@ -391,6 +391,10 @@ class AntibotCog(commands.Cog):
 
                 session.last_render_at = time.monotonic()
                 self._arm_entry(session, entry, session.last_render_at)
+                session.last_render_key = render_key(
+                    list(session.entries.values()),
+                    now=session.last_render_at,
+                )
                 session.render_task = asyncio.create_task(
                     self._render_loop(session),
                     name=f"antibot-render:{guild_id}:{session.message.id}",
@@ -399,11 +403,18 @@ class AntibotCog(commands.Cog):
                 session.wake_event.set()
 
     def _arm_entry(self, session: TrapSession, entry: ChallengeEntry, now: float) -> None:
-        if entry.state != STATE_WAITING or entry.deadline is not None:
+        if (
+            entry.state != STATE_WAITING
+            or entry.next_step_at is not None
+            or entry.ban_handle is not None
+            or (entry.ban_task is not None and not entry.ban_task.done())
+        ):
             return
-        entry.deadline = float(now) + float(COUNTDOWN_SECONDS)
-        delay = max(0.0, entry.deadline - time.monotonic())
-        entry.deadline_handle = asyncio.get_running_loop().call_later(
+        entry.next_step_at = float(now) + float(RENDER_INTERVAL_SECONDS)
+        if entry.countdown_value > 1:
+            return
+        delay = max(0.0, entry.next_step_at - time.monotonic())
+        entry.ban_handle = asyncio.get_running_loop().call_later(
             delay,
             self._dispatch_due_ban,
             session,
@@ -411,8 +422,11 @@ class AntibotCog(commands.Cog):
         )
 
     def _dispatch_due_ban(self, session: TrapSession, entry: ChallengeEntry) -> None:
-        entry.deadline_handle = None
+        entry.ban_handle = None
+        entry.next_step_at = None
         if self._closing or session.closed or entry.state != STATE_WAITING:
+            return
+        if entry.ban_task is not None and not entry.ban_task.done():
             return
         entry.ban_task = asyncio.create_task(
             self._finish_ban(session, entry),
@@ -453,6 +467,28 @@ class AntibotCog(commands.Cog):
             entries = list(session.entries.values())
             if not entries:
                 return True
+            for entry in entries:
+                if (
+                    entry.state == STATE_WAITING
+                    and entry.next_step_at is not None
+                    and now >= entry.next_step_at
+                    and entry.countdown_value > 1
+                ):
+                    # No máximo um passo por edição. Se o PATCH atrasar ou
+                    # falhar, o mesmo número será tentado novamente.
+                    entry.advance_countdown()
+            current_render_key = render_key(entries, now=now)
+            has_waiting = any(entry.is_waiting for entry in entries)
+            has_transient = any(
+                entry.state in {STATE_CANCELLED, STATE_FAILED, STATE_STAFF_JOKE}
+                for entry in entries
+            )
+            if current_render_key == session.last_render_key:
+                # Estados terminais ficam visíveis por alguns segundos, mas o
+                # texto não muda nesse período. Acordamos só para controlar a
+                # expiração local, sem reenviar o mesmo Components V2.
+                session.last_render_at = now
+                return not has_waiting and not has_transient
             view = batch_view(entries, now=now)
 
         if session.message is None:
@@ -486,9 +522,14 @@ class AntibotCog(commands.Cog):
 
         rendered_at = time.monotonic()
         session.last_render_at = rendered_at
+        session.last_render_key = current_render_key
         async with session.lock:
-            for entry in session.entries.values():
-                self._arm_entry(session, entry, rendered_at)
+            # Uma entrada adicionada enquanto o PATCH estava em andamento ainda
+            # não apareceu. Só armamos as que estavam no snapshot enviado.
+            for rendered_entry in entries:
+                current_entry = session.entries.get(rendered_entry.user_id)
+                if current_entry is rendered_entry:
+                    self._arm_entry(session, rendered_entry, rendered_at)
             has_waiting = any(entry.is_waiting for entry in session.entries.values())
             has_transient = any(
                 entry.state in {STATE_CANCELLED, STATE_FAILED, STATE_STAFF_JOKE}
@@ -507,9 +548,10 @@ class AntibotCog(commands.Cog):
             if entry.state != STATE_WAITING:
                 return
             entry.state = STATE_BANNING
-            if entry.deadline_handle is not None:
-                entry.deadline_handle.cancel()
-                entry.deadline_handle = None
+            entry.next_step_at = None
+            if entry.ban_handle is not None:
+                entry.ban_handle.cancel()
+                entry.ban_handle = None
 
         guild = self.bot.get_guild(session.guild_id)
         member = guild.get_member(entry.user_id) if guild is not None else None
@@ -525,7 +567,11 @@ class AntibotCog(commands.Cog):
             await self._set_terminal(session, entry, STATE_FAILED)
             return
 
-        reason_suffix = "nova mensagem durante a contagem" if repeated_message else "sem confirmação em 10 segundos"
+        reason_suffix = (
+            "nova mensagem durante a contagem"
+            if repeated_message
+            else "sem confirmação ao fim da contagem"
+        )
         reason = (
             f"Antibot: canal armadilha {session.channel_id}; {reason_suffix}; "
             f"mensagem {entry.trigger_message_id}"
@@ -559,9 +605,10 @@ class AntibotCog(commands.Cog):
         async with session.lock:
             entry.state = state
             entry.terminal_at = time.monotonic()
-            if entry.deadline_handle is not None:
-                entry.deadline_handle.cancel()
-                entry.deadline_handle = None
+            entry.next_step_at = None
+            if entry.ban_handle is not None:
+                entry.ban_handle.cancel()
+                entry.ban_handle = None
             task = entry.ban_task
             if task is not None and task is not asyncio.current_task() and not task.done():
                 task.cancel()
@@ -594,9 +641,10 @@ class AntibotCog(commands.Cog):
             self._sessions_by_message.pop(int(session.message.id), None)
         for entry in session.entries.values():
             self._pending_by_member.pop((session.guild_id, entry.user_id), None)
-            if entry.deadline_handle is not None:
-                entry.deadline_handle.cancel()
-                entry.deadline_handle = None
+            entry.next_step_at = None
+            if entry.ban_handle is not None:
+                entry.ban_handle.cancel()
+                entry.ban_handle = None
             if entry.ban_task is not None and not entry.ban_task.done():
                 entry.ban_task.cancel()
         await self._delete_quietly(session.message)
@@ -613,18 +661,17 @@ class AntibotCog(commands.Cog):
         if session is None or session.closed:
             return
 
-        now = time.monotonic()
         async with session.lock:
             entry = session.entries.get(user_id)
             if entry is None or entry.state != STATE_WAITING:
                 return
-            if entry.deadline is not None and now >= entry.deadline:
-                return
+            now = time.monotonic()
             entry.state = STATE_CANCELLED
             entry.terminal_at = now
-            if entry.deadline_handle is not None:
-                entry.deadline_handle.cancel()
-                entry.deadline_handle = None
+            entry.next_step_at = None
+            if entry.ban_handle is not None:
+                entry.ban_handle.cancel()
+                entry.ban_handle = None
             if entry.ban_task is not None and not entry.ban_task.done():
                 entry.ban_task.cancel()
             self._pending_by_member.pop((session.guild_id, user_id), None)
@@ -772,10 +819,11 @@ class AntibotCog(commands.Cog):
                         continue
                     entry.state = STATE_CANCELLED
                     entry.terminal_at = now
+                    entry.next_step_at = None
                     self._pending_by_member.pop((session.guild_id, entry.user_id), None)
-                    if entry.deadline_handle is not None:
-                        entry.deadline_handle.cancel()
-                        entry.deadline_handle = None
+                    if entry.ban_handle is not None:
+                        entry.ban_handle.cancel()
+                        entry.ban_handle = None
                     if entry.ban_task is not None and not entry.ban_task.done():
                         entry.ban_task.cancel()
                 session.wake_event.set()

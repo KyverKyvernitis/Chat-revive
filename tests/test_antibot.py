@@ -6,48 +6,79 @@ from pathlib import Path
 
 from cogs.antibot.constants import (
     CANCEL_EMOJI,
-    COUNTDOWN_SECONDS,
+    COUNTDOWN_START,
     DELETE_MESSAGE_SECONDS,
     MAX_ENTRIES_PER_BATCH,
     MAX_RENDER_TEXT,
+    RENDER_INTERVAL_SECONDS,
     STAFF_JOKE_VISIBLE_SECONDS,
     STATE_BANNED,
+    STATE_BANNING,
     STATE_CANCELLED,
     STATE_FAILED,
     STATE_STAFF_JOKE,
     STATE_WAITING,
     WARNING_EMOJI,
 )
-from cogs.antibot.state import ChallengeEntry, render_batch, render_entry
+from cogs.antibot.state import ChallengeEntry, render_batch, render_entry, render_key
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_fixed_security_contract() -> None:
-    assert COUNTDOWN_SECONDS == 10
+    assert COUNTDOWN_START == 5
     assert DELETE_MESSAGE_SECONDS == 86_400
+    assert RENDER_INTERVAL_SECONDS == 2.0
+    assert COUNTDOWN_START * RENDER_INTERVAL_SECONDS == 10.0
     assert CANCEL_EMOJI == "<:osaka:1539137127852539944>"
     assert WARNING_EMOJI == "<a:warning:1519862786870743070>"
     assert STAFF_JOKE_VISIBLE_SECONDS == 10.0
 
 
 def test_each_user_keeps_an_independent_countdown() -> None:
-    first = ChallengeEntry(user_id=111, deadline=110.0)
-    second = ChallengeEntry(user_id=222, deadline=115.0)
+    first = ChallengeEntry(user_id=111, countdown_value=4)
+    second = ChallengeEntry(user_id=222, countdown_value=3)
 
-    assert first.remaining_seconds(104.2) == 6
-    assert second.remaining_seconds(104.2) == 11
-    assert "Você será banido em 6 segundos" in render_entry(
+    assert first.countdown_number(104.2) == 4
+    assert second.countdown_number(104.2) == 3
+    assert "Você será banido em 4 segundos" in render_entry(
         first, now=104.2, cancel_emoji=CANCEL_EMOJI
     )
-    assert "Você será banido em 11 segundos" in render_entry(
+    assert "Você será banido em 3 segundos" in render_entry(
         second, now=104.2, cancel_emoji=CANCEL_EMOJI
     )
 
 
+def test_visual_countdown_advances_one_number_at_a_time() -> None:
+    entry = ChallengeEntry(user_id=111)
+    values = [entry.countdown_number(0.0)]
+
+    for _ in range(4):
+        assert entry.advance_countdown()
+        values.append(entry.countdown_number(999.0))
+
+    assert values == list(range(5, 0, -1))
+    assert not entry.advance_countdown()
+
+
+def test_render_key_skips_only_identical_visible_states() -> None:
+    waiting = ChallengeEntry(user_id=111, countdown_value=5)
+    next_step = ChallengeEntry(user_id=111, countdown_value=4)
+    banning = ChallengeEntry(user_id=111, countdown_value=5, state=STATE_BANNING)
+    cancelled = ChallengeEntry(user_id=222, state=STATE_CANCELLED, terminal_at=0.0)
+
+    assert render_key([waiting], now=0.0) != render_key([next_step], now=2.0)
+    assert render_key([waiting], now=2.0) == render_key([banning], now=2.0)
+    assert render_key([cancelled], now=1.0) == render_key([cancelled], now=3.0)
+    assert render_key([cancelled], now=1.0) != render_key(
+        [ChallengeEntry(user_id=222, state=STATE_FAILED, terminal_at=0.0)],
+        now=1.0,
+    )
+
+
 def test_exact_state_messages_and_user_identity() -> None:
-    waiting = ChallengeEntry(user_id=123, deadline=20.0, state=STATE_WAITING)
+    waiting = ChallengeEntry(user_id=123, state=STATE_WAITING)
     cancelled = ChallengeEntry(user_id=124, state=STATE_CANCELLED, terminal_at=1.0)
     banned = ChallengeEntry(user_id=125, state=STATE_BANNED, terminal_at=1.0)
     failed = ChallengeEntry(user_id=126, state=STATE_FAILED, terminal_at=1.0)
@@ -59,7 +90,7 @@ def test_exact_state_messages_and_user_identity() -> None:
     )
 
     assert render_entry(waiting, now=10.0, cancel_emoji=CANCEL_EMOJI).splitlines() == [
-        f"## {WARNING_EMOJI} Você será banido em 10 segundos se não reagir",
+        f"## {WARNING_EMOJI} Você será banido em 5 segundos se não reagir",
         "<@123>",
         f"Reaja com {CANCEL_EMOJI} para cancelar",
     ]
@@ -99,7 +130,7 @@ def test_ban_is_permanent_but_other_terminal_states_expire() -> None:
 
 def test_full_shared_batch_stays_inside_component_text_limit() -> None:
     entries = [
-        ChallengeEntry(user_id=10_000_000_000_000_000_000 + index, deadline=10.0)
+        ChallengeEntry(user_id=10_000_000_000_000_000_000 + index)
         for index in range(MAX_ENTRIES_PER_BATCH)
     ]
     rendered = render_batch(entries, now=0.0, cancel_emoji=CANCEL_EMOJI)
@@ -108,7 +139,7 @@ def test_full_shared_batch_stays_inside_component_text_limit() -> None:
     assert not rendered.startswith("# Antibot")
     assert rendered.count("Reaja com") == MAX_ENTRIES_PER_BATCH
     assert rendered.count(
-        f"## {WARNING_EMOJI} Você será banido em 10 segundos se não reagir"
+        f"## {WARNING_EMOJI} Você será banido em 5 segundos se não reagir"
     ) == MAX_ENTRIES_PER_BATCH
 
     staff_entries = [
@@ -226,16 +257,21 @@ def test_antibot_config_is_persisted_before_cache_publish() -> None:
     assert "_save_guild_doc" not in body
 
 
-def test_runtime_uses_one_second_render_and_24_hour_ban_cleanup() -> None:
+def test_runtime_uses_rate_safe_render_and_24_hour_ban_cleanup() -> None:
     source = (ROOT / "cogs" / "antibot" / "cog.py").read_text(encoding="utf-8")
     assert "RENDER_INTERVAL_SECONDS" in source
+    assert "entry.advance_countdown()" in source
+    assert "if entry.countdown_value > 1:" in source
+    assert "sem confirmação ao fim da contagem" in source
+    assert "current_render_key == session.last_render_key" in source
+    assert "session.last_render_key = current_render_key" in source
     assert "delete_message_seconds=DELETE_MESSAGE_SECONDS" in source
     assert "_live_session_by_guild" in source
     assert "clear_reaction(self._cancel_emoji)" in source
     assert "async def cog_unload" in source
     assert "reserved_update_channel" in source
     assert "call_later(" in source
-    assert "asyncio.sleep(max(0.0, deadline" not in source
+    assert "asyncio.sleep(max(0.0, entry.next_step_at" not in source
     assert "entry.state in {STATE_CANCELLED, STATE_FAILED, STATE_STAFF_JOKE}" in source
 
 
@@ -274,8 +310,9 @@ def test_compact_panel_and_trap_warning_copy() -> None:
     assert 'placeholder="Escolha o canal de armadilha"' in source
     assert 'lines.append(f"Ativo · {current}")' in source
     assert 'lines.append(f"Selecionado · {selected}")' in source
-    assert 'lines.append("Banimento em 10 segundos")' in source
+    assert 'lines.append(f"Contagem regressiva · {COUNTDOWN_START} → 1")' in source
     assert 'rendered_notice = f"-# {notice}"' in source
     assert "Canal atual:" not in source
     assert "Canal selecionado:" not in source
     assert "Banimento após 10 segundos" not in source
+    assert "Banimento em 10 segundos" not in source

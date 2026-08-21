@@ -123,6 +123,9 @@ class RoleCooldownCog(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
+        antibot_guard = getattr(self.bot, "antibot_should_block_message", None)
+        if callable(antibot_guard) and bool(antibot_guard(message)):
+            return
 
         if TARGET_ROLE_ID == 0:
             return

@@ -963,6 +963,9 @@ class GamesCog(dcommands.Cog, GamesCore):
 
     @dcommands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        antibot_guard = getattr(self.bot, "antibot_should_block_message", None)
+        if callable(antibot_guard) and bool(antibot_guard(message)):
+            return
         try:
             await self._handle_gincana_message(message)
         except Exception as e:

@@ -355,6 +355,9 @@ class FormsCog(commands.Cog):
         # Filtros baratos antes de qualquer DB call
         if message.author.bot or message.guild is None or not message.content:
             return
+        antibot_guard = getattr(self.bot, "antibot_should_block_message", None)
+        if callable(antibot_guard) and bool(antibot_guard(message)):
+            return
         if not isinstance(message.author, discord.Member):
             return
 

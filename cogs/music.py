@@ -1114,6 +1114,9 @@ class Music(commands.Cog):
     async def on_message(self, message: discord.Message):
         if getattr(getattr(message, "author", None), "bot", False) or message.guild is None:
             return
+        antibot_guard = getattr(self.bot, "antibot_should_block_message", None)
+        if callable(antibot_guard) and bool(antibot_guard(message)):
+            return
 
         raw = str(getattr(message, "content", "") or "").strip()
         if not raw:

@@ -52,6 +52,13 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
         return MessageGateDecision(False, False, {}, reason="author_bot")
     if getattr(message, "guild", None) is None:
         return MessageGateDecision(False, False, {}, reason="no_guild")
+    # A armadilha é despachada primeiro em bot.py, mas listeners de Cog são
+    # executados pelo discord.py em paralelo. Este gate síncrono impede que uma
+    # mensagem capturada alcance a fila de áudio mesmo nessa corrida.
+    bot = getattr(cog, "bot", None)
+    antibot_guard = getattr(bot, "antibot_should_block_message", None)
+    if callable(antibot_guard) and bool(antibot_guard(message)):
+        return MessageGateDecision(False, False, {}, reason="antibot_guard")
     if not getattr(message, "content", None):
         return MessageGateDecision(False, False, {}, reason="empty_content")
 

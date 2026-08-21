@@ -869,6 +869,23 @@
       "permission": "manage_guild"
     },
     {
+      "key": "antibot",
+      "category": "server",
+      "group": "Painéis",
+      "description": "Configura o canal armadilha.",
+      "usage": "{bot_prefix}antibot",
+      "search_terms": [
+        "armadilha",
+        "anti bot",
+        "conta comprometida",
+        "spam"
+      ],
+      "aliases": [
+        "armadilha"
+      ],
+      "permission": "antibot_staff"
+    },
+    {
       "key": "ticket",
       "category": "server",
       "group": "Painéis",

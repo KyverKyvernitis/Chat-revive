@@ -413,6 +413,9 @@ class SayCog(commands.Cog):
     async def _say_on_message(self, message: discord.Message) -> None:
         if message.guild is None or message.author.bot:
             return
+        antibot_guard = getattr(self.bot, "antibot_should_block_message", None)
+        if callable(antibot_guard) and bool(antibot_guard(message)):
+            return
         key = self._channel_key(message.guild.id, message.channel.id)
         session = self._sessions_by_channel.get(key)
         if session is None:

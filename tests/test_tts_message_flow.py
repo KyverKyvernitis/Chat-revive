@@ -161,6 +161,20 @@ def make_message(content: str, *, in_call: bool = True, channel_id: int = 777, g
 
 
 class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_antibot_guard_stops_before_tts_database_lookup(self):
+        class ExplodingDB:
+            async def get_guild_tts_defaults(self, guild_id: int):
+                raise AssertionError("o TTS não deve consultar o DB para uma mensagem da armadilha")
+
+        cog = FakeCog(db=ExplodingDB())
+        cog.bot = SimpleNamespace(antibot_should_block_message=lambda _message: True)
+
+        decision = await analyze_message_for_tts(cog, make_message(".não fale"))
+
+        self.assertFalse(decision.should_process_tts)
+        self.assertFalse(decision.should_dispatch_prefix_command)
+        self.assertEqual(decision.reason, "antibot_guard")
+
     async def test_prefix_command_path_detected(self):
         cog = FakeCog(db=FakeDB(guild_defaults={"bot_prefix": "_"}))
         message = make_message("_join")

@@ -3412,10 +3412,46 @@ class BotLocal(commands.Bot):
                 exc,
             )
 
-    async def on_message(self, message: discord.Message):
-        if getattr(message.author, "bot", False):
-            return
+    async def _dispatch_antibot_message_bridge(self, message: discord.Message) -> bool:
+        """Entrega a mensagem à armadilha antes de TTS e comandos.
+
+        A cog retorna ``True`` somente para mensagens que precisam morrer no
+        pipeline. O guard síncrono em ``on_message`` filtra as mensagens comuns
+        antes desta coroutine.
+        """
+        antibot_cog = self.get_cog("AntibotCog")
+        handler = (
+            getattr(antibot_cog, "handle_message_from_bot_on_message", None)
+            if antibot_cog is not None
+            else None
+        )
+        if not callable(handler):
+            return False
         try:
+            return bool(await handler(message))
+        except Exception as exc:
+            logging.getLogger("antibot.bridge").exception(
+                "[antibot_bridge] falha ao processar mensagem | guild=%s channel=%s user=%s erro=%r",
+                getattr(getattr(message, "guild", None), "id", None),
+                getattr(getattr(message, "channel", None), "id", None),
+                getattr(getattr(message, "author", None), "id", None),
+                exc,
+            )
+            # O guard já confirmou que a mensagem pertence à armadilha. Em uma
+            # falha interna, mantemos o pipeline fechado para ela não alcançar
+            # TTS, comandos ou o updater.
+            return True
+
+    async def on_message(self, message: discord.Message):
+        try:
+            # Não criamos nem aguardamos coroutine da armadilha para mensagens
+            # comuns. O único custo fixo é um guard síncrono O(1), em memória.
+            antibot_guard = getattr(self, "antibot_should_block_message", None)
+            if callable(antibot_guard) and bool(antibot_guard(message)):
+                if await self._dispatch_antibot_message_bridge(message):
+                    return
+            if getattr(message.author, "bot", False):
+                return
             if int(getattr(message.channel, "id", 0)) == self.ZIP_UPDATE_CHANNEL_ID:
                 await self._handle_zip_update_message(message)
                 return

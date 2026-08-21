@@ -1538,6 +1538,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return
         if message.guild is None:
             return  # só em guilds, DMs não
+        antibot_guard = getattr(self.bot, "antibot_should_block_message", None)
+        if callable(antibot_guard) and bool(antibot_guard(message)):
+            return
         # Aceita chats de: TextChannel (padrão), VoiceChannel (chat embutido
         # da voice call), StageChannel (chat de stage), Thread (threads
         # normais + forum posts). Todos são `Messageable` e suportam webhook.

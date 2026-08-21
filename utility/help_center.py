@@ -190,6 +190,16 @@ def _permission_allowed(
             or getattr(perms, "kick_members", False)
             or getattr(perms, "manage_guild", False)
         )
+    if permission == "antibot_staff":
+        return bool(
+            is_owner
+            or is_admin
+            or getattr(perms, "manage_guild", False)
+            or getattr(perms, "manage_messages", False)
+            or getattr(perms, "moderate_members", False)
+            or getattr(perms, "kick_members", False)
+            or getattr(perms, "ban_members", False)
+        )
     if permission == "feedback_staff":
         return bool(
             is_owner

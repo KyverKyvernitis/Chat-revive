@@ -2649,3 +2649,78 @@ async def _settingsdb_set_tickets_config(self, guild_id: int, config: Dict[str, 
 
 SettingsDB.get_tickets_config = _settingsdb_get_tickets_config
 SettingsDB.set_tickets_config = _settingsdb_set_tickets_config
+
+
+# -----------------------------------------------------------------------------
+# Antibot / canal armadilha.
+# Configuração pequena por guild; a cog mantém o canal ativo em memória e não
+# consulta o Mongo no caminho comum das mensagens.
+# -----------------------------------------------------------------------------
+
+def _settingsdb_normalize_antibot_config(raw: Any) -> Dict[str, Any]:
+    raw = dict(raw or {}) if isinstance(raw, dict) else {}
+    try:
+        channel_id = max(0, int(raw.get("channel_id") or 0))
+    except Exception:
+        channel_id = 0
+    try:
+        warning_message_id = max(0, int(raw.get("warning_message_id") or 0))
+    except Exception:
+        warning_message_id = 0
+    try:
+        updated_by = max(0, int(raw.get("updated_by") or 0))
+    except Exception:
+        updated_by = 0
+    try:
+        revision = max(0, int(raw.get("revision") or 0))
+    except Exception:
+        revision = 0
+    return {
+        "enabled": bool(raw.get("enabled")) and channel_id > 0,
+        "channel_id": channel_id,
+        "warning_message_id": warning_message_id,
+        "updated_by": updated_by,
+        "revision": revision,
+    }
+
+
+def _settingsdb_get_antibot_config(self, guild_id: int) -> Dict[str, Any]:
+    doc = self._get_guild_doc(int(guild_id))
+    return _settingsdb_normalize_antibot_config(doc.get("antibot"))
+
+
+def _settingsdb_iter_antibot_configs(self) -> Dict[int, Dict[str, Any]]:
+    result: Dict[int, Dict[str, Any]] = {}
+    for guild_id, doc in list(self.guild_cache.items()):
+        config = _settingsdb_normalize_antibot_config((doc or {}).get("antibot"))
+        if config.get("enabled") and int(config.get("channel_id") or 0) > 0:
+            result[int(guild_id)] = config
+    return result
+
+
+async def _settingsdb_set_antibot_config(self, guild_id: int, config: Dict[str, Any]):
+    guild_id = int(guild_id)
+    normalized = _settingsdb_normalize_antibot_config(config)
+    # Persistimos primeiro e só então publicamos no cache. Assim uma falha do
+    # Mongo nunca deixa painel e caminho quente discordando do estado durável.
+    await self.coll.update_one(
+        {"type": "guild", "guild_id": guild_id},
+        {
+            "$set": {
+                "type": "guild",
+                "guild_id": guild_id,
+                "antibot": normalized,
+            }
+        },
+        upsert=True,
+    )
+    doc = self._get_guild_doc(guild_id)
+    doc["type"] = "guild"
+    doc["guild_id"] = guild_id
+    doc["antibot"] = normalized
+    self.guild_cache[guild_id] = doc
+
+
+SettingsDB.get_antibot_config = _settingsdb_get_antibot_config
+SettingsDB.iter_antibot_configs = _settingsdb_iter_antibot_configs
+SettingsDB.set_antibot_config = _settingsdb_set_antibot_config

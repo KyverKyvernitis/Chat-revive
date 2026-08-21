@@ -144,6 +144,9 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
             except Exception:
                 pass
 
+        if permissions.intersection({"economy_staff", "ticket_staff"}):
+            permissions.add("antibot_staff")
+
         self._help_permission_cache[cache_key] = (now, frozenset(permissions))
         return permissions
 

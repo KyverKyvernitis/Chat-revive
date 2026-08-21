@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 from cogs.antibot.constants import (
@@ -9,10 +10,13 @@ from cogs.antibot.constants import (
     DELETE_MESSAGE_SECONDS,
     MAX_ENTRIES_PER_BATCH,
     MAX_RENDER_TEXT,
+    STAFF_JOKE_VISIBLE_SECONDS,
     STATE_BANNED,
     STATE_CANCELLED,
     STATE_FAILED,
+    STATE_STAFF_JOKE,
     STATE_WAITING,
+    WARNING_EMOJI,
 )
 from cogs.antibot.state import ChallengeEntry, render_batch, render_entry
 
@@ -24,6 +28,8 @@ def test_fixed_security_contract() -> None:
     assert COUNTDOWN_SECONDS == 10
     assert DELETE_MESSAGE_SECONDS == 86_400
     assert CANCEL_EMOJI == "<:osaka:1539137127852539944>"
+    assert WARNING_EMOJI == "<a:warning:1519862786870743070>"
+    assert STAFF_JOKE_VISIBLE_SECONDS == 10.0
 
 
 def test_each_user_keeps_an_independent_countdown() -> None:
@@ -32,8 +38,12 @@ def test_each_user_keeps_an_independent_countdown() -> None:
 
     assert first.remaining_seconds(104.2) == 6
     assert second.remaining_seconds(104.2) == 11
-    assert "Banimento em 6 segundos" in render_entry(first, now=104.2, cancel_emoji=CANCEL_EMOJI)
-    assert "Banimento em 11 segundos" in render_entry(second, now=104.2, cancel_emoji=CANCEL_EMOJI)
+    assert "Você será banido em 6 segundos" in render_entry(
+        first, now=104.2, cancel_emoji=CANCEL_EMOJI
+    )
+    assert "Você será banido em 11 segundos" in render_entry(
+        second, now=104.2, cancel_emoji=CANCEL_EMOJI
+    )
 
 
 def test_exact_state_messages_and_user_identity() -> None:
@@ -41,11 +51,17 @@ def test_exact_state_messages_and_user_identity() -> None:
     cancelled = ChallengeEntry(user_id=124, state=STATE_CANCELLED, terminal_at=1.0)
     banned = ChallengeEntry(user_id=125, state=STATE_BANNED, terminal_at=1.0)
     failed = ChallengeEntry(user_id=126, state=STATE_FAILED, terminal_at=1.0)
+    staff = ChallengeEntry(
+        user_id=127,
+        state=STATE_STAFF_JOKE,
+        terminal_at=1.0,
+        staff_immune=True,
+    )
 
     assert render_entry(waiting, now=10.0, cancel_emoji=CANCEL_EMOJI).splitlines() == [
         "<@123>",
         f"Reaja com {CANCEL_EMOJI} para cancelar",
-        "Banimento em 10 segundos",
+        f"**{WARNING_EMOJI} Você será banido em 10 segundos se não reagir**",
     ]
     assert render_entry(cancelled, now=2.0, cancel_emoji=CANCEL_EMOJI).splitlines() == [
         "<@124>",
@@ -60,17 +76,25 @@ def test_exact_state_messages_and_user_identity() -> None:
         "Banimento falhou",
         "Não foi possível banir o usuário",
     ]
+    assert render_entry(staff, now=2.0, cancel_emoji=CANCEL_EMOJI).splitlines() == [
+        "<@127>",
+        "Você foi **banido**",
+        "-# quer dizer, se você não fosse staff né (ou se você não tivesse um cargo acima do meu). Agora seja um bom garoto e pare de falar aqui.",
+    ]
 
 
 def test_ban_is_permanent_but_other_terminal_states_expire() -> None:
     banned = ChallengeEntry(user_id=1, state=STATE_BANNED, terminal_at=0.0)
     cancelled = ChallengeEntry(user_id=2, state=STATE_CANCELLED, terminal_at=0.0)
     failed = ChallengeEntry(user_id=3, state=STATE_FAILED, terminal_at=0.0)
+    staff = ChallengeEntry(user_id=4, state=STATE_STAFF_JOKE, terminal_at=1.0)
 
     assert banned.is_permanent
     assert not banned.transient_expired(10_000.0)
     assert cancelled.transient_expired(4.0)
     assert failed.transient_expired(8.0)
+    assert not staff.transient_expired(10.999)
+    assert staff.transient_expired(11.0)
 
 
 def test_full_shared_batch_stays_inside_component_text_limit() -> None:
@@ -82,7 +106,30 @@ def test_full_shared_batch_stays_inside_component_text_limit() -> None:
 
     assert len(rendered) <= MAX_RENDER_TEXT
     assert rendered.count("Reaja com") == MAX_ENTRIES_PER_BATCH
-    assert rendered.count("Banimento em 10 segundos") == MAX_ENTRIES_PER_BATCH
+    assert rendered.count("Você será banido em 10 segundos") == MAX_ENTRIES_PER_BATCH
+
+    staff_entries = [
+        ChallengeEntry(
+            user_id=10_000_000_000_000_000_000 + index,
+            state=STATE_STAFF_JOKE,
+            terminal_at=0.0,
+            staff_immune=True,
+        )
+        for index in range(MAX_ENTRIES_PER_BATCH)
+    ]
+    staff_rendered = render_batch(staff_entries, now=0.0, cancel_emoji=CANCEL_EMOJI)
+    assert len(staff_rendered) <= MAX_RENDER_TEXT
+    assert staff_rendered.count("Você foi **banido**") == MAX_ENTRIES_PER_BATCH
+
+    overflow = staff_entries + [
+        ChallengeEntry(
+            user_id=10_000_000_000_000_000_999,
+            state=STATE_STAFF_JOKE,
+            terminal_at=0.0,
+            staff_immune=True,
+        )
+    ]
+    assert len(render_batch(overflow, now=0.0, cancel_emoji=CANCEL_EMOJI)) > MAX_RENDER_TEXT
 
 
 def test_antibot_runs_before_tts_and_bot_author_shortcut() -> None:
@@ -121,6 +168,24 @@ def test_common_message_path_does_not_await_antibot_bridge() -> None:
 
     assert guarded_calls
     assert any("antibot_guard" in (ast.get_source_segment(source, node.test) or "") for node in guarded_calls)
+
+
+def test_fast_guard_stays_sync_and_memory_only() -> None:
+    source = (ROOT / "cogs" / "antibot" / "cog.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    guard = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "should_block_message_fast"
+    )
+    body = ast.get_source_segment(source, guard) or ""
+
+    assert not any(isinstance(node, ast.Await) for node in ast.walk(guard))
+    assert "_pending_by_member.get" in body
+    assert "_active_channel_to_guild.get" in body
+    assert "get_config" not in body
+    assert "is_staff" not in body
+    assert "self.db" not in body
 
 
 def test_tts_gate_blocks_antibot_before_database_lookup() -> None:
@@ -168,15 +233,42 @@ def test_runtime_uses_one_second_render_and_24_hour_ban_cleanup() -> None:
     assert "reserved_update_channel" in source
     assert "call_later(" in source
     assert "asyncio.sleep(max(0.0, deadline" not in source
+    assert "entry.state in {STATE_CANCELLED, STATE_FAILED, STATE_STAFF_JOKE}" in source
+
+
+def test_staff_countdown_and_active_channel_toggle_contract() -> None:
+    source = (ROOT / "cogs" / "antibot" / "cog.py").read_text(encoding="utf-8")
+
+    assert 'aliases=("armadilha", "trap")' in source
+    assert "await get_context(message)" in source
+    assert "deactivate_trap_if_channel" in source
+    assert 'return True, "Canal de armadilha desativado"' in source
+    assert "current_channel_id != int(expected_channel_id)" in source
+    assert "delete_after=4.0 if ok else 8.0" in source
+    assert "pending[1].staff_immune" in source
+    assert "await self._start_challenge(message, staff_immune=is_staff_member)" in source
+    assert "await self._set_terminal(session, entry, STATE_STAFF_JOKE)" in source
+
+    state_source = (ROOT / "cogs" / "antibot" / "state.py").read_text(encoding="utf-8")
+    assert "staff_immune: bool = False" in state_source
+
+
+def test_help_catalog_exposes_trap_alias() -> None:
+    catalog = json.loads((ROOT / "shared" / "help_catalog.json").read_text(encoding="utf-8"))
+    command = next(item for item in catalog["entries"] if item.get("key") == "antibot")
+
+    assert "trap" in command["aliases"]
+    assert "trap" in command["search_terms"]
 
 
 def test_compact_panel_and_trap_warning_copy() -> None:
     source = (ROOT / "cogs" / "antibot" / "views.py").read_text(encoding="utf-8")
 
-    assert '"# Canal armadilha\\n\\n"' in source
-    assert "<a:warning:1519862786870743070> AVISO:" in source
+    assert '"# 🪤 Canal de armadilha\\n\\n"' in source
+    assert 'f"**{WARNING_EMOJI} AVISO:**' in source
     assert "este canal é feito para detectar contas hackeadas" in source
     assert "vai resultar no seu banimento**" in source
+    assert 'placeholder="Escolha o canal de armadilha"' in source
     assert 'lines.append(f"Ativo · {current}")' in source
     assert 'lines.append(f"Selecionado · {selected}")' in source
     assert 'lines.append("Banimento em 10 segundos")' in source

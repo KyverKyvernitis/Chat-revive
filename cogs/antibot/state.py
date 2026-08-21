@@ -8,11 +8,14 @@ from .constants import (
     CANCELLED_VISIBLE_SECONDS,
     COUNTDOWN_SECONDS,
     FAILED_VISIBLE_SECONDS,
+    STAFF_JOKE_VISIBLE_SECONDS,
     STATE_BANNED,
     STATE_BANNING,
     STATE_CANCELLED,
     STATE_FAILED,
+    STATE_STAFF_JOKE,
     STATE_WAITING,
+    WARNING_EMOJI,
 )
 
 
@@ -23,6 +26,7 @@ class ChallengeEntry:
     deadline: float | None = None
     state: str = STATE_WAITING
     terminal_at: float | None = None
+    staff_immune: bool = False
     deadline_handle: Any = field(default=None, repr=False, compare=False)
     ban_task: Any = field(default=None, repr=False, compare=False)
 
@@ -48,6 +52,8 @@ class ChallengeEntry:
             return now - self.terminal_at >= CANCELLED_VISIBLE_SECONDS
         if self.state == STATE_FAILED:
             return now - self.terminal_at >= FAILED_VISIBLE_SECONDS
+        if self.state == STATE_STAFF_JOKE:
+            return now - self.terminal_at >= STAFF_JOKE_VISIBLE_SECONDS
         return False
 
 
@@ -60,12 +66,19 @@ def render_entry(entry: ChallengeEntry, *, now: float, cancel_emoji: str) -> str
         return (
             f"{mention}\n"
             f"Reaja com {cancel_emoji} para cancelar\n"
-            f"Banimento em {remaining} {unit}"
+            f"**{WARNING_EMOJI} Você será banido em {remaining} {unit} se não reagir**"
         )
     if entry.state == STATE_CANCELLED:
         return f"{mention}\nBanimento cancelado"
     if entry.state == STATE_BANNED:
         return f"{audit_identity}\nConta banida"
+    if entry.state == STATE_STAFF_JOKE:
+        return (
+            f"{mention}\n"
+            "Você foi **banido**\n"
+            "-# quer dizer, se você não fosse staff né (ou se você não tivesse um cargo "
+            "acima do meu). Agora seja um bom garoto e pare de falar aqui."
+        )
     return (
         f"{audit_identity}\n"
         "Banimento falhou\n"

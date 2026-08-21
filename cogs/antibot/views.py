@@ -4,7 +4,13 @@ from typing import TYPE_CHECKING, Iterable
 
 import discord
 
-from .constants import CANCEL_EMOJI
+from .constants import (
+    CANCEL_EMOJI,
+    STATE_BANNED,
+    STATE_FAILED,
+    STATE_STAFF_JOKE,
+    WARNING_EMOJI,
+)
 from .state import ChallengeEntry, render_batch
 
 if TYPE_CHECKING:
@@ -27,8 +33,8 @@ def warning_view() -> discord.ui.LayoutView:
     view.add_item(
         discord.ui.Container(
             discord.ui.TextDisplay(
-                "# Canal armadilha\n\n"
-                "**<a:warning:1519862786870743070> AVISO:** Não envie mensagens aqui, "
+                "# 🪤 Canal de armadilha\n\n"
+                f"**{WARNING_EMOJI} AVISO:** Não envie mensagens aqui, "
                 "este canal é feito para detectar contas hackeadas, **se enviar alguma "
                 "mensagem aqui vai resultar no seu banimento**"
             ),
@@ -42,12 +48,15 @@ def batch_view(entries: Iterable[ChallengeEntry], *, now: float) -> discord.ui.L
     items = list(entries)
     text = render_batch(items, now=now, cancel_emoji=CANCEL_EMOJI)
     has_waiting = any(entry.is_waiting for entry in items)
-    has_failure = any(entry.state == "failed" for entry in items)
-    has_banned = any(entry.state == "banned" for entry in items)
+    has_failure = any(entry.state == STATE_FAILED for entry in items)
+    has_banned = any(entry.state == STATE_BANNED for entry in items)
+    has_staff_joke = any(entry.state == STATE_STAFF_JOKE for entry in items)
     if has_failure or has_banned:
         color = discord.Color.red()
     elif has_waiting:
         color = discord.Color.orange()
+    elif has_staff_joke:
+        color = discord.Color.blurple()
     else:
         color = discord.Color.green()
 
@@ -66,7 +75,7 @@ class _TrapChannelSelect(discord.ui.ChannelSelect):
         self.panel = panel
         super().__init__(
             channel_types=[discord.ChannelType.text],
-            placeholder="Escolha o canal armadilha",
+            placeholder="Escolha o canal de armadilha",
             min_values=1,
             max_values=1,
             custom_id=f"antibot:channel:{panel.guild_id}:{panel.owner_id}",

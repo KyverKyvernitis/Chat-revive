@@ -21,6 +21,7 @@ from .constants import (
     STATE_BANNING,
     STATE_CANCELLED,
     STATE_FAILED,
+    STATE_STAFF_JOKE,
     STATE_WAITING,
 )
 from .state import ChallengeEntry
@@ -169,7 +170,8 @@ class AntibotCog(commands.Cog):
         channel_id = int(getattr(channel, "id", 0) or 0)
         if guild_id <= 0 or user_id <= 0:
             return False
-        if (guild_id, user_id) in self._pending_by_member:
+        pending = self._pending_by_member.get((guild_id, user_id))
+        if pending is not None and not pending[1].staff_immune:
             return True
         return self._active_channel_to_guild.get(channel_id) == guild_id
 
@@ -217,6 +219,64 @@ class AntibotCog(commands.Cog):
         with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
             await message.delete()
 
+    async def _is_antibot_command_message(self, message: discord.Message) -> bool:
+        get_context = getattr(self.bot, "get_context", None)
+        if not callable(get_context):
+            return False
+        try:
+            ctx = await get_context(message)
+        except Exception:
+            log.exception(
+                "falha ao reconhecer comando da armadilha guild=%s channel=%s",
+                getattr(getattr(message, "guild", None), "id", 0),
+                getattr(getattr(message, "channel", None), "id", 0),
+            )
+            return False
+        command = getattr(ctx, "command", None)
+        return (
+            getattr(command, "name", "") == "antibot"
+            and getattr(command, "cog", None) is self
+        )
+
+    async def _mark_staff_immune(
+        self,
+        session: TrapSession,
+        entry: ChallengeEntry,
+    ) -> None:
+        async with session.lock:
+            if entry.state in {STATE_WAITING, STATE_BANNING}:
+                entry.staff_immune = True
+
+    async def _send_deactivation_notice(
+        self,
+        channel: discord.abc.Messageable,
+        *,
+        ok: bool,
+        message: str,
+    ) -> None:
+        try:
+            await channel.send(
+                view=notice_view("Antibot", message, ok=ok),
+                allowed_mentions=discord.AllowedMentions.none(),
+                delete_after=4.0 if ok else 8.0,
+            )
+        except Exception:
+            log.exception(
+                "falha ao enviar confirmação temporária channel=%s",
+                getattr(channel, "id", 0),
+            )
+
+    async def _disable_from_active_channel_message(self, message: discord.Message) -> None:
+        guild = getattr(message, "guild", None)
+        channel = getattr(message, "channel", None)
+        ok, result = await self.deactivate_trap_if_channel(
+            guild,
+            expected_channel_id=int(getattr(channel, "id", 0) or 0),
+            actor_id=int(getattr(getattr(message, "author", None), "id", 0) or 0),
+        )
+        if channel is not None:
+            await self._send_deactivation_notice(channel, ok=ok, message=result)
+
     async def handle_message_from_bot_on_message(self, message: discord.Message) -> bool:
         guild = getattr(message, "guild", None)
         author = getattr(message, "author", None)
@@ -228,14 +288,18 @@ class AntibotCog(commands.Cog):
         user_id = int(getattr(author, "id", 0) or 0)
         channel_id = int(getattr(channel, "id", 0) or 0)
         pending = self._pending_by_member.get((guild_id, user_id))
-        if pending is not None:
-            await self._delete_quietly(message)
+
+        is_active_channel = self._active_channel_to_guild.get(channel_id) == guild_id
+        if not is_active_channel:
+            if pending is None:
+                return False
             session, entry = pending
+            if entry.staff_immune or await self.is_staff(author):
+                await self._mark_staff_immune(session, entry)
+                return False
+            await self._delete_quietly(message)
             await self._finish_ban(session, entry, repeated_message=True)
             return True
-
-        if self._active_channel_to_guild.get(channel_id) != guild_id:
-            return False
 
         bot_user_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
         if user_id == bot_user_id:
@@ -245,14 +309,31 @@ class AntibotCog(commands.Cog):
             return True
 
         await self._delete_quietly(message)
-        if await self.is_staff(author):
-            log.info("mensagem de staff ignorada guild=%s channel=%s user=%s", guild_id, channel_id, user_id)
+        session = pending[0] if pending is not None else None
+        entry = pending[1] if pending is not None else None
+        staff_immune = bool(entry is not None and entry.staff_immune)
+        is_staff_member = staff_immune or await self.is_staff(author)
+
+        if is_staff_member and await self._is_antibot_command_message(message):
+            await self._disable_from_active_channel_message(message)
             return True
 
-        await self._start_challenge(message)
+        if entry is not None and session is not None:
+            if is_staff_member:
+                await self._mark_staff_immune(session, entry)
+                return True
+            await self._finish_ban(session, entry, repeated_message=True)
+            return True
+
+        await self._start_challenge(message, staff_immune=is_staff_member)
         return True
 
-    async def _start_challenge(self, trigger: discord.Message) -> None:
+    async def _start_challenge(
+        self,
+        trigger: discord.Message,
+        *,
+        staff_immune: bool = False,
+    ) -> None:
         guild = trigger.guild
         guild_id = int(guild.id)
         user_id = int(trigger.author.id)
@@ -261,6 +342,9 @@ class AntibotCog(commands.Cog):
             current = self._pending_by_member.get((guild_id, user_id))
             if current is not None:
                 session, entry = current
+                if staff_immune or entry.staff_immune:
+                    await self._mark_staff_immune(session, entry)
+                    return
                 await self._finish_ban(session, entry, repeated_message=True)
                 return
 
@@ -277,6 +361,7 @@ class AntibotCog(commands.Cog):
             entry = ChallengeEntry(
                 user_id=user_id,
                 trigger_message_id=int(getattr(trigger, "id", 0) or 0),
+                staff_immune=bool(staff_immune),
             )
             session.entries[user_id] = entry
             self._pending_by_member[(guild_id, user_id)] = (session, entry)
@@ -394,7 +479,7 @@ class AntibotCog(commands.Cog):
             async with session.lock:
                 has_waiting = any(entry.is_waiting for entry in session.entries.values())
                 has_transient = any(
-                    entry.state in {STATE_CANCELLED, STATE_FAILED}
+                    entry.state in {STATE_CANCELLED, STATE_FAILED, STATE_STAFF_JOKE}
                     for entry in session.entries.values()
                 )
             return not has_waiting and not has_transient
@@ -406,7 +491,7 @@ class AntibotCog(commands.Cog):
                 self._arm_entry(session, entry, rendered_at)
             has_waiting = any(entry.is_waiting for entry in session.entries.values())
             has_transient = any(
-                entry.state in {STATE_CANCELLED, STATE_FAILED}
+                entry.state in {STATE_CANCELLED, STATE_FAILED, STATE_STAFF_JOKE}
                 for entry in session.entries.values()
             )
         return not has_waiting and not has_transient
@@ -428,8 +513,12 @@ class AntibotCog(commands.Cog):
 
         guild = self.bot.get_guild(session.guild_id)
         member = guild.get_member(entry.user_id) if guild is not None else None
+        if entry.staff_immune:
+            await self._set_terminal(session, entry, STATE_STAFF_JOKE)
+            return
         if member is not None and await self.is_staff(member):
-            await self._set_terminal(session, entry, STATE_CANCELLED)
+            await self._mark_staff_immune(session, entry)
+            await self._set_terminal(session, entry, STATE_STAFF_JOKE)
             return
 
         if guild is None:
@@ -707,6 +796,28 @@ class AntibotCog(commands.Cog):
                 delete_warning=delete_warning,
             )
 
+    async def deactivate_trap_if_channel(
+        self,
+        guild: discord.Guild | None,
+        *,
+        expected_channel_id: int,
+        actor_id: int,
+    ) -> tuple[bool, str]:
+        if guild is None:
+            return False, "Servidor inválido"
+        async with self._guild_lock(guild.id):
+            config = self.get_config(guild.id)
+            current_channel_id = int(config.get("channel_id") or 0)
+            if not bool(config.get("enabled")):
+                return True, "Canal de armadilha desativado"
+            if current_channel_id != int(expected_channel_id):
+                return False, "Este canal não está mais ativo"
+            return await self._deactivate_trap_locked(
+                guild,
+                actor_id=actor_id,
+                delete_warning=True,
+            )
+
     async def _deactivate_trap_locked(
         self,
         guild: discord.Guild,
@@ -734,9 +845,9 @@ class AntibotCog(commands.Cog):
         await self._cancel_guild_sessions(guild.id)
         if delete_warning:
             await self._delete_saved_warning(guild, old_config)
-        return True, "Armadilha desativada"
+        return True, "Canal de armadilha desativado"
 
-    @commands.command(name="antibot", aliases=("armadilha",))
+    @commands.command(name="antibot", aliases=("armadilha", "trap"))
     @commands.guild_only()
     async def antibot_command(self, ctx: commands.Context) -> None:
         if not await self.is_staff(getattr(ctx, "author", None)):
@@ -745,6 +856,17 @@ class AntibotCog(commands.Cog):
                 mention_author=False,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            return
+        config = self.get_config(int(ctx.guild.id))
+        channel_id = int(getattr(ctx.channel, "id", 0) or 0)
+        if bool(config.get("enabled")) and int(config.get("channel_id") or 0) == channel_id:
+            await self._delete_quietly(getattr(ctx, "message", None))
+            ok, message = await self.deactivate_trap_if_channel(
+                ctx.guild,
+                expected_channel_id=channel_id,
+                actor_id=int(ctx.author.id),
+            )
+            await self._send_deactivation_notice(ctx.channel, ok=ok, message=message)
             return
         view = AntibotPanelView(
             self,

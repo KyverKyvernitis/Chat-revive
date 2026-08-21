@@ -43,12 +43,12 @@ def test_exact_state_messages_and_user_identity() -> None:
     failed = ChallengeEntry(user_id=126, state=STATE_FAILED, terminal_at=1.0)
 
     assert render_entry(waiting, now=10.0, cancel_emoji=CANCEL_EMOJI).splitlines() == [
-        "<@123> · `123`",
+        "<@123>",
         f"Reaja com {CANCEL_EMOJI} para cancelar",
         "Banimento em 10 segundos",
     ]
     assert render_entry(cancelled, now=2.0, cancel_emoji=CANCEL_EMOJI).splitlines() == [
-        "<@124> · `124`",
+        "<@124>",
         "Banimento cancelado",
     ]
     assert render_entry(banned, now=2.0, cancel_emoji=CANCEL_EMOJI).splitlines() == [
@@ -168,3 +168,19 @@ def test_runtime_uses_one_second_render_and_24_hour_ban_cleanup() -> None:
     assert "reserved_update_channel" in source
     assert "call_later(" in source
     assert "asyncio.sleep(max(0.0, deadline" not in source
+
+
+def test_compact_panel_and_trap_warning_copy() -> None:
+    source = (ROOT / "cogs" / "antibot" / "views.py").read_text(encoding="utf-8")
+
+    assert '"# Canal armadilha\\n\\n"' in source
+    assert "<a:warning:1519862786870743070> AVISO:" in source
+    assert "este canal é feito para detectar contas hackeadas" in source
+    assert "vai resultar no seu banimento**" in source
+    assert 'lines.append(f"Ativo · {current}")' in source
+    assert 'lines.append(f"Selecionado · {selected}")' in source
+    assert 'lines.append("Banimento em 10 segundos")' in source
+    assert 'rendered_notice = f"-# {notice}"' in source
+    assert "Canal atual:" not in source
+    assert "Canal selecionado:" not in source
+    assert "Banimento após 10 segundos" not in source

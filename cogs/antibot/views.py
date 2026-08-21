@@ -26,7 +26,12 @@ def warning_view() -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(
         discord.ui.Container(
-            discord.ui.TextDisplay("# Canal restrito\nNão envie mensagens aqui"),
+            discord.ui.TextDisplay(
+                "# Canal armadilha\n\n"
+                "**<a:warning:1519862786870743070> AVISO:** Não envie mensagens aqui, "
+                "este canal é feito para detectar contas hackeadas, **se enviar alguma "
+                "mensagem aqui vai resultar no seu banimento**"
+            ),
             accent_color=discord.Color.red(),
         )
     )
@@ -83,7 +88,6 @@ class _TrapChannelSelect(discord.ui.ChannelSelect):
                 owner_id=self.panel.owner_id,
                 guild_id=self.panel.guild_id,
                 selected_channel_id=channel_id,
-                notice=f"Canal selecionado: {channel.mention}",
             )
         )
 
@@ -111,16 +115,17 @@ class AntibotPanelView(discord.ui.LayoutView):
         enabled = bool(config.get("enabled") and current_channel_id)
         current = f"<#{current_channel_id}>" if current_channel_id else "Nenhum"
         selected = f"<#{self.selected_channel_id}>" if self.selected_channel_id else "Nenhum"
-        lines = [
-            "# Antibot",
-            "Ativo" if enabled else "Inativo",
-            "",
-            f"Canal atual: {current}",
-            f"Canal selecionado: {selected}",
-            "Banimento após 10 segundos",
-        ]
+        lines = ["# Antibot"]
+        if enabled:
+            lines.append(f"Ativo · {current}")
+        else:
+            lines.append("Inativo")
+        if self.selected_channel_id and self.selected_channel_id != current_channel_id:
+            lines.append(f"Selecionado · {selected}")
+        lines.append("Banimento em 10 segundos")
         if notice:
-            lines.extend(["", str(notice)])
+            rendered_notice = f"-# {notice}" if notice_ok is True else str(notice)
+            lines.extend(["", rendered_notice])
 
         if notice_ok is False:
             accent = discord.Color.red()

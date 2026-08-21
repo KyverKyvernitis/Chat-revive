@@ -646,7 +646,7 @@ class AntibotCog(commands.Cog):
         if old_channel_id and old_channel_id != int(channel.id):
             await self._cancel_guild_sessions(guild.id)
         await self._delete_saved_warning(guild, old_config, except_message_id=int(warning.id))
-        return True, f"Armadilha ativa em {channel.mention}"
+        return True, "Configuração salva"
 
     async def _delete_saved_warning(
         self,

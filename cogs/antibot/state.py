@@ -52,21 +52,22 @@ class ChallengeEntry:
 
 
 def render_entry(entry: ChallengeEntry, *, now: float, cancel_emoji: str) -> str:
-    identity = f"<@{int(entry.user_id)}> · `{int(entry.user_id)}`"
+    mention = f"<@{int(entry.user_id)}>"
+    audit_identity = f"{mention} · `{int(entry.user_id)}`"
     if entry.state in {STATE_WAITING, STATE_BANNING}:
         remaining = entry.remaining_seconds(now)
         unit = "segundo" if remaining == 1 else "segundos"
         return (
-            f"{identity}\n"
+            f"{mention}\n"
             f"Reaja com {cancel_emoji} para cancelar\n"
             f"Banimento em {remaining} {unit}"
         )
     if entry.state == STATE_CANCELLED:
-        return f"{identity}\nBanimento cancelado"
+        return f"{mention}\nBanimento cancelado"
     if entry.state == STATE_BANNED:
-        return f"{identity}\nConta banida"
+        return f"{audit_identity}\nConta banida"
     return (
-        f"{identity}\n"
+        f"{audit_identity}\n"
         "Banimento falhou\n"
         "Não foi possível banir o usuário"
     )

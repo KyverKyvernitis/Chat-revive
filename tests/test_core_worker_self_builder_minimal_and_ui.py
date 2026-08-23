@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -20,6 +21,7 @@ AUTOMATION_PATH = ROOT / "scripts/core-worker-automation.py"
 WORKERS_PATH = ROOT / "utility/commands/workers.py"
 ANDROID = ROOT / "android/core-worker-app"
 JAVA = ANDROID / "app/src/main/java/dev/core/worker"
+APK_SELF_BUILDER_PATH = ANDROID / "app/src/main/python/coreworker/apk_self_builder.py"
 
 
 def _load(name: str, path: Path):
@@ -142,7 +144,7 @@ def test_bootstrap_core_starts_before_optional_runtime_files_arrive(tmp_path: Pa
 
     monkeypatch.setattr(module.importlib, "import_module", import_without_preloaded_identity)
 
-    assert module.PHONE_WORKER_VERSION == "1.10.41"
+    assert module.PHONE_WORKER_VERSION == "1.10.42"
     assert module._APK_IDENTITY_MODULE is None
     assert bootstrap_core.stat().st_size <= 512 * 1024
     with pytest.raises(RuntimeError, match="segundo estágio"):
@@ -322,7 +324,12 @@ def test_python_elf_parser_works_without_termux_readelf(tmp_path: Path) -> None:
     assert result["needed"]
     assert all("/" not in name for name in result["needed"])
 
-def _builder_bundle(path: Path, *, version: int) -> None:
+def _builder_bundle(
+    path: Path,
+    *,
+    version: int,
+    smoke_names: tuple[str, ...] = ("java", "javac", "jar", "gradle", "aapt2"),
+) -> None:
     executable_paths = [
         "jdk/bin/java",
         "jdk/bin/javac",
@@ -337,7 +344,11 @@ def _builder_bundle(path: Path, *, version: int) -> None:
         "arch": "aarch64",
         "runtimeLibraries": {"strategy": "dt-needed-transitive-v1"},
         "gradleLauncher": {"strategy": "android-sh-resolved-app-home-jvm-opts-v2"},
-        "bootstrapSmoke": {"ok": True},
+        "validation": {"strategy": "required-executable-smoke-v2"},
+        "bootstrapSmoke": {
+            "ok": True,
+            "checks": [{"name": name, "ok": True, "returncode": 0} for name in smoke_names],
+        },
         "paths": {
             "jdk": "jdk",
             "gradle": "gradle/bin/gradle",
@@ -348,21 +359,21 @@ def _builder_bundle(path: Path, *, version: int) -> None:
     }
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest))
-        archive.writestr("jdk/bin/java", b"j" * (64 * 1024 + 1))
-        archive.writestr("jdk/bin/javac", b"c" * (8 * 1024 + 1))
-        archive.writestr("jdk/bin/jar", b"r" * (8 * 1024 + 1))
+        archive.writestr("jdk/bin/java", b"j")
+        archive.writestr("jdk/bin/javac", b"c")
+        archive.writestr("jdk/bin/jar", b"r")
         archive.writestr("jdk/lib/jspawnhelper", b"s")
-        archive.writestr("gradle/bin/gradle", b"g" * 101)
+        archive.writestr("gradle/bin/gradle", b"g")
         archive.writestr("android-sdk/platforms/android-34/android.jar", b"a" * (1024 * 1024 + 1))
-        archive.writestr("bin/aapt2", b"p" * (64 * 1024 + 1))
+        archive.writestr("bin/aapt2", b"p")
 
 
 def test_bundle_validation_forces_regeneration_of_old_full_runtime(tmp_path: Path) -> None:
     module = _load("phone_worker_bundle_version_test", PHONE_WORKER_PATH)
     old = tmp_path / "old.zip"
     current = tmp_path / "current.zip"
-    _builder_bundle(old, version=5)
-    _builder_bundle(current, version=6)
+    _builder_bundle(old, version=6)
+    _builder_bundle(current, version=7)
 
     rejected = module._apk_self_builder_bundle_valid(old)
     accepted = module._apk_self_builder_bundle_valid(current)
@@ -371,6 +382,41 @@ def test_bundle_validation_forces_regeneration_of_old_full_runtime(tmp_path: Pat
     assert "bundle antigo" in rejected["error"]
     assert accepted["ok"] is True
     assert accepted["manifest"]["runtimeLibraries"]["strategy"] == "dt-needed-transitive-v1"
+
+
+def test_bundle_validation_requires_execution_result_for_every_tool(tmp_path: Path) -> None:
+    module = _load("phone_worker_bundle_smoke_test", PHONE_WORKER_PATH)
+    incomplete = tmp_path / "incomplete.zip"
+    _builder_bundle(incomplete, version=7, smoke_names=("java", "javac", "gradle", "aapt2"))
+
+    result = module._apk_self_builder_bundle_valid(incomplete)
+
+    assert result["ok"] is False
+    assert "smoke obrigatório ausente ou reprovado: jar" in result["error"]
+
+
+def test_apk_accepts_compact_launchers_after_verified_bootstrap_smoke(tmp_path: Path) -> None:
+    archive_path = tmp_path / "toolchain.zip"
+    toolchain = tmp_path / "toolchain"
+    _builder_bundle(archive_path, version=7)
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(toolchain)
+    manifest = json.loads((toolchain / "manifest.json").read_text(encoding="utf-8"))
+    for name in manifest["executablePaths"]:
+        (toolchain / name).chmod(0o700)
+
+    python_root = APK_SELF_BUILDER_PATH.parents[1]
+    sys.path.insert(0, str(python_root))
+    try:
+        module = _load("apk_self_builder_compact_launcher_test", APK_SELF_BUILDER_PATH)
+    finally:
+        sys.path.remove(str(python_root))
+    resolved = module._resolve_toolchain(toolchain)
+
+    assert resolved["ok"] is True
+    assert resolved["checks"]["bootstrapSmoke"] is True
+    assert resolved["checks"]["validation"] is True
+    assert (toolchain / "jdk/bin/java").stat().st_size == 1
 
 
 def test_automation_reconciles_failed_job_instead_of_leaving_pending(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -438,14 +484,15 @@ def test_ui_and_versions_expose_builder_state_without_vps_gradle() -> None:
     gradle = (ANDROID / "app/build.gradle").read_text(encoding="utf-8")
     workers = WORKERS_PATH.read_text(encoding="utf-8")
 
-    assert 'versionCode 124' in gradle
-    assert 'versionName "0.7.6"' in gradle
+    assert 'versionCode 125' in gradle
+    assert 'versionName "0.7.7"' in gradle
     assert 'builderHeroText = smallText("Autobuild: verificando toolchain local")' in activity
     assert '"✅ Autobuild pronto' in activity
     assert 'sectionTitle("Diagnóstico e manutenção")' in activity
     assert 'bottomNavButton("⚙  Core")' in activity
     assert 'runtime_libraries.get("strategy") == "dt-needed-transitive-v1"' in builder
-    assert '"manifestVersion": manifest_version >= 6' in builder
+    assert '"manifestVersion": manifest_version >= 7' in builder
     assert 'gradle_launcher.get("strategy") == "android-sh-resolved-app-home-jvm-opts-v2"' in builder
+    assert 'validation.get("strategy") == "required-executable-smoke-v2"' in builder
     assert 'f"**Atualização:** {automation_label}"' in workers
     assert 'discord.ui.ActionRow(refresh, pairing, cleanup_jobs)' not in workers

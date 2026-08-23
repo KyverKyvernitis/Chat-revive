@@ -100,7 +100,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.41"
+PHONE_WORKER_VERSION = "1.10.42"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -7770,8 +7770,8 @@ def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
                 manifest_version = int(manifest.get("version") or 0)
             except Exception:
                 manifest_version = 0
-            if manifest_version < 6:
-                raise ValueError("bundle antigo: regenere com launcher Gradle APP_HOME seguro v6")
+            if manifest_version < 7:
+                raise ValueError("bundle antigo: regenere com validação executável v7")
             runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
             if runtime_libraries.get("strategy") != "dt-needed-transitive-v1":
                 raise ValueError("estratégia de bibliotecas do autobuilder inválida")
@@ -7781,6 +7781,15 @@ def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
             bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
             if bootstrap_smoke.get("ok") is not True:
                 raise ValueError("smoke bootstrap do autobuilder ausente ou reprovado")
+            validation = manifest.get("validation") if isinstance(manifest.get("validation"), dict) else {}
+            if validation.get("strategy") != "required-executable-smoke-v2":
+                raise ValueError("estratégia de validação executável do autobuilder inválida")
+            smoke_checks = bootstrap_smoke.get("checks") if isinstance(bootstrap_smoke.get("checks"), list) else []
+            smoke_by_name = {str(item.get("name") or ""): item for item in smoke_checks if isinstance(item, dict)}
+            for name in ("java", "javac", "jar", "gradle", "aapt2"):
+                check = smoke_by_name.get(name) or {}
+                if check.get("ok") is not True or check.get("returncode") is None or int(check.get("returncode")) != 0:
+                    raise ValueError(f"smoke obrigatório ausente ou reprovado: {name}")
             arch = str(manifest.get("arch") or "").strip().lower()
             if arch not in {"aarch64", "arm64", "arm64-v8a"}:
                 raise ValueError("arquitetura inválida")
@@ -7790,12 +7799,12 @@ def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
             sdk = str(paths.get("androidSdk") or paths.get("android_sdk") or "android-sdk").strip("/")
             aapt2 = str(paths.get("aapt2") or "bin/aapt2").strip("/")
             required = {
-                f"{jdk}/bin/java": 64 * 1024,
-                f"{jdk}/bin/javac": 8 * 1024,
-                f"{jdk}/bin/jar": 8 * 1024,
-                gradle: 100,
+                f"{jdk}/bin/java": 1,
+                f"{jdk}/bin/javac": 1,
+                f"{jdk}/bin/jar": 1,
+                gradle: 1,
                 f"{sdk}/platforms/android-34/android.jar": 1024 * 1024,
-                aapt2: 64 * 1024,
+                aapt2: 1,
             }
             for name, minimum in required.items():
                 info = archive.getinfo(name) if name in names else None
@@ -8608,7 +8617,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
 
         manifest = {
             "schema": "core-worker-android-builder-v1",
-            "version": 6,
+            "version": 7,
             "arch": "aarch64",
             "runtime": "termux-bionic-direct",
             "generatedBy": f"phone-worker-{PHONE_WORKER_VERSION}",
@@ -8627,6 +8636,10 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
             "runtimeLibraries": runtime_library_report,
             "gradleLauncher": gradle_launcher_report,
             "bootstrapSmoke": smoke,
+            "validation": {
+                "strategy": "required-executable-smoke-v2",
+                "requiredSmokeChecks": ["java", "javac", "jar", "gradle", "aapt2"],
+            },
             "executablePaths": executable_paths,
             "safety": {
                 "generatedOnTermux": True,

@@ -63,8 +63,8 @@ android {
         // apps target 29+, então esta variante operacional permanece em target 28.
         // compileSdk continua moderno e a distribuição não ocorre pelo Google Play.
         targetSdk coreWorkerSelfBuilderTargetSdk
-        versionCode 124
-        versionName "0.7.6"
+        versionCode 125
+        versionName "0.7.7"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -344,8 +344,8 @@ tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
                 throw new GradleException("schema inválido no toolchain de autobuild")
             }
             def manifestVersion = (parsed?.version ?: 0) as int
-            if (manifestVersion < 6) {
-                throw new GradleException("toolchain antigo: regenere o bundle com launcher Gradle APP_HOME seguro v6")
+            if (manifestVersion < 7) {
+                throw new GradleException("toolchain antigo: regenere o bundle com validação executável v7")
             }
             if (parsed?.runtimeLibraries?.strategy != "dt-needed-transitive-v1") {
                 throw new GradleException("estratégia de bibliotecas inválida no toolchain de autobuild")
@@ -353,8 +353,22 @@ tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
             if (parsed?.gradleLauncher?.strategy != "android-sh-resolved-app-home-jvm-opts-v2") {
                 throw new GradleException("launcher Gradle incompatível com /system/bin/sh no toolchain de autobuild")
             }
+            if (parsed?.validation?.strategy != "required-executable-smoke-v2") {
+                throw new GradleException("estratégia de validação executável ausente no toolchain de autobuild")
+            }
             if (parsed?.bootstrapSmoke?.ok != true) {
                 throw new GradleException("smoke bootstrap ausente ou reprovado no toolchain de autobuild")
+            }
+            def smokeChecks = parsed?.bootstrapSmoke?.checks instanceof Collection ? parsed.bootstrapSmoke.checks : []
+            def smokeByName = smokeChecks.findAll { it instanceof Map && it.name }
+                    .collectEntries { [(it.name.toString()): it] }
+            def requiredSmokeChecks = ["java", "javac", "jar", "gradle", "aapt2"]
+            def invalidSmoke = requiredSmokeChecks.find { name ->
+                def check = smokeByName[name]
+                check == null || check.ok != true || check.returncode == null || check.returncode.toString() != "0"
+            }
+            if (invalidSmoke != null) {
+                throw new GradleException("smoke obrigatório ausente ou reprovado no toolchain: ${invalidSmoke}")
             }
             def arch = (parsed?.arch ?: "").toString().toLowerCase()
             if (!(arch in ["aarch64", "arm64", "arm64-v8a"])) {
@@ -367,12 +381,12 @@ tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
             def jdkPath = normalizeToolchainPath(paths.jdk ?: "jdk")
             def sdkPath = normalizeToolchainPath(paths.androidSdk ?: paths.android_sdk ?: "android-sdk")
             def required = [
-                [(jdkPath + "/bin/java"): 64L * 1024L],
-                [(jdkPath + "/bin/javac"): 8L * 1024L],
-                [(jdkPath + "/bin/jar"): 8L * 1024L],
-                [(normalizeToolchainPath(paths.gradle ?: "gradle/bin/gradle")): 100L],
+                [(jdkPath + "/bin/java"): 1L],
+                [(jdkPath + "/bin/javac"): 1L],
+                [(jdkPath + "/bin/jar"): 1L],
+                [(normalizeToolchainPath(paths.gradle ?: "gradle/bin/gradle")): 1L],
                 [(sdkPath + "/platforms/android-34/android.jar"): 1024L * 1024L],
-                [(normalizeToolchainPath(paths.aapt2 ?: "bin/aapt2")): 64L * 1024L],
+                [(normalizeToolchainPath(paths.aapt2 ?: "bin/aapt2")): 1L],
             ]
             required.each { requirement ->
                 requirement.each { name, minBytes ->

@@ -113,6 +113,7 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
     runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
     gradle_launcher = manifest.get("gradleLauncher") if isinstance(manifest.get("gradleLauncher"), dict) else {}
     bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
+    validation = manifest.get("validation") if isinstance(manifest.get("validation"), dict) else {}
     raw_executables = manifest.get("executablePaths") if isinstance(manifest.get("executablePaths"), list) else []
 
     paths = manifest.get("paths") if isinstance(manifest.get("paths"), dict) else {}
@@ -148,23 +149,38 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
         and all((toolchain_dir / item).is_file() for item in executable_paths)
         and (not (toolchain_dir / jspawn_rel).is_file() or jspawn_rel in executable_paths)
     )
+    smoke_checks = bootstrap_smoke.get("checks") if isinstance(bootstrap_smoke.get("checks"), list) else []
+    smoke_by_name = {
+        str(item.get("name") or ""): item
+        for item in smoke_checks
+        if isinstance(item, dict) and item.get("name")
+    }
+    bootstrap_smoke_valid = bootstrap_smoke.get("ok") is True
+    for name in ("java", "javac", "jar", "gradle", "aapt2"):
+        check = smoke_by_name.get(name) or {}
+        try:
+            returncode_ok = check.get("returncode") is not None and int(check.get("returncode")) == 0
+        except (TypeError, ValueError):
+            returncode_ok = False
+        bootstrap_smoke_valid = bootstrap_smoke_valid and check.get("ok") is True and returncode_ok
 
     checks = {
         "manifest": manifest_path.is_file(),
         "schema": schema == TOOLCHAIN_SCHEMA,
-        "manifestVersion": manifest_version >= 6,
+        "manifestVersion": manifest_version >= 7,
         "executablePaths": declared_executables_valid,
         "runtimeLibraries": runtime_libraries.get("strategy") == "dt-needed-transitive-v1",
         "gradleLauncher": gradle_launcher.get("strategy") == "android-sh-resolved-app-home-jvm-opts-v2",
-        "bootstrapSmoke": bootstrap_smoke.get("ok") is True,
+        "validation": validation.get("strategy") == "required-executable-smoke-v2",
+        "bootstrapSmoke": bootstrap_smoke_valid,
         "arch": arch in {"aarch64", "arm64", "arm64-v8a"},
-        "java": java.is_file() and java.stat().st_size > 64 * 1024 and os.access(java, os.X_OK),
-        "javac": javac.is_file() and javac.stat().st_size > 8 * 1024 and os.access(javac, os.X_OK),
-        "jar": jar.is_file() and jar.stat().st_size > 8 * 1024 and os.access(jar, os.X_OK),
-        "gradle": gradle.is_file() and gradle.stat().st_size > 100 and os.access(gradle, os.X_OK),
+        "java": java.is_file() and java.stat().st_size > 0 and os.access(java, os.X_OK),
+        "javac": javac.is_file() and javac.stat().st_size > 0 and os.access(javac, os.X_OK),
+        "jar": jar.is_file() and jar.stat().st_size > 0 and os.access(jar, os.X_OK),
+        "gradle": gradle.is_file() and gradle.stat().st_size > 0 and os.access(gradle, os.X_OK),
         "androidSdk": sdk.is_dir(),
         "androidJar34": android_jar.is_file() and android_jar.stat().st_size > 1024 * 1024,
-        "aapt2": aapt2.is_file() and aapt2.stat().st_size > 64 * 1024 and os.access(aapt2, os.X_OK),
+        "aapt2": aapt2.is_file() and aapt2.stat().st_size > 0 and os.access(aapt2, os.X_OK),
         "jspawnhelper": not (toolchain_dir / jspawn_rel).is_file() or os.access(toolchain_dir / jspawn_rel, os.X_OK),
     }
     missing = [key for key, ok in checks.items() if not ok]
@@ -306,7 +322,11 @@ def _toolchain_smoke(files: Path, tool: dict[str, Any], *, force: bool) -> dict[
     state_path = builder / "toolchain-smoke.json"
     fingerprint = _toolchain_fingerprint(tool)
     cached = _safe_json_load(state_path)
-    if not force and cached.get("fingerprint") == fingerprint:
+    if (
+        not force
+        and cached.get("fingerprint") == fingerprint
+        and cached.get("schema") == "core-worker-apk-self-builder-smoke-v3"
+    ):
         return cached
 
     runtime = builder / "runtime/smoke"
@@ -320,6 +340,8 @@ def _toolchain_smoke(files: Path, tool: dict[str, Any], *, force: bool) -> dict[
     paths = tool["paths"]
     commands = [
         ("java", [paths["java"], "-version"], 45),
+        ("javac", [paths["javac"], "-version"], 45),
+        ("jar", [paths["jar"], "--version"], 45),
         ("gradle", ["/system/bin/sh", paths["gradle"], "--version", "--no-daemon"], 90),
         ("aapt2", [paths["aapt2"], "version"], 45),
     ]
@@ -334,10 +356,10 @@ def _toolchain_smoke(files: Path, tool: dict[str, Any], *, force: bool) -> dict[
         shutil.rmtree(runtime, ignore_errors=True)
     ok = len(checks) == len(commands) and all(bool(item.get("ok")) for item in checks)
     result = {
-        "schema": "core-worker-apk-self-builder-smoke-v2",
+        "schema": "core-worker-apk-self-builder-smoke-v3",
         "ok": ok,
         "state": "toolchain_smoke_ok" if ok else "toolchain_smoke_failed",
-        "summary": "JDK, Gradle e aapt2 executaram no APK" if ok else "toolchain não executou no ambiente privado do APK",
+        "summary": "Java, Javac, Jar, Gradle e aapt2 executaram no APK" if ok else "toolchain não executou no ambiente privado do APK",
         "fingerprint": fingerprint,
         "checks": checks,
         "updatedAt": _now_ms(),

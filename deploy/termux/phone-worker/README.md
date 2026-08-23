@@ -1,5 +1,14 @@
 # Phone Worker Termux
 
+## Patch 86.5: validação executável sem heurística de tamanho
+
+A versão `1.10.42` gera o bundle v7 e considera Java, Javac, Jar, Gradle e
+`aapt2` válidos pelo smoke real de cada comando, com `returncode=0`. Ela não
+rejeita mais os launchers compactos do OpenJDK/Termux por limites arbitrários de
+64 KiB ou 8 KiB. A existência, o caminho seguro, a permissão executável e o
+registro em `executablePaths` continuam obrigatórios; o `android.jar` mantém a
+validação estrutural mínima de 1 MiB.
+
 ## Patch 86.4: javaagent do Gradle 9 preservado com APP_HOME seguro
 
 A versão `1.10.41` reconhece o `-javaagent:$APP_HOME/...` adicionado pelo Gradle

@@ -267,8 +267,9 @@ def test_self_builder_restores_jspawnhelper_and_never_builds_on_vps() -> None:
     assert "restoreExecutablePaths(staging, stagedManifest)" in manager
     assert "restoreExecutablePaths(toolchain, new File(toolchain, \"manifest.json\"))" in manager
     assert "jdk/lib/jspawnhelper" in manager
-    assert "launcher Gradle APP_HOME seguro v6" in manager
+    assert "validação executável v7 ausente" in manager
     assert "android-sh-resolved-app-home-jvm-opts-v2" in manager
+    assert "required-executable-smoke-v2" in manager
     assert "executablePaths" in gradle
     assert "assembleDebug" not in web
 

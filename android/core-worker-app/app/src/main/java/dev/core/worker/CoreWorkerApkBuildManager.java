@@ -431,13 +431,18 @@ final class CoreWorkerApkBuildManager {
         if (!"core-worker-android-builder-v1".equals(manifest.optString("schema", ""))) {
             throw new IllegalStateException("schema inválido no toolchain extraído");
         }
-        if (manifest.optInt("version", 0) < 6) {
-            throw new IllegalStateException("toolchain antigo: launcher Gradle APP_HOME seguro v6 ausente");
+        if (manifest.optInt("version", 0) < 7) {
+            throw new IllegalStateException("toolchain antigo: validação executável v7 ausente");
         }
         JSONObject gradleLauncher = manifest.optJSONObject("gradleLauncher");
         if (gradleLauncher == null || !"android-sh-resolved-app-home-jvm-opts-v2".equals(
                 gradleLauncher.optString("strategy", ""))) {
             throw new IllegalStateException("launcher Gradle incompatível com /system/bin/sh");
+        }
+        JSONObject validation = manifest.optJSONObject("validation");
+        if (validation == null || !"required-executable-smoke-v2".equals(
+                validation.optString("strategy", ""))) {
+            throw new IllegalStateException("estratégia de validação executável ausente no toolchain");
         }
         JSONArray executablePaths = manifest.optJSONArray("executablePaths");
         if (executablePaths == null || executablePaths.length() == 0

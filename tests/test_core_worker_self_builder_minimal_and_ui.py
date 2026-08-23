@@ -17,6 +17,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PHONE_WORKER_PATH = ROOT / "deploy/termux/phone-worker/phone_worker.py"
+APK_IDENTITY_PATH = PHONE_WORKER_PATH.with_name("apk_identity.py")
 AUTOMATION_PATH = ROOT / "scripts/core-worker-automation.py"
 WORKERS_PATH = ROOT / "utility/commands/workers.py"
 ANDROID = ROOT / "android/core-worker-app"
@@ -144,7 +145,7 @@ def test_bootstrap_core_starts_before_optional_runtime_files_arrive(tmp_path: Pa
 
     monkeypatch.setattr(module.importlib, "import_module", import_without_preloaded_identity)
 
-    assert module.PHONE_WORKER_VERSION == "1.10.42"
+    assert module.PHONE_WORKER_VERSION == "1.10.43"
     assert module._APK_IDENTITY_MODULE is None
     assert bootstrap_core.stat().st_size <= 512 * 1024
     with pytest.raises(RuntimeError, match="segundo estágio"):
@@ -419,6 +420,56 @@ def test_apk_accepts_compact_launchers_after_verified_bootstrap_smoke(tmp_path: 
     assert (toolchain / "jdk/bin/java").stat().st_size == 1
 
 
+def test_toolchain_is_split_and_verified_without_one_giant_gradle_asset(tmp_path: Path) -> None:
+    archive_path = tmp_path / "android-builder-toolchain.zip"
+    project = tmp_path / "project"
+    _builder_bundle(archive_path, version=7)
+    with zipfile.ZipFile(archive_path, "a", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("padding.bin", b"z" * (5 * 1024 * 1024))
+    expected_sha = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    module = _load("apk_identity_chunk_assets_test", APK_IDENTITY_PATH)
+
+    published = module.publish_toolchain_chunk_assets(
+        archive_path,
+        project,
+        chunk_size=4 * 1024 * 1024,
+    )
+
+    asset_dir = project / "app/src/main/assets/core-linux/android-builder"
+    descriptor = json.loads((asset_dir / "android-builder-toolchain.parts.json").read_text(encoding="utf-8"))
+    parts = [asset_dir / item["name"] for item in descriptor["parts"]]
+    assert published["ok"] is True
+    assert published["transport"] == "chunked-assets-v1"
+    assert len(parts) >= 2
+    assert all(0 < part.stat().st_size <= 4 * 1024 * 1024 for part in parts)
+    assert not (asset_dir / "android-builder-toolchain.zip").exists()
+    assert hashlib.sha256(b"".join(part.read_bytes() for part in parts)).hexdigest() == expected_sha
+
+    with parts[0].open("r+b") as handle:
+        first = handle.read(1)
+        handle.seek(0)
+        handle.write(bytes([first[0] ^ 0x01]))
+    rejected = module.validate_toolchain_chunk_assets(project)
+    assert rejected["ok"] is False
+    assert "sha256 divergente" in rejected["error"]
+
+
+def test_gradle_failure_summary_prefers_root_memory_error(tmp_path: Path) -> None:
+    module = _load("phone_worker_gradle_root_cause_test", PHONE_WORKER_PATH)
+    log = tmp_path / "gradle.log"
+    log.write_text(
+        "Execution failed for task ':app:compressDebugAssets'.\n"
+        "> A failure occurred while executing CompressAssetsWorkAction\n"
+        "Caused by: java.lang.OutOfMemoryError: Java heap space\n",
+        encoding="utf-8",
+    )
+
+    result = module._summarize_gradle_log(log)
+
+    assert "OutOfMemoryError" in result["summary"]
+    assert "compressDebugAssets" in result["detail"]
+
+
 def test_automation_reconciles_failed_job_instead_of_leaving_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load("core_worker_automation_reconcile_test", AUTOMATION_PATH)
     pending = {
@@ -484,8 +535,8 @@ def test_ui_and_versions_expose_builder_state_without_vps_gradle() -> None:
     gradle = (ANDROID / "app/build.gradle").read_text(encoding="utf-8")
     workers = WORKERS_PATH.read_text(encoding="utf-8")
 
-    assert 'versionCode 125' in gradle
-    assert 'versionName "0.7.7"' in gradle
+    assert 'versionCode 126' in gradle
+    assert 'versionName "0.7.8"' in gradle
     assert 'builderHeroText = smallText("Autobuild: verificando toolchain local")' in activity
     assert '"✅ Autobuild pronto' in activity
     assert 'sectionTitle("Diagnóstico e manutenção")' in activity
@@ -494,5 +545,7 @@ def test_ui_and_versions_expose_builder_state_without_vps_gradle() -> None:
     assert '"manifestVersion": manifest_version >= 7' in builder
     assert 'gradle_launcher.get("strategy") == "android-sh-resolved-app-home-jvm-opts-v2"' in builder
     assert 'validation.get("strategy") == "required-executable-smoke-v2"' in builder
+    assert 'android-builder-toolchain.parts.json' in gradle
+    assert '"cwpart"' in gradle
     assert 'f"**Atualização:** {automation_label}"' in workers
     assert 'discord.ui.ActionRow(refresh, pairing, cleanup_jobs)' not in workers

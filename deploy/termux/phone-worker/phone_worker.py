@@ -100,7 +100,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.42"
+PHONE_WORKER_VERSION = "1.10.43"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -8565,11 +8565,19 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
     A VPS nunca executa essa preparação. O bundle é criado dentro do workspace
     temporário do phone-worker, entra no APK bootstrap e depois é retido pelo app.
     """
+    helpers = _load_apk_identity_module()
     asset = _apk_self_builder_bundle_asset(project_dir)
+    chunked = helpers.validate_toolchain_chunk_assets(project_dir)
     existing = _apk_self_builder_bundle_valid(asset)
     rebuild = _env_bool("PHONE_WORKER_APK_SELF_BUILDER_REBUILD", False)
+    chunk_size = max(4 * 1024 * 1024, min(32 * 1024 * 1024, _env_int("PHONE_WORKER_APK_SELF_BUILDER_ASSET_CHUNK_BYTES", 16 * 1024 * 1024)))
+    if chunked.get("ok") and not rebuild:
+        if asset.exists():
+            asset.unlink()
+        return {**chunked, "generated": False, "source": "project_chunk_assets"}
     if existing.get("ok") and not rebuild:
-        return {**existing, "generated": False, "source": "project_asset"}
+        published = helpers.publish_toolchain_chunk_assets(asset, project_dir, chunk_size=chunk_size)
+        return {**existing, **published, "source": "project_asset_migrated"}
     if not _is_termux_runtime():
         raise RuntimeError("toolchain self-builder ausente e geração bootstrap só é permitida no Termux")
 
@@ -8582,6 +8590,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
 
     stage_root = project_dir / "app/build/core-worker-self-builder-toolchain"
     bundle_root = stage_root / "bundle"
+    bundle_archive = stage_root / "android-builder-toolchain.zip"
     shutil.rmtree(stage_root, ignore_errors=True)
     bundle_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -8650,13 +8659,15 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
             },
         }
         (bundle_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        generated = _zip_directory_deterministic(bundle_root, asset)
-        validated = _apk_self_builder_bundle_valid(asset)
+        generated = _zip_directory_deterministic(bundle_root, bundle_archive)
+        validated = _apk_self_builder_bundle_valid(bundle_archive)
         if not validated.get("ok"):
             raise RuntimeError("bundle self-builder gerado mas inválido: " + str(validated.get("error") or "erro desconhecido"))
+        published = helpers.publish_toolchain_chunk_assets(bundle_archive, project_dir, chunk_size=chunk_size)
         return {
             **validated,
             **generated,
+            **published,
             "generated": True,
             "source": "termux_bootstrap",
             "jdk": str(jdk_home),
@@ -8858,6 +8869,11 @@ def _summarize_gradle_log(path: Path | None) -> dict[str, Any]:
     text = _tail_text_file(path, limit=70000)
     lowered = text.lower()
     patterns = [
+        r"java\.lang\.outofmemoryerror[^\n]*",
+        r"java heap space[^\n]*",
+        r"required array size too large[^\n]*",
+        r"no space left[^\n]*",
+        r"caused by: (?:java\.|org\.|com\.android\.)[^\n]+",
         r"execution failed for task '[^']+'",
         r"c/c\+\+: .+",
         r"cmake[^\n]+syntax error[^\n]+",
@@ -8865,8 +8881,6 @@ def _summarize_gradle_log(path: Path | None) -> dict[str, Any]:
         r"ninja:[^\n]+",
         r"aapt2[^\n]+",
         r"manifest merger failed[^\n]*",
-        r"outofmemoryerror[^\n]*",
-        r"no space left[^\n]*",
     ]
     hits: list[str] = []
     for pattern in patterns:

@@ -1,5 +1,14 @@
 # Phone Worker Termux
 
+## Patch 86.6: toolchain particionado para o Gradle no Android
+
+A versão `1.10.43` não entrega mais o toolchain do autobuilder como um único
+asset gigante. O ZIP validado é dividido em partes de 16 MiB, cada uma com
+tamanho e SHA-256 próprios, além do hash do conjunto completo. Isso evita que a
+task `compressDebugAssets` do Android Gradle Plugin tente carregar o bundle
+inteiro na heap. O APK reconstitui o ZIP em streaming e só o extrai depois de
+validar todas as partes e o SHA-256 total.
+
 ## Patch 86.5: validação executável sem heurística de tamanho
 
 A versão `1.10.42` gera o bundle v7 e considera Java, Javac, Jar, Gradle e

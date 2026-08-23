@@ -63,8 +63,8 @@ android {
         // apps target 29+, então esta variante operacional permanece em target 28.
         // compileSdk continua moderno e a distribuição não ocorre pelo Google Play.
         targetSdk coreWorkerSelfBuilderTargetSdk
-        versionCode 125
-        versionName "0.7.7"
+        versionCode 126
+        versionName "0.7.8"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -100,7 +100,7 @@ android {
     androidResources {
         // V15.3.1: Box64 é asset executável Linux/glibc grande. Mantê-lo sem
         // compressão evita alocação gigante do AssetManager durante extração.
-        noCompress += ["box64", "zip"]
+        noCompress += ["box64", "zip", "cwpart"]
     }
 
     sourceSets {
@@ -318,23 +318,102 @@ tasks.register("verifyCoreWorkerSelfBuilderTargetSdk") {
 // O primeiro build continua no Termux; depois, o APK extrai este ZIP no seu
 // armazenamento interno e executa o toolchain Bionic diretamente.
 def coreWorkerSelfBuilderAsset = file("${projectDir}/src/main/assets/core-linux/android-builder/android-builder-toolchain.zip")
+def coreWorkerSelfBuilderChunksManifest = file("${projectDir}/src/main/assets/core-linux/android-builder/android-builder-toolchain.parts.json")
 
 tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
     description = "Valida o toolchain privado de autobuild do APK sem executá-lo."
     doLast {
         def strict = ((project.findProperty("CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN") ?: System.getenv("CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN") ?: "false").toString().toLowerCase() in ["1", "true", "yes", "on", "sim"])
-        if (!coreWorkerSelfBuilderAsset.exists()) {
+        def archiveFile = coreWorkerSelfBuilderAsset
+        def temporaryArchive = false
+        if (coreWorkerSelfBuilderChunksManifest.exists() && coreWorkerSelfBuilderAsset.exists()) {
+            throw new GradleException("toolchain duplicado: remova o ZIP monolítico quando o envelope particionado existir")
+        }
+        if (!archiveFile.exists() && coreWorkerSelfBuilderChunksManifest.exists()) {
+            def descriptor = new groovy.json.JsonSlurper().parse(coreWorkerSelfBuilderChunksManifest)
+            if (descriptor?.schema != "core-worker-toolchain-chunks-v1" || ((descriptor?.version ?: 0) as int) != 1) {
+                throw new GradleException("envelope particionado do toolchain possui schema/versão inválido")
+            }
+            def expectedBytes = (descriptor?.archive?.bytes ?: 0) as long
+            def expectedSha = (descriptor?.archive?.sha256 ?: "").toString().toLowerCase()
+            def chunkSize = (descriptor?.chunkSize ?: 0) as long
+            def parts = descriptor?.parts instanceof Collection ? descriptor.parts : []
+            if (expectedBytes < 1024L * 1024L || expectedBytes > 1024L * 1024L * 1024L || !(expectedSha ==~ /[0-9a-f]{64}/)) {
+                throw new GradleException("tamanho/sha256 total inválido no envelope particionado")
+            }
+            if (chunkSize < 4L * 1024L * 1024L || chunkSize > 32L * 1024L * 1024L || parts.isEmpty() || parts.size() > 256) {
+                throw new GradleException("quantidade/tamanho de partes inválido no envelope do toolchain")
+            }
+            temporaryDir.mkdirs()
+            archiveFile = new File(temporaryDir, "android-builder-toolchain.reassembled.zip")
+            if (archiveFile.exists()) archiveFile.delete()
+            def fullDigest = java.security.MessageDigest.getInstance("SHA-256")
+            def declaredParts = [] as Set
+            long totalBytes = 0L
+            try {
+                archiveFile.withOutputStream { output ->
+                    byte[] buffer = new byte[1024 * 1024]
+                    parts.eachWithIndex { part, index ->
+                        def name = (part?.name ?: "").toString()
+                        def expectedName = String.format("android-builder-toolchain.part-%03d.cwpart", index)
+                        def partBytes = (part?.bytes ?: 0) as long
+                        def partSha = (part?.sha256 ?: "").toString().toLowerCase()
+                        if (name != expectedName || !declaredParts.add(name) || partBytes <= 0L || partBytes > chunkSize || !(partSha ==~ /[0-9a-f]{64}/)) {
+                            throw new GradleException("metadados inválidos da parte ${name ?: index}")
+                        }
+                        if (totalBytes + partBytes > expectedBytes) {
+                            throw new GradleException("partes excedem o tamanho total declarado")
+                        }
+                        def partFile = new File(coreWorkerSelfBuilderChunksManifest.parentFile, name)
+                        if (!partFile.isFile() || partFile.length() != partBytes) {
+                            throw new GradleException("parte ausente/truncada do toolchain: ${name}")
+                        }
+                        def digest = java.security.MessageDigest.getInstance("SHA-256")
+                        partFile.withInputStream { input ->
+                            int read
+                            while ((read = input.read(buffer)) >= 0) {
+                                if (read == 0) continue
+                                output.write(buffer, 0, read)
+                                digest.update(buffer, 0, read)
+                                fullDigest.update(buffer, 0, read)
+                                totalBytes += read
+                                if (totalBytes > expectedBytes) {
+                                    throw new GradleException("partes excedem o tamanho total declarado")
+                                }
+                            }
+                        }
+                        def actualPartSha = digest.digest().collect { String.format("%02x", it & 0xff) }.join()
+                        if (actualPartSha != partSha) {
+                            throw new GradleException("sha256 divergente da parte ${name}")
+                        }
+                    }
+                }
+                def matchingParts = coreWorkerSelfBuilderChunksManifest.parentFile.listFiles()
+                        ?.findAll { it.isFile() && it.name ==~ /android-builder-toolchain\.part-\d{3}\.cwpart/ }
+                def actualParts = matchingParts == null ? ([] as Set) : matchingParts.collect { it.name }.toSet()
+                def actualSha = fullDigest.digest().collect { String.format("%02x", it & 0xff) }.join()
+                if (actualParts != declaredParts || totalBytes != expectedBytes || actualSha != expectedSha) {
+                    throw new GradleException("conjunto/tamanho/sha256 total divergente no envelope particionado")
+                }
+                temporaryArchive = true
+            } catch (Throwable error) {
+                archiveFile.delete()
+                throw error
+            }
+        }
+        if (!archiveFile.exists()) {
             if (strict) {
-                throw new GradleException("toolchain de autobuild ausente: app/src/main/assets/core-linux/android-builder/android-builder-toolchain.zip")
+                throw new GradleException("toolchain de autobuild ausente: ZIP legado ou envelope particionado")
             }
             println("Core Worker self-builder: toolchain ausente; Termux permanece como builder bootstrap")
             return
         }
-        if (coreWorkerSelfBuilderAsset.length() < 1024L * 1024L) {
-            throw new GradleException("toolchain de autobuild pequeno/inválido: ${coreWorkerSelfBuilderAsset.length()} bytes")
+        if (archiveFile.length() < 1024L * 1024L) {
+            throw new GradleException("toolchain de autobuild pequeno/inválido: ${archiveFile.length()} bytes")
         }
-        def archive = new java.util.zip.ZipFile(coreWorkerSelfBuilderAsset)
+        def archive = null
         try {
+            archive = new java.util.zip.ZipFile(archiveFile)
             def manifestEntry = archive.getEntry("manifest.json")
             if (manifestEntry == null || manifestEntry.directory) {
                 throw new GradleException("toolchain de autobuild sem manifest.json")
@@ -437,9 +516,10 @@ tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
             if (unsafe != null) {
                 throw new GradleException("caminho inseguro no toolchain: ${unsafe.name}")
             }
-            println("Core Worker self-builder: toolchain validado · bytes=${coreWorkerSelfBuilderAsset.length()} · strict=${strict}")
+            println("Core Worker self-builder: toolchain validado · bytes=${archiveFile.length()} · transport=${temporaryArchive ? 'chunked-assets-v1' : 'legacy-zip'} · strict=${strict}")
         } finally {
-            archive.close()
+            if (archive != null) archive.close()
+            if (temporaryArchive) archiveFile.delete()
         }
     }
 }

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import re
+import shutil
 import struct
 import zipfile
 from pathlib import Path
@@ -22,6 +27,9 @@ TYPE_LAST_INT = 0x1F
 ANDROID_VERSION_CODE_ID = 0x0101021B
 ANDROID_VERSION_NAME_ID = 0x0101021C
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+TOOLCHAIN_ASSET_DIR = Path("app/src/main/assets/core-linux/android-builder")
+TOOLCHAIN_CHUNKS_MANIFEST = "android-builder-toolchain.parts.json"
+TOOLCHAIN_CHUNK_PATTERN = re.compile(r"android-builder-toolchain\.part-(\d{3})\.cwpart")
 
 
 class ApkIdentityError(ValueError):
@@ -289,3 +297,170 @@ def assert_expected_apk_identity(
     if int(expected_version_code or 0) > 0 and version_code != int(expected_version_code):
         raise ApkIdentityError(f"versionCode do APK divergente: binário={version_code} solicitado={int(expected_version_code)}")
     return identity
+
+
+def validate_toolchain_chunk_assets(project_dir: str | Path) -> dict[str, Any]:
+    """Valida o envelope particionado sem reconstruir o ZIP na memória."""
+    asset_dir = Path(project_dir) / TOOLCHAIN_ASSET_DIR
+    descriptor_path = asset_dir / TOOLCHAIN_CHUNKS_MANIFEST
+    result: dict[str, Any] = {"ok": False, "manifest_path": str(descriptor_path)}
+    try:
+        if not descriptor_path.is_file() or descriptor_path.stat().st_size > 1024 * 1024:
+            raise ValueError("manifesto de partes ausente ou grande demais")
+        descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+        if not isinstance(descriptor, dict) or descriptor.get("schema") != "core-worker-toolchain-chunks-v1":
+            raise ValueError("schema do envelope particionado inválido")
+        if int(descriptor.get("version") or 0) != 1:
+            raise ValueError("versão do envelope particionado inválida")
+        archive = descriptor.get("archive") if isinstance(descriptor.get("archive"), dict) else {}
+        expected_bytes = int(archive.get("bytes") or 0)
+        expected_sha = str(archive.get("sha256") or "").lower()
+        if expected_bytes < 1024 * 1024 or expected_bytes > 1024 * 1024 * 1024:
+            raise ValueError("tamanho total do toolchain inválido")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+            raise ValueError("sha256 total do toolchain inválido")
+        chunk_size = int(descriptor.get("chunkSize") or 0)
+        if chunk_size < 4 * 1024 * 1024 or chunk_size > 32 * 1024 * 1024:
+            raise ValueError("tamanho das partes fora do limite")
+        parts = descriptor.get("parts") if isinstance(descriptor.get("parts"), list) else []
+        if not 1 <= len(parts) <= 256:
+            raise ValueError("quantidade de partes inválida")
+        declared_total = sum(int(part.get("bytes") or 0) for part in parts if isinstance(part, dict))
+        if declared_total != expected_bytes:
+            raise ValueError("soma declarada das partes diverge do tamanho total")
+        full_digest = hashlib.sha256()
+        total = 0
+        declared: set[str] = set()
+        for index, part in enumerate(parts):
+            if not isinstance(part, dict):
+                raise ValueError("entrada de parte inválida")
+            name = str(part.get("name") or "")
+            match = TOOLCHAIN_CHUNK_PATTERN.fullmatch(name)
+            if match is None or int(match.group(1)) != index or name in declared:
+                raise ValueError(f"nome/ordem de parte inválido: {name or '?'}")
+            declared.add(name)
+            expected_part_bytes = int(part.get("bytes") or 0)
+            expected_part_sha = str(part.get("sha256") or "").lower()
+            if expected_part_bytes <= 0 or expected_part_bytes > chunk_size:
+                raise ValueError(f"tamanho inválido da parte {name}")
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_part_sha):
+                raise ValueError(f"sha256 inválido da parte {name}")
+            path = asset_dir / name
+            if not path.is_file() or path.stat().st_size != expected_part_bytes:
+                raise ValueError(f"parte ausente/truncada: {name}")
+            part_digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    part_digest.update(block)
+                    full_digest.update(block)
+                    total += len(block)
+                    if total > expected_bytes:
+                        raise ValueError("partes excedem o tamanho total declarado")
+            if part_digest.hexdigest() != expected_part_sha:
+                raise ValueError(f"sha256 divergente da parte {name}")
+        actual = {path.name for path in asset_dir.glob("android-builder-toolchain.part-*.cwpart") if path.is_file()}
+        if actual != declared:
+            raise ValueError("conjunto de partes contém arquivos extras ou ausentes")
+        if total != expected_bytes or full_digest.hexdigest() != expected_sha:
+            raise ValueError("tamanho/sha256 total do toolchain divergente")
+        return {
+            "ok": True,
+            "manifest_path": str(descriptor_path),
+            "bytes": total,
+            "sha256": expected_sha,
+            "parts": len(parts),
+            "chunk_size": chunk_size,
+            "toolchain": descriptor.get("toolchain") if isinstance(descriptor.get("toolchain"), dict) else {},
+        }
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+
+def publish_toolchain_chunk_assets(
+    archive_path: str | Path,
+    project_dir: str | Path,
+    *,
+    chunk_size: int = 16 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Divide o ZIP grande em assets pequenos, publicando o manifesto por último."""
+    archive_path = Path(archive_path)
+    project_dir = Path(project_dir)
+    chunk_size = max(4 * 1024 * 1024, min(32 * 1024 * 1024, int(chunk_size)))
+    if not archive_path.is_file() or not 1024 * 1024 <= archive_path.stat().st_size <= 1024 * 1024 * 1024:
+        raise ValueError("ZIP do toolchain ausente ou fora do limite")
+    asset_dir = project_dir / TOOLCHAIN_ASSET_DIR
+    staging = asset_dir.parent / f".{asset_dir.name}-chunks-{os.getpid()}"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=False)
+    parts: list[dict[str, Any]] = []
+    full_digest = hashlib.sha256()
+    total = 0
+    try:
+        with archive_path.open("rb") as source:
+            index = 0
+            while True:
+                first = source.read(min(1024 * 1024, chunk_size))
+                if not first:
+                    break
+                name = f"android-builder-toolchain.part-{index:03d}.cwpart"
+                target = staging / name
+                remaining = chunk_size
+                part_digest = hashlib.sha256()
+                part_bytes = 0
+                with target.open("wb") as output:
+                    block = first
+                    while block:
+                        output.write(block)
+                        part_digest.update(block)
+                        full_digest.update(block)
+                        part_bytes += len(block)
+                        total += len(block)
+                        remaining -= len(block)
+                        if remaining <= 0:
+                            break
+                        block = source.read(min(1024 * 1024, remaining))
+                parts.append({"name": name, "bytes": part_bytes, "sha256": part_digest.hexdigest()})
+                index += 1
+                if index > 256:
+                    raise ValueError("toolchain exige partes demais")
+        with zipfile.ZipFile(archive_path) as archive:
+            manifest_raw = archive.read("manifest.json")
+        manifest = json.loads(manifest_raw.decode("utf-8"))
+        descriptor = {
+            "schema": "core-worker-toolchain-chunks-v1",
+            "version": 1,
+            "chunkSize": chunk_size,
+            "archive": {
+                "filename": "android-builder-toolchain.zip",
+                "bytes": total,
+                "sha256": full_digest.hexdigest(),
+            },
+            "toolchain": {
+                "schema": manifest.get("schema"),
+                "version": manifest.get("version"),
+                "runtimeLibrariesStrategy": (manifest.get("runtimeLibraries") or {}).get("strategy"),
+                "gradleLauncherStrategy": (manifest.get("gradleLauncher") or {}).get("strategy"),
+                "validationStrategy": (manifest.get("validation") or {}).get("strategy"),
+            },
+            "parts": parts,
+        }
+        (staging / TOOLCHAIN_CHUNKS_MANIFEST).write_text(
+            json.dumps(descriptor, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        for old in asset_dir.glob("android-builder-toolchain.part-*.cwpart"):
+            old.unlink()
+        for part in parts:
+            (staging / part["name"]).replace(asset_dir / part["name"])
+        (staging / TOOLCHAIN_CHUNKS_MANIFEST).replace(asset_dir / TOOLCHAIN_CHUNKS_MANIFEST)
+        legacy = asset_dir / "android-builder-toolchain.zip"
+        if legacy.exists():
+            legacy.unlink()
+        validated = validate_toolchain_chunk_assets(project_dir)
+        if not validated.get("ok"):
+            raise ValueError("envelope particionado inválido: " + str(validated.get("error") or "erro desconhecido"))
+        return {**validated, "generated": True, "transport": "chunked-assets-v1"}
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)

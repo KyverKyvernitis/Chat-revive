@@ -600,7 +600,23 @@ def _hydrate_runtime_assets(project: Path, native_dir: Path, repro_assets: Path)
             if not target.is_file() or target.stat().st_size != source.stat().st_size:
                 shutil.copy2(source, target)
                 copied.append(str(target.relative_to(project)))
-    return {"copied": copied, "count": len(copied)}
+    toolchain_assets = project / "app/src/main/assets/core-linux/android-builder"
+    chunk_manifest = toolchain_assets / "android-builder-toolchain.parts.json"
+    chunked = chunk_manifest.is_file()
+    if chunked:
+        try:
+            descriptor = json.loads(chunk_manifest.read_text(encoding="utf-8"))
+            parts = descriptor.get("parts") if isinstance(descriptor.get("parts"), list) else []
+            declared = {str(item.get("name") or "") for item in parts if isinstance(item, dict)}
+        except Exception:
+            declared = set()
+        for stale in toolchain_assets.glob("android-builder-toolchain.part-*.cwpart"):
+            if stale.name not in declared:
+                stale.unlink()
+        legacy = toolchain_assets / "android-builder-toolchain.zip"
+        if legacy.exists():
+            legacy.unlink()
+    return {"copied": copied, "count": len(copied), "chunkedToolchain": chunked}
 
 
 def _tail(path: Path, limit: int = 16000) -> str:

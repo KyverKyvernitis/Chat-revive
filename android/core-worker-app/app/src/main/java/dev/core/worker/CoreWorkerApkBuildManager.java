@@ -14,10 +14,13 @@ import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
@@ -40,6 +43,8 @@ import java.util.zip.ZipInputStream;
 final class CoreWorkerApkBuildManager {
     private static final String PREFS = "core_worker_private";
     private static final String TOOLCHAIN_ASSET = "core-linux/android-builder/android-builder-toolchain.zip";
+    private static final String TOOLCHAIN_CHUNKS_MANIFEST = "core-linux/android-builder/android-builder-toolchain.parts.json";
+    private static final String TOOLCHAIN_CHUNKS_DIR = "core-linux/android-builder";
     private static final String BOX64_ASSET = "core-linux/bin/box64";
     private static final String EMBEDDED_MANIFEST_ASSET = "core-linux/embedded-binaries-manifest.json";
     private static final long PREFLIGHT_CACHE_MS = 45_000L;
@@ -309,23 +314,47 @@ final class CoreWorkerApkBuildManager {
 
         int provisionedVersion = prefs.getInt("apk_self_builder_asset_version_code", 0);
         boolean shouldRefresh = provisionedVersion != BuildConfig.VERSION_CODE || !manifest.isFile();
-        if (shouldRefresh && assetExists(context.getAssets(), TOOLCHAIN_ASSET)) {
-            File retained = new File(repro, TOOLCHAIN_ASSET);
-            copyAsset(context.getAssets(), TOOLCHAIN_ASSET, retained);
+        boolean chunkedAsset = assetExists(context.getAssets(), TOOLCHAIN_CHUNKS_MANIFEST);
+        JSONObject chunks = chunkedAsset ? readChunkDescriptor(context) : null;
+        JSONObject chunksArchive = chunks == null ? null : chunks.optJSONObject("archive");
+        String chunksSha = chunksArchive == null ? "" : chunksArchive.optString("sha256", "").toLowerCase(Locale.ROOT);
+        boolean retainedChunks = chunks != null && retainedChunkAssetsPresent(repro, chunks);
+        boolean sameChunkedToolchain = manifest.isFile() && retainedChunks && chunksSha.matches("[0-9a-f]{64}") && chunksSha.equals(
+                prefs.getString("apk_self_builder_archive_sha256", ""));
+        if (shouldRefresh && sameChunkedToolchain) {
+            copyAsset(context.getAssets(), TOOLCHAIN_CHUNKS_MANIFEST, new File(repro, TOOLCHAIN_CHUNKS_MANIFEST));
+            prefs.edit().putInt("apk_self_builder_asset_version_code", BuildConfig.VERSION_CODE).apply();
+            shouldRefresh = false;
+        }
+        if (shouldRefresh && (chunkedAsset || assetExists(context.getAssets(), TOOLCHAIN_ASSET))) {
+            File retained;
+            if (chunkedAsset) {
+                retained = materializeChunkedToolchain(context, builder, repro, chunks);
+            } else {
+                retained = new File(repro, TOOLCHAIN_ASSET);
+                copyAsset(context.getAssets(), TOOLCHAIN_ASSET, retained);
+            }
             File staging = new File(builder, "toolchain-next");
             deleteTree(staging);
             if (!staging.mkdirs()) throw new IllegalStateException("não consegui criar staging do toolchain");
-            extractZip(retained, staging);
-            File stagedManifest = new File(staging, "manifest.json");
-            if (!stagedManifest.isFile()) throw new IllegalStateException("manifest.json ausente no toolchain do APK");
-            restoreExecutablePaths(staging, stagedManifest);
-            deleteTree(toolchain);
-            if (!staging.renameTo(toolchain)) {
-                copyTree(staging, toolchain);
-                deleteTree(staging);
+            try {
+                extractZip(retained, staging);
+                File stagedManifest = new File(staging, "manifest.json");
+                if (!stagedManifest.isFile()) throw new IllegalStateException("manifest.json ausente no toolchain do APK");
+                restoreExecutablePaths(staging, stagedManifest);
+                deleteTree(toolchain);
+                if (!staging.renameTo(toolchain)) {
+                    copyTree(staging, toolchain);
+                    deleteTree(staging);
+                }
+                restoreExecutablePaths(toolchain, new File(toolchain, "manifest.json"));
+                SharedPreferences.Editor editor = prefs.edit()
+                        .putInt("apk_self_builder_asset_version_code", BuildConfig.VERSION_CODE);
+                if (chunkedAsset) editor.putString("apk_self_builder_archive_sha256", chunksSha);
+                editor.apply();
+            } finally {
+                if (chunkedAsset) retained.delete();
             }
-            restoreExecutablePaths(toolchain, new File(toolchain, "manifest.json"));
-            prefs.edit().putInt("apk_self_builder_asset_version_code", BuildConfig.VERSION_CODE).apply();
         }
 
         retainAssetIfPresent(context, BOX64_ASSET, new File(repro, BOX64_ASSET));
@@ -366,6 +395,129 @@ final class CoreWorkerApkBuildManager {
         }
         if (target.exists() && !target.delete()) throw new IllegalStateException("não consegui substituir asset retido");
         if (!temp.renameTo(target)) throw new IllegalStateException("não consegui promover asset retido");
+    }
+
+    private static JSONObject readChunkDescriptor(Context context) throws Exception {
+        try (InputStream input = new BufferedInputStream(context.getAssets().open(
+                TOOLCHAIN_CHUNKS_MANIFEST, AssetManager.ACCESS_STREAMING));
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            int total = 0;
+            while ((read = input.read(buffer)) >= 0) {
+                if (read == 0) continue;
+                total += read;
+                if (total > 1024 * 1024) throw new IllegalStateException("manifesto de partes grande demais");
+                output.write(buffer, 0, read);
+            }
+            JSONObject descriptor = new JSONObject(output.toString(StandardCharsets.UTF_8.name()));
+            if (!"core-worker-toolchain-chunks-v1".equals(descriptor.optString("schema", ""))
+                    || descriptor.optInt("version", 0) != 1) {
+                throw new IllegalStateException("schema/versão inválido no envelope particionado");
+            }
+            return descriptor;
+        }
+    }
+
+    private static boolean retainedChunkAssetsPresent(File repro, JSONObject descriptor) {
+        try {
+            JSONArray parts = descriptor.optJSONArray("parts");
+            if (parts == null || parts.length() == 0 || parts.length() > 256) return false;
+            if (!new File(repro, TOOLCHAIN_CHUNKS_MANIFEST).isFile()) return false;
+            for (int index = 0; index < parts.length(); index++) {
+                JSONObject part = parts.optJSONObject(index);
+                if (part == null) return false;
+                String expected = String.format(Locale.ROOT, "android-builder-toolchain.part-%03d.cwpart", index);
+                if (!expected.equals(part.optString("name", ""))) return false;
+                File file = new File(repro, TOOLCHAIN_CHUNKS_DIR + "/" + expected);
+                if (!file.isFile() || file.length() != part.optLong("bytes", -1L)) return false;
+            }
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static File materializeChunkedToolchain(
+            Context context, File builder, File repro, JSONObject descriptor) throws Exception {
+        JSONObject archive = descriptor.optJSONObject("archive");
+        JSONArray parts = descriptor.optJSONArray("parts");
+        long expectedBytes = archive == null ? 0L : archive.optLong("bytes", 0L);
+        String expectedSha = archive == null ? "" : archive.optString("sha256", "").toLowerCase(Locale.ROOT);
+        long chunkSize = descriptor.optLong("chunkSize", 0L);
+        if (expectedBytes < 1024L * 1024L || expectedBytes > 1024L * 1024L * 1024L
+                || !expectedSha.matches("[0-9a-f]{64}") || chunkSize < 4L * 1024L * 1024L
+                || chunkSize > 32L * 1024L * 1024L || parts == null
+                || parts.length() == 0 || parts.length() > 256) {
+            throw new IllegalStateException("metadados inválidos no envelope particionado do toolchain");
+        }
+        File temp = new File(builder, "toolchain-source.zip.tmp");
+        File outputArchive = new File(builder, "toolchain-source.zip");
+        temp.delete();
+        outputArchive.delete();
+        MessageDigest fullDigest = MessageDigest.getInstance("SHA-256");
+        long total = 0L;
+        Set<String> declared = new HashSet<>();
+        try (BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(temp, false))) {
+            byte[] buffer = new byte[1024 * 1024];
+            for (int index = 0; index < parts.length(); index++) {
+                JSONObject part = parts.optJSONObject(index);
+                String name = part == null ? "" : part.optString("name", "");
+                String expectedName = String.format(Locale.ROOT, "android-builder-toolchain.part-%03d.cwpart", index);
+                long expectedPartBytes = part == null ? 0L : part.optLong("bytes", 0L);
+                String expectedPartSha = part == null ? "" : part.optString("sha256", "").toLowerCase(Locale.ROOT);
+                if (!expectedName.equals(name) || !declared.add(name) || expectedPartBytes <= 0L
+                        || expectedPartBytes > chunkSize || !expectedPartSha.matches("[0-9a-f]{64}")) {
+                    throw new IllegalStateException("metadados inválidos da parte " + index);
+                }
+                if (total + expectedPartBytes > expectedBytes) {
+                    throw new IllegalStateException("partes excedem o tamanho total declarado");
+                }
+                String assetPath = TOOLCHAIN_CHUNKS_DIR + "/" + name;
+                File retained = new File(repro, assetPath);
+                copyAsset(context.getAssets(), assetPath, retained);
+                if (retained.length() != expectedPartBytes) {
+                    throw new IllegalStateException("parte ausente/truncada: " + name);
+                }
+                MessageDigest partDigest = MessageDigest.getInstance("SHA-256");
+                try (BufferedInputStream input = new BufferedInputStream(new FileInputStream(retained))) {
+                    int read;
+                    while ((read = input.read(buffer)) >= 0) {
+                        if (read == 0) continue;
+                        output.write(buffer, 0, read);
+                        partDigest.update(buffer, 0, read);
+                        fullDigest.update(buffer, 0, read);
+                        total += read;
+                        if (total > expectedBytes) {
+                            throw new IllegalStateException("partes excedem o tamanho total declarado");
+                        }
+                    }
+                }
+                if (!hex(partDigest.digest()).equals(expectedPartSha)) {
+                    throw new IllegalStateException("sha256 divergente da parte " + name);
+                }
+            }
+        } catch (Exception error) {
+            temp.delete();
+            throw error;
+        }
+        if (total != expectedBytes || !hex(fullDigest.digest()).equals(expectedSha)) {
+            temp.delete();
+            throw new IllegalStateException("tamanho/sha256 total divergente no envelope particionado");
+        }
+        copyAsset(context.getAssets(), TOOLCHAIN_CHUNKS_MANIFEST, new File(repro, TOOLCHAIN_CHUNKS_MANIFEST));
+        new File(repro, TOOLCHAIN_ASSET).delete();
+        if (!temp.renameTo(outputArchive)) {
+            temp.delete();
+            throw new IllegalStateException("não consegui promover o toolchain reconstituído");
+        }
+        return outputArchive;
+    }
+
+    private static String hex(byte[] raw) {
+        StringBuilder out = new StringBuilder(raw.length * 2);
+        for (byte value : raw) out.append(String.format(Locale.ROOT, "%02x", value & 0xff));
+        return out.toString();
     }
 
     private static void extractZip(File source, File target) throws Exception {

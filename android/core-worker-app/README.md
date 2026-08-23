@@ -1,8 +1,8 @@
-# Core Worker 0.7.7 — validação executável do toolchain
+# Core Worker 0.7.8 — toolchain particionado
 
-A versão `0.7.7` usa o Termux somente como **builder bootstrap**, mantendo Termux e APK como runtimes separados durante a transição. O primeiro APK dessa transição é compilado e assinado pelo `phone_worker.py` no celular, com a mesma keystore das versões já instaladas. A VPS não executa Gradle, Android SDK, NDK ou `aapt2`: ela prepara o ZIP de fontes, entrega segredos temporários por job autenticado e publica o APK pronto recebido do celular.
+A versão `0.7.8` usa o Termux somente como **builder bootstrap**, mantendo Termux e APK como runtimes separados durante a transição. O primeiro APK dessa transição é compilado e assinado pelo `phone_worker.py` no celular, com a mesma keystore das versões já instaladas. A VPS não executa Gradle, Android SDK, NDK ou `aapt2`: ela prepara o ZIP de fontes, entrega segredos temporários por job autenticado e publica o APK pronto recebido do celular.
 
-O bundle do toolchain agora usa manifesto v7. Além de `executablePaths`, ele normaliza o `DEFAULT_JVM_OPTS` do launcher Gradle para o `/system/bin/sh`, impedindo que o Java interprete `"-Xmx64m"` como classe principal. No Gradle 9, o `-javaagent:$APP_HOME/...` é preservado somente depois que o JAR é validado dentro da distribuição copiada; qualquer outra expansão de shell continua bloqueada. A validação deixa de inferir funcionamento pelo tamanho do launcher: Java, Javac, Jar, Gradle e `aapt2` precisam ter executado com código zero no smoke bootstrap. O APK rejeita bundles antigos sem essas garantias. A publicação lê `packageName`, `versionName` e `versionCode` diretamente do `AndroidManifest.xml` compilado; metadados divergentes ou downgrade preservam o APK e o `latest.json` anteriores.
+O bundle do toolchain usa manifesto v7 e transporte `chunked-assets-v1`. O ZIP já validado é dividido em partes de 16 MiB antes do Gradle, evitando que `compressDebugAssets` carregue um único asset de centenas de megabytes na heap. Cada parte tem tamanho e SHA-256 próprios; Gradle e APK também validam tamanho e SHA-256 do conjunto completo. O APK reconstitui o ZIP em streaming, extrai em staging e só promove o toolchain depois de repetir as validações de caminhos e executáveis. A validação funcional continua exigindo Java, Javac, Jar, Gradle e `aapt2` com código zero no smoke bootstrap.
 
 Durante o bootstrap, o Termux preserva o worker canônico e a porta `8766`; o APK usa o runtime filho `<worker-id>-apk` e a porta `8767`. Isso impede que heartbeats Android sobrescrevam a versão/capabilities do `phone_worker.py` e garante que `worker_update` e o primeiro `apk_build_debug` continuem chegando ao Termux. Pareamentos novos criados diretamente pelo APK permanecem dedicados e usam a porta `8766`.
 
@@ -41,7 +41,7 @@ Se o Android ou o fabricante bloquear qualquer etapa, o APK permanece sem a capa
 
 ```text
 Primeira transição
-VPS prepara fonte/segredos → Termux gera o bundle mínimo e compila/assina → VPS valida a identidade compilada e publica → APK 0.7.7 é instalado
+VPS prepara fonte/segredos → Termux gera e particiona o bundle mínimo, compila/assina → VPS valida a identidade compilada e publica → APK 0.7.8 é instalado
 
 Atualizações seguintes
 VPS prepara fonte/segredos → APK compila/assina com o bundle retido → VPS publica → APK atualiza
@@ -53,7 +53,7 @@ A base de código pode omitir o arquivo pesado:
 app/src/main/assets/core-linux/android-builder/android-builder-toolchain.zip
 ```
 
-No bootstrap, o Termux gera esse ZIP automaticamente com o layout mínimo:
+No bootstrap, o Termux gera esse ZIP automaticamente, valida seu layout mínimo e o converte para assets particionados:
 
 ```text
 manifest.json
@@ -65,6 +65,10 @@ android-sdk/platforms/android-34/android.jar
 bin/aapt2
 runtime-libs/*.so*
 ```
+
+O projeto entregue ao Gradle contém `android-builder-toolchain.parts.json` e
+`android-builder-toolchain.part-NNN.cwpart`; o ZIP monolítico não permanece na
+pasta de assets.
 
 O manifesto usa o schema `core-worker-android-builder-v1`, versão 7, arquitetura ARM64, runtime `termux-bionic-direct`, registra as estratégias `dt-needed-transitive-v1`, `android-sh-resolved-app-home-jvm-opts-v2` e `required-executable-smoke-v2`. O Gradle valida o ZIP antes de empacotá-lo. O APK executa uma validação mais forte após extrair o bundle e não depende do rootfs de Bedrock, PRoot ou de Python externo para buildar.
 
@@ -83,7 +87,7 @@ PHONE_WORKER_APK_SELF_BUILDER_REBUILD=false
 
 Após homologar um autobuild completo, `CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED=false` desativa apenas a manutenção automática do bootstrap. O registry continua preferindo o APK validado e ainda pode usar o Termux manualmente como recuperação enquanto ele estiver registrado.
 
-> As seções abaixo registram patches antigos e podem citar fluxos anteriores. O comportamento atual é o descrito nesta seção 0.7.7.
+> As seções abaixo registram patches antigos e podem citar fluxos anteriores. O comportamento atual é o descrito nesta seção 0.7.8.
 
 ## Patch 86: Core Linux Runtime v1 sem Termux
 

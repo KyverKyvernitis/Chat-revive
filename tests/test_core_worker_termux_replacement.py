@@ -69,12 +69,12 @@ def _worker_record(*, worker_id: str, token: str, apk: bool, ready: bool) -> dic
 
 def test_version_marks_bootstrap_to_self_builder_release() -> None:
     gradle = read(ANDROID / "app/build.gradle")
-    assert "versionCode 125" in gradle
-    assert 'versionName "0.7.7"' in gradle
+    assert "versionCode 126" in gradle
+    assert 'versionName "0.7.8"' in gradle
     assert "def coreWorkerSelfBuilderTargetSdk = 28" in gradle
     assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
     assert "verifyCoreWorkerSelfBuilderTargetSdk" in gradle
-    assert read(ANDROID / "README.md").startswith("# Core Worker 0.7.7 — validação executável do toolchain")
+    assert read(ANDROID / "README.md").startswith("# Core Worker 0.7.8 — toolchain particionado")
 
 
 def test_android_runtime_has_no_legacy_termux_protocol_or_package_dependency() -> None:
@@ -156,6 +156,8 @@ def test_self_builder_has_strict_toolchain_and_no_arbitrary_command() -> None:
     builder = read(PYTHON / "apk_self_builder.py")
     gradle = read(ANDROID / "app/build.gradle")
     assert "core-linux/android-builder/android-builder-toolchain.zip" in manager
+    assert "android-builder-toolchain.parts.json" in manager
+    assert "materializeChunkedToolchain" in manager
     assert "core-worker-android-builder-v1" in builder
     assert 'manifest_version >= 7' in builder
     assert 'android-sh-resolved-app-home-jvm-opts-v2' in builder
@@ -181,6 +183,8 @@ def test_self_builder_has_strict_toolchain_and_no_arbitrary_command() -> None:
     assert "CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN" in gradle
     assert "core-worker-android-builder-v1" in gradle
     assert "android-sh-resolved-app-home-jvm-opts-v2" in gradle
+    assert "core-worker-toolchain-chunks-v1" in gradle
+    assert '"cwpart"' in gradle
     assert "pip = false" in gradle
     assert "stdlib = false" in gradle
     assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
@@ -190,9 +194,10 @@ def test_termux_bootstrap_requires_self_builder_toolchain() -> None:
     phone_worker = read(ROOT / "deploy/termux/phone-worker/phone_worker.py")
     automation = read(ROOT / "scripts/core-worker-automation.py")
     workers = read(ROOT / "utility/commands/workers.py")
-    assert 'PHONE_WORKER_VERSION = "1.10.42"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.10.43"' in phone_worker
     assert 'env["CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN"] = "true"' in phone_worker
     assert '_prepare_apk_self_builder_toolchain(project_dir, env)' in phone_worker
+    assert 'publish_toolchain_chunk_assets' in phone_worker
     assert '"runtime": "termux-bionic-direct"' in phone_worker
     assert '"generatedOnTermux": True' in phone_worker
     assert 'toolchain self-builder ausente e geração bootstrap só é permitida no Termux' in phone_worker

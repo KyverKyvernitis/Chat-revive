@@ -233,7 +233,7 @@ def test_automation_routes_apk_trigger_to_termux_bootstrap() -> None:
     assert "def _bootstrap_worker_id_for_runtime" in automation
     assert "runtime APK não recebe worker_update" in automation
     assert "worker_update continua reservado ao Termux bootstrap" in automation
-    assert 'PHONE_WORKER_VERSION = "1.10.40"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.10.41"' in phone_worker
     assert '"runtime_kind": "termux"' in phone_worker
     assert '"platform": "android-termux"' in phone_worker
     assert "def _core_worker_automation_transition_is_urgent" in webserver
@@ -634,11 +634,11 @@ def test_agent_update_migrates_legacy_core_then_queues_verified_zip(tmp_path: Pa
         "worker_id": worker_id,
         "job_id": delivered["job_id"],
         "status": "succeeded",
-        "result": {"ok": True, "applied_file_version": "1.10.40"},
+        "result": {"ok": True, "applied_file_version": "1.10.41"},
     }, token=token)
     registry.heartbeat({
         "worker_id": worker_id,
-        "version": "1.10.40",
+        "version": "1.10.41",
         "source_hash": "",
         "source": "termux-phone-worker",
         "platform": "android-termux",
@@ -671,7 +671,7 @@ def test_apk_retry_after_agent_update_bypasses_old_failure_once(monkeypatch) -> 
     calls: list[bool] = []
     monkeypatch.setattr(module, "_load_pending", lambda: dict(pending))
     monkeypatch.setattr(module, "_load_registry_snapshot", lambda: {"workers": []})
-    monkeypatch.setattr(module, "_read_phone_worker_version", lambda: "1.10.40")
+    monkeypatch.setattr(module, "_read_phone_worker_version", lambda: "1.10.41")
     monkeypatch.setattr(module, "_hash_phone_worker_files", lambda *_args: "a" * 64)
     monkeypatch.setattr(module, "_read_android_version", lambda: ("0.7.4", 122))
     monkeypatch.setattr(module, "_workers_need_agent_version", lambda *_args, **_kwargs: False)
@@ -737,4 +737,4 @@ def test_turbo_profile_contract_cannot_lose_apk_builder_to_stale_env() -> None:
     assert "def _merge_profile_contract" in phone_worker
     assert "valores do env continuam aceitos como extensões" in phone_worker
     assert "roles, capabilities = _current_core_worker_roles_and_capabilities()" in phone_worker
-    assert 'PHONE_WORKER_VERSION = "1.10.40"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.10.41"' in phone_worker

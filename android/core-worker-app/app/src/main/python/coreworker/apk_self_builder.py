@@ -152,10 +152,10 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
     checks = {
         "manifest": manifest_path.is_file(),
         "schema": schema == TOOLCHAIN_SCHEMA,
-        "manifestVersion": manifest_version >= 5,
+        "manifestVersion": manifest_version >= 6,
         "executablePaths": declared_executables_valid,
         "runtimeLibraries": runtime_libraries.get("strategy") == "dt-needed-transitive-v1",
-        "gradleLauncher": gradle_launcher.get("strategy") == "android-sh-unquoted-default-jvm-opts-v1",
+        "gradleLauncher": gradle_launcher.get("strategy") == "android-sh-resolved-app-home-jvm-opts-v2",
         "bootstrapSmoke": bootstrap_smoke.get("ok") is True,
         "arch": arch in {"aarch64", "arm64", "arm64-v8a"},
         "java": java.is_file() and java.stat().st_size > 64 * 1024 and os.access(java, os.X_OK),

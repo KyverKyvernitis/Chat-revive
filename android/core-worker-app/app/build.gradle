@@ -63,8 +63,8 @@ android {
         // apps target 29+, então esta variante operacional permanece em target 28.
         // compileSdk continua moderno e a distribuição não ocorre pelo Google Play.
         targetSdk coreWorkerSelfBuilderTargetSdk
-        versionCode 123
-        versionName "0.7.5"
+        versionCode 124
+        versionName "0.7.6"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -344,13 +344,13 @@ tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
                 throw new GradleException("schema inválido no toolchain de autobuild")
             }
             def manifestVersion = (parsed?.version ?: 0) as int
-            if (manifestVersion < 5) {
-                throw new GradleException("toolchain antigo: regenere o bundle com launcher Gradle Android v5")
+            if (manifestVersion < 6) {
+                throw new GradleException("toolchain antigo: regenere o bundle com launcher Gradle APP_HOME seguro v6")
             }
             if (parsed?.runtimeLibraries?.strategy != "dt-needed-transitive-v1") {
                 throw new GradleException("estratégia de bibliotecas inválida no toolchain de autobuild")
             }
-            if (parsed?.gradleLauncher?.strategy != "android-sh-unquoted-default-jvm-opts-v1") {
+            if (parsed?.gradleLauncher?.strategy != "android-sh-resolved-app-home-jvm-opts-v2") {
                 throw new GradleException("launcher Gradle incompatível com /system/bin/sh no toolchain de autobuild")
             }
             if (parsed?.bootstrapSmoke?.ok != true) {

@@ -431,11 +431,11 @@ final class CoreWorkerApkBuildManager {
         if (!"core-worker-android-builder-v1".equals(manifest.optString("schema", ""))) {
             throw new IllegalStateException("schema inválido no toolchain extraído");
         }
-        if (manifest.optInt("version", 0) < 5) {
-            throw new IllegalStateException("toolchain antigo: launcher Gradle Android v5 ausente");
+        if (manifest.optInt("version", 0) < 6) {
+            throw new IllegalStateException("toolchain antigo: launcher Gradle APP_HOME seguro v6 ausente");
         }
         JSONObject gradleLauncher = manifest.optJSONObject("gradleLauncher");
-        if (gradleLauncher == null || !"android-sh-unquoted-default-jvm-opts-v1".equals(
+        if (gradleLauncher == null || !"android-sh-resolved-app-home-jvm-opts-v2".equals(
                 gradleLauncher.optString("strategy", ""))) {
             throw new IllegalStateException("launcher Gradle incompatível com /system/bin/sh");
         }

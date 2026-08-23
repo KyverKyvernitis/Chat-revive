@@ -1,5 +1,13 @@
 # Phone Worker Termux
 
+## Patch 86.4: javaagent do Gradle 9 preservado com APP_HOME seguro
+
+A versão `1.10.41` reconhece o `-javaagent:$APP_HOME/...` adicionado pelo Gradle
+9.6.1, valida que o JAR existe dentro da distribuição copiada e converte somente
+esse placeholder para `${APP_HOME}` na atribuição do launcher. Outras variáveis,
+substituições e metacaracteres continuam bloqueados. O bundle v6 evita tanto o
+erro de classe `"-Xmx64m"` quanto a remoção indevida do agente obrigatório.
+
 ## Patch 86.3: launcher Gradle portátil no autobuilder
 
 A versão `1.10.40` normaliza o `DEFAULT_JVM_OPTS` no launcher Gradle que entra

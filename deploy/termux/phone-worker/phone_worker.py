@@ -100,7 +100,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.40"
+PHONE_WORKER_VERSION = "1.10.41"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -7770,13 +7770,13 @@ def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
                 manifest_version = int(manifest.get("version") or 0)
             except Exception:
                 manifest_version = 0
-            if manifest_version < 5:
-                raise ValueError("bundle antigo: regenere com launcher Gradle compatível com Android v5")
+            if manifest_version < 6:
+                raise ValueError("bundle antigo: regenere com launcher Gradle APP_HOME seguro v6")
             runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
             if runtime_libraries.get("strategy") != "dt-needed-transitive-v1":
                 raise ValueError("estratégia de bibliotecas do autobuilder inválida")
             gradle_launcher = manifest.get("gradleLauncher") if isinstance(manifest.get("gradleLauncher"), dict) else {}
-            if gradle_launcher.get("strategy") != "android-sh-unquoted-default-jvm-opts-v1":
+            if gradle_launcher.get("strategy") != "android-sh-resolved-app-home-jvm-opts-v2":
                 raise ValueError("launcher Gradle do autobuilder não é compatível com /system/bin/sh")
             bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
             if bootstrap_smoke.get("ok") is not True:
@@ -7846,8 +7846,8 @@ def _copy_tree_dereferenced(source: Path, target: Path) -> None:
 _GRADLE_DEFAULT_JVM_OPTS_RE = re.compile(r"(?m)^(?P<prefix>[ \t]*DEFAULT_JVM_OPTS[ \t]*=)[^\r\n]*$")
 
 
-def _parse_gradle_default_jvm_opts(raw_assignment: str) -> list[str]:
-    """Decodifica as duas camadas de quoting usadas pelo launcher do Gradle."""
+def _parse_gradle_default_jvm_opts(raw_assignment: str, *, app_home: Path) -> tuple[list[str], bool]:
+    """Decodifica o quoting e permite somente ``$APP_HOME`` em javaagent local."""
     try:
         outer = shlex.split(str(raw_assignment or ""), posix=True)
         values = shlex.split(outer[0], posix=True) if len(outer) == 1 else outer
@@ -7855,11 +7855,28 @@ def _parse_gradle_default_jvm_opts(raw_assignment: str) -> list[str]:
         raise ValueError(f"DEFAULT_JVM_OPTS inválido no launcher Gradle: {exc}") from exc
     if len(values) > 32:
         raise ValueError("DEFAULT_JVM_OPTS contém opções demais")
-    forbidden = set(" \t\r\n'\"\\`$;&|<>(){}[]*?!#~")
+    forbidden = set(" \t\r\n'\"\\`;&|<>(){}[]*?!#~")
+    portable: list[str] = []
+    uses_app_home = False
+    app_home = app_home.resolve()
     for value in values:
-        if not value.startswith("-") or len(value) > 512 or any(char in forbidden for char in value):
+        if not value.startswith("-") or len(value) > 512:
+            raise ValueError(f"opção JVM inválida no launcher Gradle: {_short_text(value, limit=120)}")
+        agent_match = re.fullmatch(r"-javaagent:\$(?:APP_HOME|\{APP_HOME\})/(?P<relative>[A-Za-z0-9._/+@:=,-]+)", value)
+        if agent_match:
+            relative = str(agent_match.group("relative") or "").strip("/")
+            if not relative or ".." in relative.split("/"):
+                raise ValueError("javaagent do Gradle possui caminho relativo inseguro")
+            agent = (app_home / relative).resolve()
+            if not _is_inside_path(agent, app_home) or not agent.is_file() or agent.stat().st_size <= 0:
+                raise FileNotFoundError(f"javaagent declarado pelo Gradle não foi encontrado: {relative}")
+            portable.append(f"-javaagent:${{APP_HOME}}/{relative}")
+            uses_app_home = True
+            continue
+        if "$" in value or any(char in forbidden for char in value):
             raise ValueError(f"opção JVM não portátil no launcher Gradle: {_short_text(value, limit=120)}")
-    return values
+        portable.append(value)
+    return portable, uses_app_home
 
 
 def _patch_gradle_launcher_for_android(path: Path) -> dict[str, Any]:
@@ -7869,8 +7886,9 @@ def _patch_gradle_launcher_for_android(path: Path) -> dict[str, Any]:
     ``DEFAULT_JVM_OPTS='\"-Xmx64m\" \"-Xms64m\"'``. No shell do Android essas
     aspas podem sobreviver ao pipeline ``xargs``/``eval`` do launcher e o Java
     tenta carregar ``\"-Xmx64m\"`` como classe principal. Preservamos todas as
-    opções JVM simples declaradas pela distribuição, mas serializamos uma única
-    lista sem aspas internas ou metacaracteres de shell.
+    opções JVM simples declaradas pela distribuição. O único placeholder aceito
+    é ``$APP_HOME`` em um ``-javaagent`` existente dentro do próprio Gradle; ele
+    é expandido uma vez na atribuição e nunca chega ao ``eval`` como código.
     """
     if not path.is_file():
         raise FileNotFoundError(f"launcher Gradle ausente: {path}")
@@ -7882,15 +7900,21 @@ def _patch_gradle_launcher_for_android(path: Path) -> dict[str, Any]:
             f"encontrado {len(matches)}"
         )
     original_assignment = matches[0].group(0).split("=", 1)[1]
-    default_jvm_opts = _parse_gradle_default_jvm_opts(original_assignment)
-    replacement = matches[0].group("prefix") + "'" + " ".join(default_jvm_opts) + "'"
+    app_home = path.parent.parent.resolve()
+    default_jvm_opts, uses_app_home = _parse_gradle_default_jvm_opts(original_assignment, app_home=app_home)
+    if uses_app_home and not re.search(r"(?m)^[ \t]*(?:export[ \t]+)?APP_HOME[ \t]*=", original[:matches[0].start()]):
+        raise ValueError("launcher Gradle usa $APP_HOME antes de inicializá-lo")
+    joined = " ".join(default_jvm_opts)
+    quote = '"' if uses_app_home else "'"
+    replacement = matches[0].group("prefix") + quote + joined + quote
     patched = _GRADLE_DEFAULT_JVM_OPTS_RE.sub(replacement, original, count=1)
     path.write_text(patched, encoding="utf-8")
     if not os.access(path, os.X_OK):
         raise ValueError("launcher Gradle perdeu permissão de execução após normalização")
     return {
-        "strategy": "android-sh-unquoted-default-jvm-opts-v1",
+        "strategy": "android-sh-resolved-app-home-jvm-opts-v2",
         "defaultJvmOpts": default_jvm_opts,
+        "resolvedAppHome": uses_app_home,
         "changed": patched != original,
         "sha256": _sha256_path(path),
     }
@@ -8584,7 +8608,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
 
         manifest = {
             "schema": "core-worker-android-builder-v1",
-            "version": 5,
+            "version": 6,
             "arch": "aarch64",
             "runtime": "termux-bionic-direct",
             "generatedBy": f"phone-worker-{PHONE_WORKER_VERSION}",

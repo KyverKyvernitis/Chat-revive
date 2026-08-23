@@ -69,12 +69,12 @@ def _worker_record(*, worker_id: str, token: str, apk: bool, ready: bool) -> dic
 
 def test_version_marks_bootstrap_to_self_builder_release() -> None:
     gradle = read(ANDROID / "app/build.gradle")
-    assert "versionCode 123" in gradle
-    assert 'versionName "0.7.5"' in gradle
+    assert "versionCode 124" in gradle
+    assert 'versionName "0.7.6"' in gradle
     assert "def coreWorkerSelfBuilderTargetSdk = 28" in gradle
     assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
     assert "verifyCoreWorkerSelfBuilderTargetSdk" in gradle
-    assert read(ANDROID / "README.md").startswith("# Core Worker 0.7.5 — launcher Gradle compatível com Android")
+    assert read(ANDROID / "README.md").startswith("# Core Worker 0.7.6 — Gradle 9 com javaagent seguro")
 
 
 def test_android_runtime_has_no_legacy_termux_protocol_or_package_dependency() -> None:
@@ -157,9 +157,9 @@ def test_self_builder_has_strict_toolchain_and_no_arbitrary_command() -> None:
     gradle = read(ANDROID / "app/build.gradle")
     assert "core-linux/android-builder/android-builder-toolchain.zip" in manager
     assert "core-worker-android-builder-v1" in builder
-    assert 'manifest_version >= 5' in builder
-    assert 'android-sh-unquoted-default-jvm-opts-v1' in builder
-    assert 'manifest.optInt("version", 0) < 5' in manager
+    assert 'manifest_version >= 6' in builder
+    assert 'android-sh-resolved-app-home-jvm-opts-v2' in builder
+    assert 'manifest.optInt("version", 0) < 6' in manager
     assert 'launcher Gradle incompatível com /system/bin/sh' in manager
     assert '"runtime": "android-private-toolchain-direct"' in builder
     assert 'del native_dir  # assinatura mantida para compatibilidade Java; builder não depende do rootfs/PRoot.' in builder
@@ -178,7 +178,7 @@ def test_self_builder_has_strict_toolchain_and_no_arbitrary_command() -> None:
     assert "verifyCoreWorkerSelfBuilderToolchain" in gradle
     assert "CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN" in gradle
     assert "core-worker-android-builder-v1" in gradle
-    assert "android-sh-unquoted-default-jvm-opts-v1" in gradle
+    assert "android-sh-resolved-app-home-jvm-opts-v2" in gradle
     assert "pip = false" in gradle
     assert "stdlib = false" in gradle
     assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
@@ -188,7 +188,7 @@ def test_termux_bootstrap_requires_self_builder_toolchain() -> None:
     phone_worker = read(ROOT / "deploy/termux/phone-worker/phone_worker.py")
     automation = read(ROOT / "scripts/core-worker-automation.py")
     workers = read(ROOT / "utility/commands/workers.py")
-    assert 'PHONE_WORKER_VERSION = "1.10.40"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.10.41"' in phone_worker
     assert 'env["CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN"] = "true"' in phone_worker
     assert '_prepare_apk_self_builder_toolchain(project_dir, env)' in phone_worker
     assert '"runtime": "termux-bionic-direct"' in phone_worker

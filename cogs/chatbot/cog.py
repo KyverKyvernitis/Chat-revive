@@ -427,6 +427,36 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 return stripped[len(p):].lstrip()
         return content
 
+    def _is_potential_profile_reply(self, message: discord.Message) -> bool:
+        """Pré-filtra replies sem I/O antes de criar uma task pesada.
+
+        O índice persistido continua sendo a fonte de verdade. Aqui só evitamos
+        encaminhar replies que o próprio payload do Discord já prova serem para
+        outro usuário. Webhooks, mensagens do bot e referências não resolvidas
+        seguem para a validação segura em ``_resolve_trigger``.
+        """
+        ref = message.reference
+        if ref is None:
+            return False
+
+        resolved = getattr(ref, "resolved", None)
+        if not isinstance(resolved, discord.Message):
+            # Referência ausente/deletada ainda pode existir no message index.
+            return True
+        if resolved.webhook_id is not None:
+            # A propriedade do webhook é confirmada depois; nome não é confiado.
+            return True
+
+        me = self.bot.user
+        target_author = getattr(resolved, "author", None)
+        bot_id = getattr(me, "id", None)
+        author_id = getattr(target_author, "id", None)
+        return bool(
+            bot_id is not None
+            and author_id is not None
+            and int(author_id) == int(bot_id)
+        )
+
     async def _is_reply_to_managed_webhook(self, message: discord.Message) -> bool:
         """True se a mensagem é reply a uma mensagem enviada por nosso webhook."""
         resolved = await self._resolve_reply_target(message)
@@ -475,9 +505,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             if name and name not in names:
                 names.append(name)
         if profile.profile_kind == C.PROFILE_KIND_USER_STYLE:
-            # Webhook messages deliberately expose that this is a synthesized
-            # persona. Keep those exact rendered names in the legacy reply
-            # matcher while still accepting the shorter @name trigger.
+            # Mensagens anteriores a esta versão eram renderizadas como
+            # `Persona · Nome`. Mantemos esses nomes somente no matcher legado
+            # para que replies antigas sobrevivam à mudança visual.
             rendered = [f"Persona · {name}"[:C.MAX_NAME_LENGTH] for name in names]
             names.extend(name for name in rendered if name and name not in names)
         return names
@@ -698,6 +728,14 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     content=message.content.strip(),
                     via="reply",
                 )
+
+            log.debug(
+                "chatbot: reply ignorada | guild=%s channel=%s ref=%s "
+                "reason=profile_unresolved",
+                guild.id,
+                getattr(message.channel, "id", 0),
+                getattr(message.reference, "message_id", 0),
+            )
 
         # --- 4. Extrovert: resposta espontânea sem menção ----------------------
         extrovert = await self._resolve_extrovert_trigger(message, profiles)
@@ -1314,8 +1352,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 avatar = getattr(member, "display_avatar", None) or getattr(member, "avatar", None)
                 avatar_url = str(getattr(avatar, "url", "") or avatar_url)
         name = self._neutralize_mentions(name)[:C.MAX_NAME_LENGTH].strip() or "Chatbot"
-        if profile.profile_kind == C.PROFILE_KIND_USER_STYLE:
-            name = f"Persona · {name}"[:C.MAX_NAME_LENGTH]
         avatar_url = avatar_url[:C.MAX_AVATAR_URL_LENGTH].strip()
         return name, avatar_url
 
@@ -1612,7 +1648,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         # em <10ms pra não atrapalhar o TTS e outros listeners.
         if message.author.bot or message.webhook_id is not None:
             return
-        if message.type is not discord.MessageType.default:
+        if message.type not in (
+            discord.MessageType.default,
+            discord.MessageType.reply,
+        ):
             return
         if message.guild is None:
             return  # só em guilds, DMs não
@@ -1635,15 +1674,19 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         # histórico incompleto (nesse caso `_fetch_channel_history` consulta a API).
         self._append_cached_channel_message(message)
 
-        # Pré-filtro barato: menção/reply continuam como antes. Para o
+        # Pré-filtro barato: menções e replies potencialmente dirigidas a um
+        # profile continuam. Replies comprovadamente dirigidas a outra pessoa
+        # não criam task nem disputam a fila limitada do chatbot. Para o
         # extrovert, aceitamos mensagens comuns somente quando o cache indica
         # que pode haver config ativa neste guild/canal (ou cache miss após restart).
         content = message.content or ""
         stripped = content.lstrip()
         has_bot_mention = self._is_mention_at_start(message)
         has_name_mention = stripped.startswith("@")
-        has_reference = message.reference is not None
-        has_direct_trigger = has_bot_mention or has_name_mention or has_reference
+        has_reply_candidate = self._is_potential_profile_reply(message)
+        has_direct_trigger = (
+            has_bot_mention or has_name_mention or has_reply_candidate
+        )
         has_extrovert_candidate = (
             not C.SAFE_MODE
             and not has_direct_trigger

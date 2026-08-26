@@ -70,8 +70,7 @@ class GamesRankRendererTests(unittest.TestCase):
         payload = render_rank_image(rows)
         with Image.open(BytesIO(payload)) as image:
             self.assertEqual(image.format, "PNG")
-            self.assertEqual(image.size[0], 960)
-            self.assertLess(image.size[1], 1000)
+            self.assertEqual(image.size, (960, 1056))
             color_counts = image.convert("RGB").getcolors(maxcolors=2_000_000) or []
             colors = {color for _count, color in color_counts}
 
@@ -100,7 +99,12 @@ class GamesRankRendererTests(unittest.TestCase):
         draw = ImageDraw.Draw(Image.new("RGB", (960, 100)))
         segments = build_value_segments(row)
         maximum = 930 - 178 - RANK_RENDERER.NAME_VALUE_GAP - RANK_RENDERER.MIN_TAG_WIDTH
-        font = inline_values_font(draw, segments, base_font=load_font(23, bold=True), max_width=maximum)
+        font = inline_values_font(
+            draw,
+            segments,
+            base_font=load_font(RANK_RENDERER.VALUE_FONT_SIZE, bold=True),
+            max_width=maximum,
+        )
 
         self.assertLessEqual(inline_values_width(draw, segments, font=font), maximum)
 
@@ -108,7 +112,14 @@ class GamesRankRendererTests(unittest.TestCase):
         payload = render_rank_image([])
         with Image.open(BytesIO(payload)) as image:
             self.assertEqual(image.format, "PNG")
-            self.assertEqual(image.size, (960, 112))
+            self.assertEqual(image.size, (960, 120))
+
+    def test_row_content_uses_the_enlarged_reference_scale(self) -> None:
+        self.assertEqual(RANK_RENDERER.ROW_HEIGHT, 96)
+        self.assertEqual(RANK_RENDERER.AVATAR_SIZE, 72)
+        self.assertEqual(RANK_RENDERER.TOKEN_SIZE, 32)
+        self.assertEqual(RANK_RENDERER.NAME_FONT_SIZE, 28)
+        self.assertEqual(RANK_RENDERER.VALUE_FONT_SIZE, 26)
 
     def test_unsupported_name_glyphs_are_removed_instead_of_becoming_boxes(self) -> None:
         font = load_font(25, bold=True)

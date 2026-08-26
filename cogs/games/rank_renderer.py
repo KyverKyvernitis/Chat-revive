@@ -10,11 +10,15 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 CANVAS_WIDTH = 960
-ROW_HEIGHT = 88
+ROW_HEIGHT = 96
 ROW_GAP = 8
 MAX_ROWS = 10
-AVATAR_SIZE = 64
-TOKEN_SIZE = 29
+AVATAR_SIZE = 72
+TOKEN_SIZE = 32
+RANK_FONT_SIZE = 30
+NAME_FONT_SIZE = 28
+VALUE_FONT_SIZE = 26
+EMPTY_FONT_SIZE = 24
 NAME_VALUE_GAP = 16
 VALUE_ICON_GAP = 6
 VALUE_SEGMENT_GAP = 18
@@ -262,7 +266,7 @@ def _inline_values_font(
     *,
     base_font: ImageFont.ImageFont,
     max_width: int,
-    preferred_size: int = 23,
+    preferred_size: int = VALUE_FONT_SIZE,
     minimum_size: int = 10,
 ) -> ImageFont.ImageFont:
     if _inline_values_width(draw, segments, font=base_font) <= max_width:
@@ -313,10 +317,10 @@ def render_rank_image(
         )
         draw.line((0, y, CANVAS_WIDTH, y), fill=color)
 
-    rank_font = _load_font(27, bold=True)
-    name_font = _load_font(25, bold=True)
-    value_font = _load_font(23, bold=True)
-    empty_font = _load_font(22)
+    rank_font = _load_font(RANK_FONT_SIZE, bold=True)
+    name_font = _load_font(NAME_FONT_SIZE, bold=True)
+    value_font = _load_font(VALUE_FONT_SIZE, bold=True)
+    empty_font = _load_font(EMPTY_FONT_SIZE)
 
     normal_icon = _open_prepared_png(normal_icon_png, (TOKEN_SIZE, TOKEN_SIZE)) or _draw_token_fallback(TOKEN_SIZE, (41, 197, 181, 255))
     bonus_icon = _open_prepared_png(bonus_icon_png, (TOKEN_SIZE, TOKEN_SIZE)) or _draw_token_fallback(TOKEN_SIZE, (244, 143, 59, 255))
@@ -332,7 +336,8 @@ def render_rank_image(
         draw.rounded_rectangle((12, y1, CANVAS_WIDTH - 12, y2), radius=20, fill=(27, 35, 44, 255))
         message = "Ainda não há jogadores com movimentação de fichas"
         text_width = int(draw.textlength(message, font=empty_font))
-        draw.text(((CANVAS_WIDTH - text_width) / 2, y1 + 28), message, font=empty_font, fill=(177, 188, 199, 255))
+        text_y = _centered_text_y(draw, message, empty_font, row_top=y1)
+        draw.text(((CANVAS_WIDTH - text_width) / 2, text_y), message, font=empty_font, fill=(177, 188, 199, 255))
     else:
         position_colors = {
             1: (255, 213, 74, 255),
@@ -351,7 +356,9 @@ def render_rank_image(
                 draw.rounded_rectangle((12, y1, 19, y2), radius=4, fill=accent)
 
             rank_color = position_colors.get(row.position, (183, 194, 205, 255))
-            draw.text((30, y1 + 26), f"#{row.position}", font=rank_font, fill=rank_color)
+            rank_text = f"#{row.position}"
+            rank_y = _centered_text_y(draw, rank_text, rank_font, row_top=y1)
+            draw.text((30, rank_y), rank_text, font=rank_font, fill=rank_color)
 
             avatar_bytes = row.avatar_png or prepare_avatar_thumbnail(None, row.display_name)
             avatar = _open_prepared_png(avatar_bytes, (AVATAR_SIZE, AVATAR_SIZE))
@@ -376,7 +383,8 @@ def render_rank_image(
             safe_name = _sanitize_for_font(row.display_name, name_font)
             max_name_width = max(MIN_TAG_WIDTH, 930 - 178 - NAME_VALUE_GAP - values_width)
             name = _fit_text(draw, safe_name, name_font, max_name_width)
-            draw.text((178, y1 + 29), name, font=name_font, fill=(240, 244, 248, 255))
+            name_y = _centered_text_y(draw, name, name_font, row_top=y1)
+            draw.text((178, name_y), name, font=name_font, fill=(240, 244, 248, 255))
 
             cursor_x = 178 + math.ceil(draw.textlength(name, font=name_font)) + NAME_VALUE_GAP
             icon_y = y1 + (ROW_HEIGHT - TOKEN_SIZE) // 2

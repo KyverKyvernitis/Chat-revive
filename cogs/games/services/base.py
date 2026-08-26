@@ -28,7 +28,12 @@ from ..constants import (
 )
 from db import SettingsDB
 from ..rank_renderer import format_number, format_weekly_delta
-from .rank_cache import ChipRankCache, ChipRankResponse, RANK_FILENAME
+from .rank_cache import (
+    ChipRankCache,
+    ChipRankResponse,
+    RANK_FILENAME,
+    format_weekly_chip_summary,
+)
 from .session_registry import GameSessionRegistry, MAX_ACTIVE_GAME_USERS_PER_GUILD
 
 
@@ -2705,8 +2710,8 @@ class GincanaBase:
             if bonus > 0:
                 parts.append(f"**{format_number(bonus)}** {self._CHIP_BONUS_EMOJI}")
             if weekly != 0:
-                weekly_prefix = "🟢" if weekly > 0 else "🔴"
-                parts.append(f"{weekly_prefix} **{format_weekly_delta(weekly)}**")
+                weekly_icon = self._CHIP_EMOJI if weekly > 0 else self._CHIP_LOSS_EMOJI
+                parts.append(f"**{format_weekly_delta(weekly)}** {weekly_icon}")
             lines.append(" • ".join(parts))
         if len(lines) == 2:
             lines.append("Ainda não há jogadores com movimentação de fichas")
@@ -2720,9 +2725,9 @@ class GincanaBase:
                 else "Você ainda não entrou no rank"
             )
             requester_line = f"-# {requester_prefix} • **{format_number(requester_chips)} fichas**"
-            if requester_weekly != 0:
-                requester_weekly_icon = "🟢" if requester_weekly > 0 else "🔴"
-                requester_line += f" • {requester_weekly_icon} **{format_weekly_delta(requester_weekly)}**"
+            requester_weekly_summary = format_weekly_chip_summary(requester_weekly)
+            if requester_weekly_summary:
+                requester_line += f" • {requester_weekly_summary}"
             lines.extend(["", requester_line])
 
         view = discord.ui.LayoutView(timeout=None)

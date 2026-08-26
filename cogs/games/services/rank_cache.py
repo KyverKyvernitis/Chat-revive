@@ -30,12 +30,28 @@ MAX_AVATAR_THUMBNAILS = 160
 TOP_IMAGE_ROWS = 10
 PRELOAD_CANDIDATES = 12
 DEBOUNCE_SECONDS = 0.18
+NORMAL_CHIP_EMOJI = "<:emoji_63:1485041721573249135>"
+LOSS_CHIP_EMOJI = "<:emoji_65:1485043671077228786>"
 
 TOKEN_URLS = {
     "normal": "https://cdn.discordapp.com/emojis/1485041721573249135.png?size=64&quality=lossless",
     "bonus": "https://cdn.discordapp.com/emojis/1487076933819830443.png?size=64&quality=lossless",
     "debt": "https://cdn.discordapp.com/emojis/1485043671077228786.png?size=64&quality=lossless",
 }
+
+
+def format_weekly_chip_summary(value: int) -> str:
+    """Descreve a variação semanal com a ficha correspondente."""
+    amount = int(value)
+    if amount == 0:
+        return ""
+    if amount > 0:
+        emoji = NORMAL_CHIP_EMOJI
+        movement = "ganhas"
+    else:
+        emoji = LOSS_CHIP_EMOJI
+        movement = "perdidas"
+    return f"**{format_weekly_delta(amount)}** {emoji} {movement} nessa semana"
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,9 +453,9 @@ class ChipRankCache:
                 requester_line = f"-# Você ainda não entrou no rank • **{format_number(chips)} fichas**"
             else:
                 requester_line = f"-# Você: **#{position}** • **{format_number(chips)} fichas**"
-            if weekly != 0:
-                weekly_marker = "🟢" if weekly > 0 else "🔴"
-                requester_line += f" • {weekly_marker} **{format_weekly_delta(weekly)}**"
+            weekly_summary = format_weekly_chip_summary(weekly)
+            if weekly_summary:
+                requester_line += f" • {weekly_summary}"
 
         return ChipRankResponse(
             image_bytes=entry.image_bytes,

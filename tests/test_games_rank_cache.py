@@ -51,6 +51,7 @@ if CREATED_DISCORD_STUB:
     sys.modules.pop("discord", None)
 
 ChipRankCache = cache_module.ChipRankCache
+format_weekly_chip_summary = cache_module.format_weekly_chip_summary
 
 
 class _FakeAvatar:
@@ -127,6 +128,17 @@ class _FakeDB:
 
 
 class GamesRankCacheTests(unittest.TestCase):
+    def test_weekly_summary_uses_chip_emojis_and_hides_zero(self) -> None:
+        self.assertEqual(
+            format_weekly_chip_summary(37),
+            "**+37** <:emoji_63:1485041721573249135> ganhas nessa semana",
+        )
+        self.assertEqual(
+            format_weekly_chip_summary(-4),
+            "**-4** <:emoji_65:1485043671077228786> perdidas nessa semana",
+        )
+        self.assertEqual(format_weekly_chip_summary(0), "")
+
     def test_profile_identity_ignores_guild_nickname_and_avatar(self) -> None:
         guild = _FakeGuild()
         member = _FakeMember(guild, 7, "core.cute")
@@ -172,10 +184,19 @@ class GamesRankCacheTests(unittest.TestCase):
                 self.assertEqual(response.top_rows[0].avatar_key, "https://cdn.invalid/global-1.png")
                 self.assertNotIn("guild-1", response.top_rows[0].avatar_key)
                 self.assertIn("**#2**", response.requester_line)
-                self.assertIn("🔴 **-4**", response.requester_line)
-                self.assertNotIn("nesta semana", response.requester_line)
+                self.assertIn(
+                    "**-4** <:emoji_65:1485043671077228786> perdidas nessa semana",
+                    response.requester_line,
+                )
+                self.assertNotIn("🔴", response.requester_line)
                 with Image.open(BytesIO(response.image_bytes)) as image:
                     self.assertEqual(image.format, "PNG")
+                gainer_response = await cache.get_rank(guild, guild.members[1])
+                self.assertIn(
+                    "**+37** <:emoji_63:1485041721573249135> ganhas nessa semana",
+                    gainer_response.requester_line,
+                )
+                self.assertNotIn("🟢", gainer_response.requester_line)
                 cached_response = await cache.get_rank(guild, guild.members[3])
                 self.assertEqual(cached_response.image_bytes, response.image_bytes)
                 self.assertEqual(cached_response.requester_line, "-# Você: **#2** • **150 fichas**")

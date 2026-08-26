@@ -32,6 +32,8 @@ class GamesRankRouteTests(unittest.TestCase):
         self.assertNotIn("display_avatar", cache_source)
         self.assertNotIn("member_changed", command_source)
         self.assertIn('f"@{member.name}"', base_source)
+        self.assertIn("format_weekly_chip_summary(requester_weekly)", base_source)
+        self.assertNotIn('weekly_marker = "🟢"', cache_source)
         self.assertNotIn("RANK DE FICHAS", renderer_source)
         self.assertNotIn("NORMAIS", renderer_source)
         self.assertNotIn("BÔNUS", renderer_source)

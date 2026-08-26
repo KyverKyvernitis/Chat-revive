@@ -22,6 +22,8 @@ format_number = RANK_RENDERER.format_number
 format_weekly_delta = RANK_RENDERER.format_weekly_delta
 prepare_avatar_thumbnail = RANK_RENDERER.prepare_avatar_thumbnail
 render_rank_image = RANK_RENDERER.render_rank_image
+sanitize_for_font = RANK_RENDERER._sanitize_for_font
+load_font = RANK_RENDERER._load_font
 
 
 class GamesRankRendererTests(unittest.TestCase):
@@ -61,11 +63,11 @@ class GamesRankRendererTests(unittest.TestCase):
                 )
             )
 
-        payload = render_rank_image(rows, guild_name="Games", week_label="Semana 24–30 ago")
+        payload = render_rank_image(rows)
         with Image.open(BytesIO(payload)) as image:
             self.assertEqual(image.format, "PNG")
-            self.assertEqual(image.size[0], 1200)
-            self.assertLess(image.size[1], 1200)
+            self.assertEqual(image.size[0], 960)
+            self.assertLess(image.size[1], 1000)
             color_counts = image.convert("RGB").getcolors(maxcolors=2_000_000) or []
             colors = {color for _count, color in color_counts}
 
@@ -74,10 +76,14 @@ class GamesRankRendererTests(unittest.TestCase):
         self.assertIn((151, 162, 174), colors)
 
     def test_render_empty_rank_remains_valid(self) -> None:
-        payload = render_rank_image([], guild_name="Games", week_label="Semana atual")
+        payload = render_rank_image([])
         with Image.open(BytesIO(payload)) as image:
             self.assertEqual(image.format, "PNG")
-            self.assertEqual(image.size, (1200, 316))
+            self.assertEqual(image.size, (960, 112))
+
+    def test_unsupported_name_glyphs_are_removed_instead_of_becoming_boxes(self) -> None:
+        font = load_font(25, bold=True)
+        self.assertEqual(sanitize_for_font("Core\ufe0f\u200d", font), "Core")
 
 
 if __name__ == "__main__":

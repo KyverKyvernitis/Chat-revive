@@ -157,11 +157,12 @@ class GamesRankCacheTests(unittest.TestCase):
                 self.assertEqual([row.position for row in response.top_rows], [1, 2, 2])
                 self.assertIn("**#2**", response.requester_line)
                 self.assertIn("🔴 **-4**", response.requester_line)
-                self.assertNotIn("99", response.accessible_description)
+                self.assertNotIn("nesta semana", response.requester_line)
                 with Image.open(BytesIO(response.image_bytes)) as image:
                     self.assertEqual(image.format, "PNG")
                 cached_response = await cache.get_rank(guild, guild.members[3])
                 self.assertEqual(cached_response.image_bytes, response.image_bytes)
+                self.assertEqual(cached_response.requester_line, "-# Você: **#2** • **150 fichas**")
                 self.assertEqual(render_calls, 1)
 
                 # Uma mudança econômica invalida o snapshot e troca a ordem sem

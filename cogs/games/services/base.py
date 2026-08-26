@@ -27,6 +27,7 @@ from ..constants import (
     TRUCO_GOLDEN_BONUS_EXTRA,
 )
 from db import SettingsDB
+from ..rank_renderer import format_number, format_weekly_delta
 from .rank_cache import ChipRankCache, ChipRankResponse, RANK_FILENAME
 from .session_registry import GameSessionRegistry, MAX_ACTIVE_GAME_USERS_PER_GUILD
 
@@ -2618,18 +2619,32 @@ class GincanaBase:
 
         return embed
 
-    def _make_chip_rank_view(self, response: ChipRankResponse) -> discord.ui.LayoutView:
+    @staticmethod
+    def _safe_chip_rank_markdown(value: object, *, fallback: str) -> str:
+        normalized = " ".join(str(value or fallback).split()) or fallback
+        escaped = discord.utils.escape_markdown(normalized)
+        return discord.utils.escape_mentions(escaped)
+
+    def _make_chip_rank_view(self, response: ChipRankResponse, guild: discord.Guild) -> discord.ui.LayoutView:
+        guild_name = self._safe_chip_rank_markdown(getattr(guild, "name", None), fallback="Servidor")
+        components = [
+            discord.ui.TextDisplay(f"# {guild_name}"),
+            discord.ui.MediaGallery(
+                discord.MediaGalleryItem(f"attachment://{RANK_FILENAME}")
+            ),
+        ]
+        if response.requester_line:
+            components.extend(
+                [
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay(response.requester_line),
+                ]
+            )
+
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(
             discord.ui.Container(
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        f"attachment://{RANK_FILENAME}",
-                        description=response.accessible_description,
-                    )
-                ),
-                discord.ui.Separator(),
-                discord.ui.TextDisplay(response.requester_line),
+                *components,
                 accent_color=discord.Color.teal(),
             )
         )
@@ -2642,7 +2657,7 @@ class GincanaBase:
             image = discord.File(io.BytesIO(response.image_bytes), filename=RANK_FILENAME)
             return await sender(
                 file=image,
-                view=self._make_chip_rank_view(response),
+                view=self._make_chip_rank_view(response, guild),
                 **send_kwargs,
             )
         except Exception as exc:
@@ -2666,7 +2681,8 @@ class GincanaBase:
             visible.append((member, row))
         visible.sort(key=lambda item: (-int(item[1].get("chips", 0) or 0), item[0].display_name.casefold(), item[0].id))
 
-        lines = ["# 🏆 Rank de fichas", "_Top 10 • semana atual_", ""]
+        guild_name = self._safe_chip_rank_markdown(getattr(guild, "name", None), fallback="Servidor")
+        lines = [f"# {guild_name}", ""]
         previous_chips = None
         shared_position = 0
         requester_position = None
@@ -2681,33 +2697,30 @@ class GincanaBase:
                 continue
             bonus = max(0, int(row.get("bonus_chips", 0) or 0))
             weekly = int(row.get("weekly_delta", 0) or 0)
-            weekly_text = f"+{weekly}" if weekly > 0 else str(weekly)
-            weekly_icon = "🟢" if weekly > 0 else ("🔴" if weekly < 0 else "⚪")
+            weekly_text = format_weekly_delta(weekly)
+            weekly_prefix = "🟢 " if weekly > 0 else ("🔴 " if weekly < 0 else "")
             chip_icon = self._CHIP_LOSS_EMOJI if chips < 0 else self._CHIP_EMOJI
+            member_name = self._safe_chip_rank_markdown(member.display_name, fallback="Jogador")
             lines.append(
-                f"**#{shared_position}** {member.display_name} • **{chips}** {chip_icon} • "
-                f"**{bonus}** {self._CHIP_BONUS_EMOJI} • {weekly_icon} **{weekly_text}**"
+                f"**#{shared_position}** {member_name} • **{format_number(chips)}** {chip_icon} • "
+                f"**{format_number(bonus)}** {self._CHIP_BONUS_EMOJI} • {weekly_prefix}**{weekly_text}**"
             )
-        if len(lines) == 3:
+        if len(lines) == 2:
             lines.append("Ainda não há jogadores com movimentação de fichas")
         if requester is not None:
             requester_chips = int(self.db.get_user_chips(guild.id, requester.id, default=CHIPS_INITIAL) or 0)
             weekly_getter = getattr(self.db, "get_user_chip_week_delta", None)
             requester_weekly = int(weekly_getter(guild.id, requester.id) if callable(weekly_getter) else 0)
-            requester_weekly_text = f"+{requester_weekly}" if requester_weekly > 0 else str(requester_weekly)
-            requester_weekly_icon = "🟢" if requester_weekly > 0 else ("🔴" if requester_weekly < 0 else "⚪")
             requester_prefix = (
-                f"Você está em **#{requester_position}**"
+                f"Você: **#{requester_position}**"
                 if requester_position is not None
                 else "Você ainda não entrou no rank"
             )
-            lines.extend(
-                [
-                    "",
-                    f"{requester_prefix} • **{requester_chips} fichas** • "
-                    f"{requester_weekly_icon} **{requester_weekly_text}** nesta semana",
-                ]
-            )
+            requester_line = f"-# {requester_prefix} • **{format_number(requester_chips)} fichas**"
+            if requester_weekly != 0:
+                requester_weekly_icon = "🟢" if requester_weekly > 0 else "🔴"
+                requester_line += f" • {requester_weekly_icon} **{format_weekly_delta(requester_weekly)}**"
+            lines.extend(["", requester_line])
 
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.teal()))

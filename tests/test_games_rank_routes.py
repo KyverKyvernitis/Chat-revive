@@ -18,11 +18,18 @@ class GamesRankRouteTests(unittest.TestCase):
 
     def test_rank_view_has_image_without_redundant_update_text(self) -> None:
         base_source = (ROOT / "cogs" / "games" / "services" / "base.py").read_text(encoding="utf-8")
+        renderer_source = (ROOT / "cogs" / "games" / "rank_renderer.py").read_text(encoding="utf-8")
 
         self.assertIn("discord.ui.MediaGallery", base_source)
         self.assertIn("attachment://{RANK_FILENAME}", base_source)
+        self.assertIn('discord.ui.TextDisplay(f"# {guild_name}")', base_source)
+        self.assertNotIn("description=response.accessible_description", base_source)
         self.assertNotIn("Atualização automática", base_source)
         self.assertNotIn("semana de segunda a domingo", base_source)
+        self.assertNotIn("RANK DE FICHAS", renderer_source)
+        self.assertNotIn("NORMAIS", renderer_source)
+        self.assertNotIn("BÔNUS", renderer_source)
+        self.assertNotIn("SEMANA", renderer_source)
 
 
 if __name__ == "__main__":

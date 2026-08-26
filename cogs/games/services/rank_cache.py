@@ -55,7 +55,6 @@ class ChipRankResponse:
     image_bytes: bytes
     top_rows: tuple[ChipRankRow, ...]
     requester_line: str
-    accessible_description: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +221,7 @@ class ChipRankCache:
                 ranked_rows = self._build_ranked_rows(guild)
                 top_rows = tuple(ranked_rows[:TOP_IMAGE_ROWS])
                 positions = {row.user_id: row.position for row in ranked_rows}
-                data_signature = self._data_signature(guild, week_key, top_rows)
+                data_signature = self._data_signature(week_key, top_rows)
 
                 preload_rows = ranked_rows[:PRELOAD_CANDIDATES]
                 avatar_results = await asyncio.gather(
@@ -287,8 +286,6 @@ class ChipRankCache:
                         image_bytes = await asyncio.to_thread(
                             render_rank_image,
                             render_rows,
-                            guild_name=str(getattr(guild, "name", "Servidor") or "Servidor"),
-                            week_label=self._current_week_label(),
                             normal_icon_png=self._token_icons.get("normal"),
                             bonus_icon_png=self._token_icons.get("bonus"),
                             debt_icon_png=self._token_icons.get("debt"),
@@ -412,9 +409,8 @@ class ChipRankCache:
             self._dirty.discard(evicted_gid)
             self._asset_warm_needed.discard(evicted_gid)
 
-    def _data_signature(self, guild: discord.Guild, week_key: str, rows: tuple[ChipRankRow, ...]) -> tuple[object, ...]:
+    def _data_signature(self, week_key: str, rows: tuple[ChipRankRow, ...]) -> tuple[object, ...]:
         return (
-            str(getattr(guild, "name", "Servidor") or "Servidor"),
             week_key,
             *(
                 (
@@ -432,41 +428,25 @@ class ChipRankCache:
 
     def _make_response(self, entry: _GuildRankEntry, requester: discord.Member | None) -> ChipRankResponse:
         if requester is None:
-            requester_line = "O rank é atualizado automaticamente"
+            requester_line = ""
         else:
             user_id = int(requester.id)
             position = entry.positions.get(user_id)
             chips = self._safe_int(self.db.get_user_chips(requester.guild.id, user_id, default=100), 100)
             weekly_getter = getattr(self.db, "get_user_chip_week_delta", None)
             weekly = self._safe_int(weekly_getter(requester.guild.id, user_id) if callable(weekly_getter) else 0, 0)
-            weekly_marker = "🟢" if weekly > 0 else ("🔴" if weekly < 0 else "⚪")
             if position is None:
-                requester_line = (
-                    f"Você ainda não entrou no rank • **{format_number(chips)} fichas** • "
-                    f"{weekly_marker} **{format_weekly_delta(weekly)}** nesta semana"
-                )
+                requester_line = f"-# Você ainda não entrou no rank • **{format_number(chips)} fichas**"
             else:
-                requester_line = (
-                    f"Você está em **#{position}** • **{format_number(chips)} fichas** • "
-                    f"{weekly_marker} **{format_weekly_delta(weekly)}** nesta semana"
-                )
+                requester_line = f"-# Você: **#{position}** • **{format_number(chips)} fichas**"
+            if weekly != 0:
+                weekly_marker = "🟢" if weekly > 0 else "🔴"
+                requester_line += f" • {weekly_marker} **{format_weekly_delta(weekly)}**"
 
-        if entry.top_rows:
-            lines = [
-                (
-                    f"#{row.position} {row.display_name}: {row.chips} fichas normais, "
-                    f"{row.bonus_chips} bônus, {format_weekly_delta(row.weekly_delta)} na semana"
-                )
-                for row in entry.top_rows
-            ]
-            accessible = "Top 10 do rank de fichas. " + "; ".join(lines)
-        else:
-            accessible = "Rank de fichas sem jogadores com movimentação até o momento."
         return ChipRankResponse(
             image_bytes=entry.image_bytes,
             top_rows=entry.top_rows,
             requester_line=requester_line,
-            accessible_description=accessible[:1000],
         )
 
     def _schedule_refresh(self, guild_id: int, *, delay: float) -> None:
@@ -567,15 +547,6 @@ class ChipRankCache:
         now = self._sao_paulo_now()
         iso = now.isocalendar()
         return f"{iso.year}-W{iso.week:02d}"
-
-    def _current_week_label(self) -> str:
-        months = ("jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez")
-        now = self._sao_paulo_now()
-        monday = (now - timedelta(days=now.weekday())).date()
-        sunday = monday + timedelta(days=6)
-        if monday.month == sunday.month:
-            return f"Semana {monday.day}–{sunday.day} {months[sunday.month - 1]}"
-        return f"Semana {monday.day} {months[monday.month - 1]}–{sunday.day} {months[sunday.month - 1]}"
 
     def _seconds_until_next_week(self) -> float:
         now = self._sao_paulo_now()

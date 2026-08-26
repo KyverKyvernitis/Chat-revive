@@ -965,10 +965,6 @@ class GamesCog(dcommands.Cog, GamesCore):
     @dcommands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         try:
-            self._chip_rank_cache.member_changed(before, after)
-        except Exception as e:
-            print(f"[games] erro ao atualizar avatar/nome do rank: {e!r}")
-        try:
             await self._handle_gincana_member_update(before, after)
         except Exception as e:
             print(f"[games] erro no on_member_update: {e!r}")
@@ -984,10 +980,6 @@ class GamesCog(dcommands.Cog, GamesCore):
     @dcommands.Cog.listener()
     async def on_user_update(self, before: discord.User, after: discord.User):
         self._chip_rank_cache.user_changed(before, after)
-
-    @dcommands.Cog.listener()
-    async def on_guild_update(self, before: discord.Guild, after: discord.Guild):
-        self._chip_rank_cache.guild_changed(before, after)
 
     @dcommands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unicodedata
 from dataclasses import dataclass
 from io import BytesIO
@@ -13,6 +14,11 @@ ROW_HEIGHT = 88
 ROW_GAP = 8
 MAX_ROWS = 10
 AVATAR_SIZE = 64
+TOKEN_SIZE = 29
+NAME_VALUE_GAP = 16
+VALUE_ICON_GAP = 6
+VALUE_SEGMENT_GAP = 18
+MIN_TAG_WIDTH = 110
 LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 
 
@@ -37,6 +43,16 @@ def format_weekly_delta(value: int) -> str:
     if amount > 0:
         return f"+{format_number(amount)}"
     return format_number(amount)
+
+
+def _build_value_segments(row: RankRenderRow) -> tuple[tuple[str, str], ...]:
+    """Monta apenas os valores que realmente precisam aparecer na linha."""
+    segments: list[tuple[str, str]] = [("normal", format_number(row.chips))]
+    if int(row.bonus_chips) > 0:
+        segments.append(("bonus", format_number(row.bonus_chips)))
+    if int(row.weekly_delta) != 0:
+        segments.append(("weekly", format_weekly_delta(row.weekly_delta)))
+    return tuple(segments)
 
 
 def assign_competition_positions(rows: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
@@ -99,7 +115,8 @@ def _load_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | Ima
 
 
 def _initials(display_name: str) -> str:
-    parts = [part for part in str(display_name or "").strip().split() if part]
+    clean_name = str(display_name or "").strip().lstrip("@").strip()
+    parts = [part for part in clean_name.split() if part]
     if not parts:
         return "?"
     if len(parts) == 1:
@@ -124,6 +141,9 @@ def _sanitize_for_font(value: str, font: ImageFont.ImageFont, *, fallback: str =
         if 0xFE00 <= codepoint <= 0xFE0F or 0xE0100 <= codepoint <= 0xE01EF:
             continue
         if unicodedata.category(char) in {"Cc", "Cf", "Cs", "Co", "Cn"}:
+            continue
+        if char.isascii() and char.isprintable():
+            cleaned.append(char)
             continue
         if missing is not None and _glyph_signature(font, char) == missing:
             continue
@@ -220,34 +240,50 @@ def _fit_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, m
     return value[:low].rstrip() + suffix
 
 
-def _draw_right_aligned(
+def _inline_values_width(
     draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int],
-    text: str,
+    segments: Sequence[tuple[str, str]],
     *,
     font: ImageFont.ImageFont,
-    fill: tuple[int, int, int, int],
-) -> None:
-    width = int(draw.textlength(text, font=font))
-    draw.text((xy[0] - width, xy[1]), text, font=font, fill=fill)
+) -> int:
+    width = 0
+    for index, (kind, text) in enumerate(segments):
+        if index:
+            width += VALUE_SEGMENT_GAP
+        width += math.ceil(draw.textlength(text, font=font))
+        if kind in {"normal", "bonus"}:
+            width += VALUE_ICON_GAP + TOKEN_SIZE
+    return width
 
 
-def _numeric_font(
+def _inline_values_font(
     draw: ImageDraw.ImageDraw,
-    text: str,
+    segments: Sequence[tuple[str, str]],
     *,
     base_font: ImageFont.ImageFont,
     max_width: int,
     preferred_size: int = 23,
-    minimum_size: int = 15,
+    minimum_size: int = 10,
 ) -> ImageFont.ImageFont:
-    if draw.textlength(text, font=base_font) <= max_width:
+    if _inline_values_width(draw, segments, font=base_font) <= max_width:
         return base_font
     for size in range(preferred_size - 1, minimum_size - 1, -1):
         font = _load_font(size, bold=True)
-        if draw.textlength(text, font=font) <= max_width:
+        if _inline_values_width(draw, segments, font=font) <= max_width:
             return font
     return _load_font(minimum_size, bold=True)
+
+
+def _centered_text_y(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.ImageFont,
+    *,
+    row_top: int,
+) -> int:
+    box = draw.textbbox((0, 0), text, font=font)
+    height = box[3] - box[1]
+    return int(row_top + (ROW_HEIGHT - height) / 2 - box[1])
 
 
 def render_rank_image(
@@ -282,11 +318,10 @@ def render_rank_image(
     value_font = _load_font(23, bold=True)
     empty_font = _load_font(22)
 
-    token_size = 29
-    normal_icon = _open_prepared_png(normal_icon_png, (token_size, token_size)) or _draw_token_fallback(token_size, (41, 197, 181, 255))
-    bonus_icon = _open_prepared_png(bonus_icon_png, (token_size, token_size)) or _draw_token_fallback(token_size, (244, 143, 59, 255))
-    debt_icon = _open_prepared_png(debt_icon_png, (token_size, token_size)) or _draw_token_fallback(
-        token_size,
+    normal_icon = _open_prepared_png(normal_icon_png, (TOKEN_SIZE, TOKEN_SIZE)) or _draw_token_fallback(TOKEN_SIZE, (41, 197, 181, 255))
+    bonus_icon = _open_prepared_png(bonus_icon_png, (TOKEN_SIZE, TOKEN_SIZE)) or _draw_token_fallback(TOKEN_SIZE, (244, 143, 59, 255))
+    debt_icon = _open_prepared_png(debt_icon_png, (TOKEN_SIZE, TOKEN_SIZE)) or _draw_token_fallback(
+        TOKEN_SIZE,
         (235, 76, 88, 255),
         debt=True,
     )
@@ -328,29 +363,45 @@ def render_rank_image(
                 draw.ellipse((avatar_x - 2, avatar_y - 2, avatar_x + AVATAR_SIZE + 1, avatar_y + AVATAR_SIZE + 1), fill=(57, 75, 88, 255))
                 canvas.alpha_composite(avatar, (avatar_x, avatar_y))
 
+            segments = _build_value_segments(row)
+            max_values_width = 930 - 178 - NAME_VALUE_GAP - MIN_TAG_WIDTH
+            inline_font = _inline_values_font(
+                draw,
+                segments,
+                base_font=value_font,
+                max_width=max_values_width,
+            )
+            values_width = _inline_values_width(draw, segments, font=inline_font)
+
             safe_name = _sanitize_for_font(row.display_name, name_font)
-            name = _fit_text(draw, safe_name, name_font, 390)
+            max_name_width = max(MIN_TAG_WIDTH, 930 - 178 - NAME_VALUE_GAP - values_width)
+            name = _fit_text(draw, safe_name, name_font, max_name_width)
             draw.text((178, y1 + 29), name, font=name_font, fill=(240, 244, 248, 255))
 
-            active_normal_icon = debt_icon if int(row.chips) < 0 else normal_icon
-            icon_y = y1 + (ROW_HEIGHT - token_size) // 2
-            canvas.alpha_composite(active_normal_icon, (586, icon_y))
-            normal_text = format_number(row.chips)
-            normal_font = _numeric_font(draw, normal_text, base_font=value_font, max_width=116)
-            normal_color = (244, 103, 112, 255) if int(row.chips) < 0 else (230, 237, 243, 255)
-            _draw_right_aligned(draw, (735, y1 + 30), normal_text, font=normal_font, fill=normal_color)
+            cursor_x = 178 + math.ceil(draw.textlength(name, font=name_font)) + NAME_VALUE_GAP
+            icon_y = y1 + (ROW_HEIGHT - TOKEN_SIZE) // 2
+            for segment_index, (kind, text) in enumerate(segments):
+                if segment_index:
+                    cursor_x += VALUE_SEGMENT_GAP
 
-            canvas.alpha_composite(bonus_icon, (751, icon_y))
-            bonus_text = format_number(row.bonus_chips)
-            bonus_font = _numeric_font(draw, bonus_text, base_font=value_font, max_width=67)
-            _draw_right_aligned(draw, (849, y1 + 30), bonus_text, font=bonus_font, fill=(230, 237, 243, 255))
+                if kind == "normal" and int(row.chips) < 0:
+                    color = (244, 103, 112, 255)
+                    icon = debt_icon
+                elif kind == "weekly":
+                    color = (65, 209, 122, 255) if int(row.weekly_delta) > 0 else (244, 86, 98, 255)
+                    icon = None
+                else:
+                    color = (230, 237, 243, 255)
+                    icon = normal_icon if kind == "normal" else bonus_icon
 
-            weekly = int(row.weekly_delta)
-            weekly_text = format_weekly_delta(weekly)
-            weekly_font = _numeric_font(draw, weekly_text, base_font=value_font, max_width=70)
-            weekly_color = (65, 209, 122, 255) if weekly > 0 else ((244, 86, 98, 255) if weekly < 0 else (151, 162, 174, 255))
-            _draw_right_aligned(draw, (930, y1 + 30), weekly_text, font=weekly_font, fill=weekly_color)
+                text_y = _centered_text_y(draw, text, inline_font, row_top=y1)
+                draw.text((cursor_x, text_y), text, font=inline_font, fill=color)
+                cursor_x += math.ceil(draw.textlength(text, font=inline_font))
+                if icon is not None:
+                    cursor_x += VALUE_ICON_GAP
+                    canvas.alpha_composite(icon, (cursor_x, icon_y))
+                    cursor_x += TOKEN_SIZE
 
     output = BytesIO()
-    canvas.convert("RGB").save(output, format="PNG", optimize=True, compress_level=7)
+    canvas.convert("RGB").save(output, format="PNG", compress_level=4)
     return output.getvalue()

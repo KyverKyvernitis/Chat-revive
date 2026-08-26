@@ -68,9 +68,13 @@ class _FakeMember:
     def __init__(self, guild, user_id: int, name: str, *, bot: bool = False):
         self.guild = guild
         self.id = user_id
-        self.display_name = name
+        self.name = name
+        self.display_name = f"Nick {name}"
         self.bot = bot
-        self.display_avatar = _FakeAvatar(str(user_id))
+        self.avatar = _FakeAvatar(f"global-{user_id}")
+        self.default_avatar = _FakeAvatar(f"default-{user_id}")
+        self.guild_avatar = _FakeAvatar(f"guild-{user_id}")
+        self.display_avatar = self.guild_avatar
 
 
 class _FakeGuild:
@@ -123,14 +127,23 @@ class _FakeDB:
 
 
 class GamesRankCacheTests(unittest.TestCase):
+    def test_profile_identity_ignores_guild_nickname_and_avatar(self) -> None:
+        guild = _FakeGuild()
+        member = _FakeMember(guild, 7, "core.cute")
+
+        self.assertEqual(ChipRankCache._username_tag(member), "@core.cute")
+        self.assertEqual(ChipRankCache._profile_avatar_asset(member).url, "https://cdn.invalid/global-7.png")
+        member.avatar = None
+        self.assertEqual(ChipRankCache._profile_avatar_asset(member).url, "https://cdn.invalid/default-7.png")
+
     def test_shared_image_filters_departed_users_and_preserves_ties(self) -> None:
         async def scenario() -> None:
             guild = _FakeGuild()
             for user_id, name, is_bot in (
-                (1, "Alpha", False),
-                (2, "Beta", False),
-                (3, "Gamma", False),
-                (4, "Bot", True),
+                (1, "alpha", False),
+                (2, "beta", False),
+                (3, "gamma", False),
+                (4, "bot", True),
             ):
                 guild.members[user_id] = _FakeMember(guild, user_id, name, bot=is_bot)
             rows = [
@@ -155,6 +168,9 @@ class GamesRankCacheTests(unittest.TestCase):
                 response = await cache.get_rank(guild, guild.members[2])
                 self.assertEqual([row.user_id for row in response.top_rows], [1, 2, 3])
                 self.assertEqual([row.position for row in response.top_rows], [1, 2, 2])
+                self.assertEqual([row.display_name for row in response.top_rows], ["@alpha", "@beta", "@gamma"])
+                self.assertEqual(response.top_rows[0].avatar_key, "https://cdn.invalid/global-1.png")
+                self.assertNotIn("guild-1", response.top_rows[0].avatar_key)
                 self.assertIn("**#2**", response.requester_line)
                 self.assertIn("🔴 **-4**", response.requester_line)
                 self.assertNotIn("nesta semana", response.requester_line)

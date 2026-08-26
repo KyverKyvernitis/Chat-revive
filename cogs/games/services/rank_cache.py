@@ -147,27 +147,25 @@ class ChipRankCache:
         self._purge_member_avatars(int(member.id))
         self.invalidate(int(member.guild.id), int(member.id), delay=0.05)
 
-    def member_changed(self, before: discord.Member, after: discord.Member) -> None:
-        before_name = str(getattr(before, "display_name", "") or "")
-        after_name = str(getattr(after, "display_name", "") or "")
-        before_avatar = str(getattr(getattr(before, "display_avatar", None), "url", "") or "")
-        after_avatar = str(getattr(getattr(after, "display_avatar", None), "url", "") or "")
-        if before_name != after_name or before_avatar != after_avatar:
-            self.invalidate_member(after)
+    @staticmethod
+    def _profile_avatar_asset(user: object) -> object | None:
+        """Retorna apenas o avatar global, sem priorizar o avatar da guild."""
+        return getattr(user, "avatar", None) or getattr(user, "default_avatar", None)
+
+    @staticmethod
+    def _username_tag(user: object) -> str:
+        username = " ".join(str(getattr(user, "name", "") or "usuario").split()) or "usuario"
+        return f"@{username.lstrip('@')}"
 
     def user_changed(self, before: discord.User, after: discord.User) -> None:
-        before_avatar = str(getattr(getattr(before, "display_avatar", None), "url", "") or "")
-        after_avatar = str(getattr(getattr(after, "display_avatar", None), "url", "") or "")
+        before_avatar = str(getattr(self._profile_avatar_asset(before), "url", "") or "")
+        after_avatar = str(getattr(self._profile_avatar_asset(after), "url", "") or "")
         if str(getattr(before, "name", "")) == str(getattr(after, "name", "")) and before_avatar == after_avatar:
             return
         self._purge_member_avatars(int(after.id))
         for guild in list(getattr(self.bot, "guilds", ()) or ()):
             if guild.get_member(int(after.id)) is not None:
                 self.invalidate(int(guild.id), int(after.id), delay=0.05)
-
-    def guild_changed(self, before: discord.Guild, after: discord.Guild) -> None:
-        if str(getattr(before, "name", "")) != str(getattr(after, "name", "")):
-            self.invalidate(int(after.id), delay=0.05)
 
     def drop_guild(self, guild_id: int) -> None:
         gid = int(guild_id)
@@ -319,11 +317,11 @@ class ChipRankCache:
             member = guild.get_member(user_id)
             if member is None or bool(getattr(member, "bot", False)):
                 continue
-            asset = getattr(member, "display_avatar", None)
+            asset = self._profile_avatar_asset(member)
             candidates.append(
                 {
                     **raw,
-                    "display_name": str(getattr(member, "display_name", "Jogador") or "Jogador"),
+                    "display_name": self._username_tag(member),
                     "avatar_key": str(getattr(asset, "url", "") or ""),
                     "member": member,
                 }
@@ -352,7 +350,7 @@ class ChipRankCache:
         if not allow_download:
             return None
 
-        asset = getattr(row.member, "display_avatar", None)
+        asset = self._profile_avatar_asset(row.member)
         if asset is None:
             return None
         try:

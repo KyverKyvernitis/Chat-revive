@@ -6,7 +6,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "cogs" / "games" / "rank_renderer.py"
@@ -24,6 +24,10 @@ prepare_avatar_thumbnail = RANK_RENDERER.prepare_avatar_thumbnail
 render_rank_image = RANK_RENDERER.render_rank_image
 sanitize_for_font = RANK_RENDERER._sanitize_for_font
 load_font = RANK_RENDERER._load_font
+build_value_segments = RANK_RENDERER._build_value_segments
+initials = RANK_RENDERER._initials
+inline_values_font = RANK_RENDERER._inline_values_font
+inline_values_width = RANK_RENDERER._inline_values_width
 
 
 class GamesRankRendererTests(unittest.TestCase):
@@ -73,7 +77,32 @@ class GamesRankRendererTests(unittest.TestCase):
 
         self.assertIn((65, 209, 122), colors)
         self.assertIn((244, 86, 98), colors)
-        self.assertIn((151, 162, 174), colors)
+
+    def test_optional_zero_values_are_absent_and_order_is_stable(self) -> None:
+        only_normal = RankRenderRow(1, 1, "@core.cute", 201, 0, 0)
+        complete = RankRenderRow(2, 2, "@flora", 46, 8, -12)
+
+        self.assertEqual(build_value_segments(only_normal), (("normal", "201"),))
+        self.assertEqual(
+            build_value_segments(complete),
+            (("normal", "46"), ("bonus", "8"), ("weekly", "-12")),
+        )
+
+    def test_inline_values_fit_even_with_int64_limits(self) -> None:
+        row = RankRenderRow(
+            1,
+            1,
+            "@core.cute",
+            -9_223_372_036_854_775_808,
+            9_223_372_036_854_775_807,
+            -9_223_372_036_854_775_808,
+        )
+        draw = ImageDraw.Draw(Image.new("RGB", (960, 100)))
+        segments = build_value_segments(row)
+        maximum = 930 - 178 - RANK_RENDERER.NAME_VALUE_GAP - RANK_RENDERER.MIN_TAG_WIDTH
+        font = inline_values_font(draw, segments, base_font=load_font(23, bold=True), max_width=maximum)
+
+        self.assertLessEqual(inline_values_width(draw, segments, font=font), maximum)
 
     def test_render_empty_rank_remains_valid(self) -> None:
         payload = render_rank_image([])
@@ -84,6 +113,7 @@ class GamesRankRendererTests(unittest.TestCase):
     def test_unsupported_name_glyphs_are_removed_instead_of_becoming_boxes(self) -> None:
         font = load_font(25, bold=True)
         self.assertEqual(sanitize_for_font("Core\ufe0f\u200d", font), "Core")
+        self.assertEqual(initials("@core.cute"), "CO")
 
 
 if __name__ == "__main__":

@@ -2645,7 +2645,6 @@ class GincanaBase:
         view.add_item(
             discord.ui.Container(
                 *components,
-                accent_color=discord.Color.teal(),
             )
         )
         return view
@@ -2679,7 +2678,7 @@ class GincanaBase:
             if member is None or member.bot:
                 continue
             visible.append((member, row))
-        visible.sort(key=lambda item: (-int(item[1].get("chips", 0) or 0), item[0].display_name.casefold(), item[0].id))
+        visible.sort(key=lambda item: (-int(item[1].get("chips", 0) or 0), item[0].name.casefold(), item[0].id))
 
         guild_name = self._safe_chip_rank_markdown(getattr(guild, "name", None), fallback="Servidor")
         lines = [f"# {guild_name}", ""]
@@ -2697,14 +2696,18 @@ class GincanaBase:
                 continue
             bonus = max(0, int(row.get("bonus_chips", 0) or 0))
             weekly = int(row.get("weekly_delta", 0) or 0)
-            weekly_text = format_weekly_delta(weekly)
-            weekly_prefix = "🟢 " if weekly > 0 else ("🔴 " if weekly < 0 else "")
             chip_icon = self._CHIP_LOSS_EMOJI if chips < 0 else self._CHIP_EMOJI
-            member_name = self._safe_chip_rank_markdown(member.display_name, fallback="Jogador")
-            lines.append(
-                f"**#{shared_position}** {member_name} • **{format_number(chips)}** {chip_icon} • "
-                f"**{format_number(bonus)}** {self._CHIP_BONUS_EMOJI} • {weekly_prefix}**{weekly_text}**"
-            )
+            member_tag = self._safe_chip_rank_markdown(f"@{member.name}", fallback="@usuario")
+            parts = [
+                f"**#{shared_position}** {member_tag}",
+                f"**{format_number(chips)}** {chip_icon}",
+            ]
+            if bonus > 0:
+                parts.append(f"**{format_number(bonus)}** {self._CHIP_BONUS_EMOJI}")
+            if weekly != 0:
+                weekly_prefix = "🟢" if weekly > 0 else "🔴"
+                parts.append(f"{weekly_prefix} **{format_weekly_delta(weekly)}**")
+            lines.append(" • ".join(parts))
         if len(lines) == 2:
             lines.append("Ainda não há jogadores com movimentação de fichas")
         if requester is not None:
@@ -2723,7 +2726,7 @@ class GincanaBase:
             lines.extend(["", requester_line])
 
         view = discord.ui.LayoutView(timeout=None)
-        view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.teal()))
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines))))
         return view
 
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:

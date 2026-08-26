@@ -1,4 +1,5 @@
 import asyncio
+import io
 import random
 import time
 from datetime import datetime, timedelta
@@ -2576,13 +2577,8 @@ class GincanaBase:
     async def _prepare_chip_leaderboard_state(self, guild: discord.Guild, requester: discord.Member | None = None) -> dict:
         return self.db.get_chip_season_state(guild.id)
 
-    def _build_chip_rank_footer(self, guild_id: int) -> str:
-        return "Atualização automática • semana de segunda a domingo"
-
     async def _make_chip_leaderboard_embed_async(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
-        embed = self._make_chip_leaderboard_embed(guild, requester)
-        embed.set_footer(text=self._build_chip_rank_footer(guild.id))
-        return embed
+        return self._make_chip_leaderboard_embed(guild, requester)
 
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
         rows = [
@@ -2620,14 +2616,12 @@ class GincanaBase:
                 ranking_lines.append(f"{prefix} **{name}** — {balance_text}")
             embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
 
-        embed.set_footer(text=self._build_chip_rank_footer(guild.id))
         return embed
 
     def _make_chip_rank_view(self, response: ChipRankResponse) -> discord.ui.LayoutView:
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(
             discord.ui.Container(
-                discord.ui.TextDisplay("# 🏆 Rank de fichas"),
                 discord.ui.MediaGallery(
                     discord.MediaGalleryItem(
                         f"attachment://{RANK_FILENAME}",
@@ -2636,11 +2630,30 @@ class GincanaBase:
                 ),
                 discord.ui.Separator(),
                 discord.ui.TextDisplay(response.requester_line),
-                discord.ui.TextDisplay("-# Semana atual: saldo líquido de fichas normais • bônus não altera a posição"),
                 accent_color=discord.Color.teal(),
             )
         )
         return view
+
+    async def _send_chip_rank(self, sender, guild: discord.Guild, requester: discord.Member | None, **send_kwargs):
+        """Envia o mesmo rank visual pelos comandos com prefixo e por texto livre."""
+        try:
+            response = await self._chip_rank_cache.get_rank(guild, requester)
+            image = discord.File(io.BytesIO(response.image_bytes), filename=RANK_FILENAME)
+            return await sender(
+                file=image,
+                view=self._make_chip_rank_view(response),
+                **send_kwargs,
+            )
+        except Exception as exc:
+            print(
+                f"[games] erro ao montar imagem do rank "
+                f"guild={getattr(guild, 'id', 0)} user={getattr(requester, 'id', 0)}: {exc!r}"
+            )
+            return await sender(
+                view=self._make_chip_rank_fallback_view(guild, requester),
+                **send_kwargs,
+            )
 
     def _make_chip_rank_fallback_view(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.ui.LayoutView:
         snapshot_getter = getattr(self.db, "get_chip_rank_snapshot", None)

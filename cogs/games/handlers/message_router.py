@@ -67,7 +67,11 @@ class GincanaMessageRouterMixin:
             await message.channel.send(view=self._make_chip_history_view(message.author, limit=10))
             return True
         if content in {"rank", "leaderboard"}:
-            await message.channel.send(embed=await self._make_chip_leaderboard_embed_async(message.guild, message.author))
+            await self._send_chip_rank(
+                message.channel.send,
+                message.guild,
+                message.author,
+            )
             return True
         if content in {"recarga", "recarrega"}:
             used, new_balance, note = await self._try_use_chip_recharge(message.guild.id, message.author.id)

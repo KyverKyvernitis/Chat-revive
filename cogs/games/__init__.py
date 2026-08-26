@@ -1,5 +1,4 @@
 import asyncio
-import io
 import logging
 import random
 import re
@@ -640,24 +639,12 @@ class GamesCog(dcommands.Cog, GamesCore):
     async def rank(self, ctx: dcommands.Context):
         if not await self._ensure_games_command_entry(ctx, trigger_hint="rank"):
             return
-        try:
-            response = await self._chip_rank_cache.get_rank(ctx.guild, ctx.author)
-            image = discord.File(io.BytesIO(response.image_bytes), filename="rank-fichas.png")
-            await ctx.reply(
-                file=image,
-                view=self._make_chip_rank_view(response),
-                mention_author=False,
-            )
-        except Exception:
-            log.exception(
-                "games-rank: falha ao montar imagem guild=%s user=%s",
-                getattr(ctx.guild, "id", 0),
-                getattr(ctx.author, "id", 0),
-            )
-            await ctx.reply(
-                view=self._make_chip_rank_fallback_view(ctx.guild, ctx.author),
-                mention_author=False,
-            )
+        await self._send_chip_rank(
+            ctx.reply,
+            ctx.guild,
+            ctx.author,
+            mention_author=False,
+        )
 
     @dcommands.command(name="race", aliases=["raça"])
     async def race_command(self, ctx: dcommands.Context):

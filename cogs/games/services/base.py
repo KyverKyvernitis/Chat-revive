@@ -26,6 +26,7 @@ from ..constants import (
     TRUCO_GOLDEN_BONUS_EXTRA,
 )
 from db import SettingsDB
+from .rank_cache import ChipRankCache, ChipRankResponse, RANK_FILENAME
 from .session_registry import GameSessionRegistry, MAX_ACTIVE_GAME_USERS_PER_GUILD
 
 
@@ -138,6 +139,7 @@ class GincanaBase:
         self._race_progress_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._achievement_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._race_private_notices: dict[tuple[int, int], list[str]] = {}
+        self._chip_rank_cache = ChipRankCache(bot, db)
 
 
     def _touch_runtime_state(self, state: dict | None, *, kind: str | None = None, guild_id: int | None = None) -> float:
@@ -508,25 +510,35 @@ class GincanaBase:
             return 0
 
     async def _change_user_bonus_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True, reason: str | None = None) -> int:
-        delta = int(amount)
-        new_bonus = await self.db.add_user_bonus_chips(guild_id, user_id, delta)
-        if delta != 0:
+        requested_delta = int(amount)
+        old_bonus = self._get_user_bonus_chips(guild_id, user_id)
+        new_bonus = await self.db.add_user_bonus_chips(guild_id, user_id, requested_delta)
+        actual_delta = int(new_bonus) - int(old_bonus)
+        if actual_delta != 0:
             if mark_activity:
                 await self._mark_chip_activity(guild_id, user_id)
             try:
-                await self.db.append_chip_history(guild_id, user_id, delta=delta, kind="bonus", reason=reason)
+                await self.db.append_chip_history(guild_id, user_id, delta=actual_delta, kind="bonus", reason=reason)
             except Exception:
                 pass
         return int(new_bonus)
 
     async def _change_user_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True, reason: str | None = None) -> int:
-        delta = int(amount)
-        new_balance = await self.db.add_user_chips(guild_id, user_id, delta)
-        if delta != 0:
+        requested_delta = int(amount)
+        old_balance = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
+        old_bonus = self._get_user_bonus_chips(guild_id, user_id)
+        new_balance = await self.db.add_user_chips(guild_id, user_id, requested_delta)
+        new_bonus = self._get_user_bonus_chips(guild_id, user_id)
+        normal_delta = int(new_balance) - old_balance
+        bonus_delta = int(new_bonus) - old_bonus
+        if normal_delta != 0 or bonus_delta != 0:
             if mark_activity:
                 await self._mark_chip_activity(guild_id, user_id)
             try:
-                await self.db.append_chip_history(guild_id, user_id, delta=delta, kind="chips", reason=reason)
+                if normal_delta != 0:
+                    await self.db.append_chip_history(guild_id, user_id, delta=normal_delta, kind="chips", reason=reason)
+                if bonus_delta != 0:
+                    await self.db.append_chip_history(guild_id, user_id, delta=bonus_delta, kind="bonus", reason=reason)
             except Exception:
                 pass
         return int(new_balance)
@@ -723,11 +735,14 @@ class GincanaBase:
 
     async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
         async with self._achievement_lock(guild_id, user_id):
-            await self._set_user_chips_value(guild_id, user_id, int(amount), mark_activity=True)
-            await self.db.set_user_bonus_chips(guild_id, user_id, 0)
             doc = self.db._get_user_doc(guild_id, user_id)
+            doc["chips"] = int(amount)
+            doc["bonus_chips"] = 0
+            doc["has_chip_activity"] = True
             doc["last_chip_reset_at"] = 0.0
             doc["chip_recharge_manual_initialized"] = False
+            doc["chip_week_key"] = ""
+            doc["chip_week_delta"] = 0
             doc.pop("race_key", None)
             doc.pop("race_active", None)
             doc.pop("game_achievements", None)
@@ -748,6 +763,8 @@ class GincanaBase:
             doc["daily_streak"] = 0
             doc["weekly_points_week"] = ""
             doc["weekly_points"] = 0
+            doc["chip_week_key"] = ""
+            doc["chip_week_delta"] = 0
             doc["game_stats"] = {}
             doc["has_chip_activity"] = False
             doc.pop("race_key", None)
@@ -2394,14 +2411,8 @@ class GincanaBase:
         return self._race_is(guild_id, user_id, "coringa") and random.random() < 0.25
 
     def _chip_rank_position_text(self, guild: discord.Guild, user_id: int) -> str | None:
-        rows = self.db.get_chip_leaderboard(guild.id, limit=1000000)
-        for index, row in enumerate(rows, start=1):
-            try:
-                if int(row.get("user_id", 0)) == int(user_id):
-                    return f"🏆 Rank: **#{index}**"
-            except Exception:
-                continue
-        return None
+        position = self._chip_rank_cache.get_cached_position(guild.id, user_id)
+        return f"🏆 Rank: **#{position}**" if position is not None else None
 
     def _make_chip_balance_view(self, member: discord.Member) -> discord.ui.LayoutView:
         guild_id = member.guild.id
@@ -2566,9 +2577,7 @@ class GincanaBase:
         return self.db.get_chip_season_state(guild.id)
 
     def _build_chip_rank_footer(self, guild_id: int) -> str:
-        state = self.db.get_chip_season_state(guild_id)
-        season = max(1, int(state.get("season", 1) or 1))
-        return f"Temporada {season}"
+        return "Atualização automática • semana de segunda a domingo"
 
     async def _make_chip_leaderboard_embed_async(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
         embed = self._make_chip_leaderboard_embed(guild, requester)
@@ -2576,7 +2585,11 @@ class GincanaBase:
         return embed
 
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
-        rows = self.db.get_chip_leaderboard(guild.id, limit=10)
+        rows = [
+            row
+            for row in self.db.get_chip_leaderboard(guild.id, limit=100)
+            if guild.get_member(int(row.get("user_id", 0) or 0)) is not None
+        ][:10]
         embed = discord.Embed(
             title="🏆 Rank do servidor",
             description="Os maiores saldos deste servidor",
@@ -2587,11 +2600,18 @@ class GincanaBase:
         else:
             medals = {1: "🥇", 2: "🥈", 3: "🥉"}
             ranking_lines = []
+            previous_chips = None
+            shared_position = 0
             for index, row in enumerate(rows, start=1):
                 member = guild.get_member(int(row["user_id"]))
-                name = member.display_name if member is not None else f"Usuário {row['user_id']}"
-                prefix = medals.get(index, f"`#{index}`")
+                if member is None:
+                    continue
+                name = member.display_name
                 chips_val = int(row.get('chips', row.get('points', 0)) or 0)
+                if previous_chips is None or chips_val != previous_chips:
+                    shared_position = index
+                    previous_chips = chips_val
+                prefix = medals.get(shared_position, f"`#{shared_position}`")
                 bonus_val = self._get_user_bonus_chips(guild.id, int(row["user_id"]))
                 emoji = self._CHIP_LOSS_EMOJI if chips_val < 0 else self._CHIP_EMOJI
                 balance_text = f"**{chips_val}** {emoji}"
@@ -2602,6 +2622,83 @@ class GincanaBase:
 
         embed.set_footer(text=self._build_chip_rank_footer(guild.id))
         return embed
+
+    def _make_chip_rank_view(self, response: ChipRankResponse) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("# 🏆 Rank de fichas"),
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(
+                        f"attachment://{RANK_FILENAME}",
+                        description=response.accessible_description,
+                    )
+                ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(response.requester_line),
+                discord.ui.TextDisplay("-# Semana atual: saldo líquido de fichas normais • bônus não altera a posição"),
+                accent_color=discord.Color.teal(),
+            )
+        )
+        return view
+
+    def _make_chip_rank_fallback_view(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.ui.LayoutView:
+        snapshot_getter = getattr(self.db, "get_chip_rank_snapshot", None)
+        rows = list(snapshot_getter(guild.id) if callable(snapshot_getter) else ())
+        visible: list[tuple[discord.Member, dict]] = []
+        for row in rows:
+            member = guild.get_member(int(row.get("user_id", 0) or 0))
+            if member is None or member.bot:
+                continue
+            visible.append((member, row))
+        visible.sort(key=lambda item: (-int(item[1].get("chips", 0) or 0), item[0].display_name.casefold(), item[0].id))
+
+        lines = ["# 🏆 Rank de fichas", "_Top 10 • semana atual_", ""]
+        previous_chips = None
+        shared_position = 0
+        requester_position = None
+        for index, (member, row) in enumerate(visible, start=1):
+            chips = int(row.get("chips", 0) or 0)
+            if previous_chips is None or chips != previous_chips:
+                shared_position = index
+                previous_chips = chips
+            if requester is not None and member.id == requester.id:
+                requester_position = shared_position
+            if index > 10:
+                continue
+            bonus = max(0, int(row.get("bonus_chips", 0) or 0))
+            weekly = int(row.get("weekly_delta", 0) or 0)
+            weekly_text = f"+{weekly}" if weekly > 0 else str(weekly)
+            weekly_icon = "🟢" if weekly > 0 else ("🔴" if weekly < 0 else "⚪")
+            chip_icon = self._CHIP_LOSS_EMOJI if chips < 0 else self._CHIP_EMOJI
+            lines.append(
+                f"**#{shared_position}** {member.display_name} • **{chips}** {chip_icon} • "
+                f"**{bonus}** {self._CHIP_BONUS_EMOJI} • {weekly_icon} **{weekly_text}**"
+            )
+        if len(lines) == 3:
+            lines.append("Ainda não há jogadores com movimentação de fichas")
+        if requester is not None:
+            requester_chips = int(self.db.get_user_chips(guild.id, requester.id, default=CHIPS_INITIAL) or 0)
+            weekly_getter = getattr(self.db, "get_user_chip_week_delta", None)
+            requester_weekly = int(weekly_getter(guild.id, requester.id) if callable(weekly_getter) else 0)
+            requester_weekly_text = f"+{requester_weekly}" if requester_weekly > 0 else str(requester_weekly)
+            requester_weekly_icon = "🟢" if requester_weekly > 0 else ("🔴" if requester_weekly < 0 else "⚪")
+            requester_prefix = (
+                f"Você está em **#{requester_position}**"
+                if requester_position is not None
+                else "Você ainda não entrou no rank"
+            )
+            lines.extend(
+                [
+                    "",
+                    f"{requester_prefix} • **{requester_chips} fichas** • "
+                    f"{requester_weekly_icon} **{requester_weekly_text}** nesta semana",
+                ]
+            )
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.teal()))
+        return view
 
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
         remaining = max(0, int(remaining_seconds))

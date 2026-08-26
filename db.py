@@ -24,6 +24,44 @@ class SettingsDB:
         self.user_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
         self._resolved_tts_cache: Dict[tuple[int, int], Dict[str, str]] = {}
         self._truco_history_lock = asyncio.Lock()
+        self._chip_change_listeners: list[Any] = []
+
+    def add_chip_change_listener(self, callback) -> None:
+        if callable(callback) and callback not in self._chip_change_listeners:
+            self._chip_change_listeners.append(callback)
+
+    def remove_chip_change_listener(self, callback) -> None:
+        self._chip_change_listeners = [item for item in self._chip_change_listeners if item != callback]
+
+    @staticmethod
+    def _chip_rank_doc_signature(doc: Dict[str, Any] | None) -> tuple[int, int, bool, str, int]:
+        data = doc or {}
+        try:
+            chips = int(data.get("chips", 100) if data.get("chips", None) is not None else 100)
+        except (TypeError, ValueError):
+            chips = 100
+        try:
+            bonus = max(0, int(data.get("bonus_chips", 0) or 0))
+        except (TypeError, ValueError):
+            bonus = 0
+        try:
+            weekly_delta = int(data.get("chip_week_delta", 0) or 0)
+        except (TypeError, ValueError):
+            weekly_delta = 0
+        return (
+            chips,
+            bonus,
+            bool(data.get("has_chip_activity", False)),
+            str(data.get("chip_week_key", "") or ""),
+            weekly_delta,
+        )
+
+    def _notify_chip_change(self, guild_id: int, user_id: int) -> None:
+        for callback in tuple(self._chip_change_listeners):
+            try:
+                callback(int(guild_id), int(user_id))
+            except Exception as exc:
+                print(f"[db] Falha ao notificar mudança de fichas: {exc}")
 
     async def init(self):
         await self._ensure_indexes()
@@ -877,6 +915,7 @@ class SettingsDB:
 
     async def _save_user_doc(self, guild_id: int, user_id: int, doc: Dict[str, Any]):
         key = (guild_id, user_id)
+        previous_signature = self._chip_rank_doc_signature(self.user_cache.get(key))
         doc["type"] = "user"
         doc["guild_id"] = guild_id
         doc["user_id"] = user_id
@@ -887,6 +926,8 @@ class SettingsDB:
             {"$set": doc},
             upsert=True,
         )
+        if previous_signature != self._chip_rank_doc_signature(doc):
+            self._notify_chip_change(guild_id, user_id)
 
     async def clear_user_game_achievements(self, guild_id: int, user_id: int) -> None:
         key = (int(guild_id), int(user_id))
@@ -1770,16 +1811,27 @@ async def _settingsdb_append_chip_history(self, guild_id: int, user_id: int, *, 
     if delta_int == 0:
         return
     doc = self._get_user_doc(guild_id, user_id)
+    kind_key = str(kind or "chips").strip().lower()
     history = list(doc.get("chip_history", []) or [])
     history.append({
         "ts": float(ts) if ts is not None else time.time(),
         "delta": delta_int,
-        "kind": str(kind or "chips"),
+        "kind": kind_key,
         "reason": (str(reason).strip() if reason else "")[:80],
     })
     if len(history) > CHIP_HISTORY_MAX_ENTRIES:
         history = history[-CHIP_HISTORY_MAX_ENTRIES:]
     doc["chip_history"] = history
+    if kind_key == "chips":
+        week_key = self._current_week_key()
+        if str(doc.get("chip_week_key", "") or "") != week_key:
+            doc["chip_week_key"] = week_key
+            doc["chip_week_delta"] = 0
+        try:
+            current_week_delta = int(doc.get("chip_week_delta", 0) or 0)
+        except (TypeError, ValueError):
+            current_week_delta = 0
+        doc["chip_week_delta"] = current_week_delta + delta_int
     await self._save_user_doc(guild_id, user_id, doc)
 
 
@@ -1791,8 +1843,59 @@ def _settingsdb_get_chip_history(self, guild_id: int, user_id: int, *, limit: in
     return list(reversed(history))
 
 
+def _settingsdb_get_user_chip_week_delta(self, guild_id: int, user_id: int) -> int:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    if str(doc.get("chip_week_key", "") or "") != self._current_week_key():
+        return 0
+    try:
+        return int(doc.get("chip_week_delta", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _settingsdb_reset_user_chip_week_delta(self, guild_id: int, user_id: int) -> None:
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["chip_week_key"] = ""
+    doc["chip_week_delta"] = 0
+    await self._save_user_doc(guild_id, user_id, doc)
+
+
+def _settingsdb_get_chip_rank_snapshot(self, guild_id: int) -> list[dict[str, int]]:
+    rows: list[dict[str, int]] = []
+    week_key = self._current_week_key()
+    for (stored_guild_id, user_id), doc in self.user_cache.items():
+        if int(stored_guild_id) != int(guild_id) or not bool(doc.get("has_chip_activity", False)):
+            continue
+        try:
+            chips = int(doc.get("chips", 100) if doc.get("chips", None) is not None else 100)
+        except (TypeError, ValueError):
+            chips = 100
+        try:
+            bonus_chips = max(0, int(doc.get("bonus_chips", 0) or 0))
+        except (TypeError, ValueError):
+            bonus_chips = 0
+        weekly_delta = 0
+        if str(doc.get("chip_week_key", "") or "") == week_key:
+            try:
+                weekly_delta = int(doc.get("chip_week_delta", 0) or 0)
+            except (TypeError, ValueError):
+                weekly_delta = 0
+        rows.append(
+            {
+                "user_id": int(user_id),
+                "chips": chips,
+                "bonus_chips": bonus_chips,
+                "weekly_delta": weekly_delta,
+            }
+        )
+    return rows
+
+
 SettingsDB.append_chip_history = _settingsdb_append_chip_history
 SettingsDB.get_chip_history = _settingsdb_get_chip_history
+SettingsDB.get_user_chip_week_delta = _settingsdb_get_user_chip_week_delta
+SettingsDB.reset_user_chip_week_delta = _settingsdb_reset_user_chip_week_delta
+SettingsDB.get_chip_rank_snapshot = _settingsdb_get_chip_rank_snapshot
 
 
 # ---- chip season / global reset helpers ----
@@ -1870,6 +1973,8 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         "$set": {
             "chips": target_chips,
             "bonus_chips": 0,
+            "chip_week_delta": 0,
+            "chip_week_key": "",
             "weekly_points": 0,
             "weekly_points_week": "",
             "game_stats": {},
@@ -1904,6 +2009,8 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         updated = dict(doc)
         updated["chips"] = target_chips
         updated["bonus_chips"] = 0
+        updated["chip_week_delta"] = 0
+        updated["chip_week_key"] = ""
         updated["weekly_points"] = 0
         updated["weekly_points_week"] = ""
         updated["game_stats"] = {}
@@ -1926,6 +2033,7 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         updated["race_mendigar_uses"] = 0
         updated.pop("game_achievements", None)
         self.user_cache[key] = updated
+        self._notify_chip_change(guild_id, _uid)
         affected += 1
     return affected
 

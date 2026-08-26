@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import sys
+import types
+import unittest
+from io import BytesIO
+from pathlib import Path
+
+from PIL import Image
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+CREATED_DISCORD_STUB = "discord" not in sys.modules
+if CREATED_DISCORD_STUB:
+    discord_stub = types.ModuleType("discord")
+    discord_stub.Client = object
+    discord_stub.Member = object
+    discord_stub.User = object
+    discord_stub.Guild = object
+    discord_stub.HTTPException = type("HTTPException", (Exception,), {})
+    sys.modules["discord"] = discord_stub
+
+package = types.ModuleType("games_rank_test_package")
+package.__path__ = [str(ROOT / "cogs" / "games")]
+services_package = types.ModuleType("games_rank_test_package.services")
+services_package.__path__ = [str(ROOT / "cogs" / "games" / "services")]
+sys.modules[package.__name__] = package
+sys.modules[services_package.__name__] = services_package
+
+renderer_spec = importlib.util.spec_from_file_location(
+    "games_rank_test_package.rank_renderer",
+    ROOT / "cogs" / "games" / "rank_renderer.py",
+)
+assert renderer_spec is not None and renderer_spec.loader is not None
+renderer_module = importlib.util.module_from_spec(renderer_spec)
+sys.modules[renderer_spec.name] = renderer_module
+renderer_spec.loader.exec_module(renderer_module)
+
+cache_spec = importlib.util.spec_from_file_location(
+    "games_rank_test_package.services.rank_cache",
+    ROOT / "cogs" / "games" / "services" / "rank_cache.py",
+)
+assert cache_spec is not None and cache_spec.loader is not None
+cache_module = importlib.util.module_from_spec(cache_spec)
+sys.modules[cache_spec.name] = cache_module
+cache_spec.loader.exec_module(cache_module)
+if CREATED_DISCORD_STUB:
+    sys.modules.pop("discord", None)
+
+ChipRankCache = cache_module.ChipRankCache
+
+
+class _FakeAvatar:
+    def __init__(self, key: str):
+        self.url = f"https://cdn.invalid/{key}.png"
+
+    def replace(self, **kwargs):
+        return self
+
+    async def read(self):
+        raise OSError("CDN intentionally unavailable in unit test")
+
+
+class _FakeMember:
+    def __init__(self, guild, user_id: int, name: str, *, bot: bool = False):
+        self.guild = guild
+        self.id = user_id
+        self.display_name = name
+        self.bot = bot
+        self.display_avatar = _FakeAvatar(str(user_id))
+
+
+class _FakeGuild:
+    def __init__(self):
+        self.id = 55
+        self.name = "Servidor Games"
+        self.members = {}
+
+    def get_member(self, user_id: int):
+        return self.members.get(int(user_id))
+
+
+class _FakeBot:
+    def __init__(self, guild):
+        self.guilds = [guild]
+        self._guild = guild
+
+    def get_guild(self, guild_id: int):
+        return self._guild if int(guild_id) == self._guild.id else None
+
+
+class _FakeDB:
+    def __init__(self, rows):
+        self.rows = rows
+        self.listeners = []
+
+    def add_chip_change_listener(self, callback):
+        self.listeners.append(callback)
+
+    def remove_chip_change_listener(self, callback):
+        self.listeners = [item for item in self.listeners if item != callback]
+
+    def _current_week_key(self):
+        return "2026-W35"
+
+    def get_chip_rank_snapshot(self, guild_id: int):
+        return list(self.rows)
+
+    def get_user_chips(self, guild_id: int, user_id: int, *, default: int = 100):
+        for row in self.rows:
+            if int(row["user_id"]) == int(user_id):
+                return int(row["chips"])
+        return default
+
+    def get_user_chip_week_delta(self, guild_id: int, user_id: int):
+        for row in self.rows:
+            if int(row["user_id"]) == int(user_id):
+                return int(row["weekly_delta"])
+        return 0
+
+
+class GamesRankCacheTests(unittest.TestCase):
+    def test_shared_image_filters_departed_users_and_preserves_ties(self) -> None:
+        async def scenario() -> None:
+            guild = _FakeGuild()
+            for user_id, name, is_bot in (
+                (1, "Alpha", False),
+                (2, "Beta", False),
+                (3, "Gamma", False),
+                (4, "Bot", True),
+            ):
+                guild.members[user_id] = _FakeMember(guild, user_id, name, bot=is_bot)
+            rows = [
+                {"user_id": 99, "chips": 999, "bonus_chips": 0, "weekly_delta": 10},
+                {"user_id": 4, "chips": 500, "bonus_chips": 0, "weekly_delta": 10},
+                {"user_id": 1, "chips": 200, "bonus_chips": 5, "weekly_delta": 37},
+                {"user_id": 2, "chips": 150, "bonus_chips": 8, "weekly_delta": -4},
+                {"user_id": 3, "chips": 150, "bonus_chips": 0, "weekly_delta": 0},
+            ]
+            db = _FakeDB(rows)
+            cache = ChipRankCache(_FakeBot(guild), db)
+            original_renderer = cache_module.render_rank_image
+            render_calls = 0
+
+            def counting_renderer(*args, **kwargs):
+                nonlocal render_calls
+                render_calls += 1
+                return original_renderer(*args, **kwargs)
+
+            cache_module.render_rank_image = counting_renderer
+            try:
+                response = await cache.get_rank(guild, guild.members[2])
+                self.assertEqual([row.user_id for row in response.top_rows], [1, 2, 3])
+                self.assertEqual([row.position for row in response.top_rows], [1, 2, 2])
+                self.assertIn("**#2**", response.requester_line)
+                self.assertIn("🔴 **-4**", response.requester_line)
+                self.assertNotIn("99", response.accessible_description)
+                with Image.open(BytesIO(response.image_bytes)) as image:
+                    self.assertEqual(image.format, "PNG")
+                cached_response = await cache.get_rank(guild, guild.members[3])
+                self.assertEqual(cached_response.image_bytes, response.image_bytes)
+                self.assertEqual(render_calls, 1)
+
+                # Uma mudança econômica invalida o snapshot e troca a ordem sem
+                # precisar procurar milhões de posições no comando.
+                await asyncio.sleep(0.05)
+                rows[2]["chips"] = 120
+                rows[3]["chips"] = 260
+                cache.invalidate(guild.id, 2)
+                updated = await cache.get_rank(guild, guild.members[2])
+                self.assertEqual([row.user_id for row in updated.top_rows], [2, 3, 1])
+                self.assertIn("**#1**", updated.requester_line)
+                self.assertEqual(render_calls, 2)
+            finally:
+                cache_module.render_rank_image = original_renderer
+                await cache.close()
+            self.assertEqual(db.listeners, [])
+
+        asyncio.run(scenario())
+
+
+if __name__ == "__main__":
+    unittest.main()

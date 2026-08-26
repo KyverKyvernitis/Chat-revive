@@ -1,4 +1,5 @@
 import asyncio
+import io
 import logging
 import random
 import re
@@ -639,8 +640,24 @@ class GamesCog(dcommands.Cog, GamesCore):
     async def rank(self, ctx: dcommands.Context):
         if not await self._ensure_games_command_entry(ctx, trigger_hint="rank"):
             return
-        embed = await self._make_chip_leaderboard_embed_async(ctx.guild, ctx.author)
-        await ctx.reply(embed=embed, mention_author=False)
+        try:
+            response = await self._chip_rank_cache.get_rank(ctx.guild, ctx.author)
+            image = discord.File(io.BytesIO(response.image_bytes), filename="rank-fichas.png")
+            await ctx.reply(
+                file=image,
+                view=self._make_chip_rank_view(response),
+                mention_author=False,
+            )
+        except Exception:
+            log.exception(
+                "games-rank: falha ao montar imagem guild=%s user=%s",
+                getattr(ctx.guild, "id", 0),
+                getattr(ctx.author, "id", 0),
+            )
+            await ctx.reply(
+                view=self._make_chip_rank_fallback_view(ctx.guild, ctx.author),
+                mention_author=False,
+            )
 
     @dcommands.command(name="race", aliases=["raça"])
     async def race_command(self, ctx: dcommands.Context):
@@ -938,6 +955,10 @@ class GamesCog(dcommands.Cog, GamesCore):
 
     @dcommands.Cog.listener()
     async def on_ready(self):
+        try:
+            self._chip_rank_cache.start()
+        except Exception as e:
+            print(f"[games] erro ao aquecer rank de fichas: {e!r}")
         if self._gincana_timed_effects_rehydrated:
             return
         self._gincana_timed_effects_rehydrated = True
@@ -957,9 +978,40 @@ class GamesCog(dcommands.Cog, GamesCore):
     @dcommands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         try:
+            self._chip_rank_cache.member_changed(before, after)
+        except Exception as e:
+            print(f"[games] erro ao atualizar avatar/nome do rank: {e!r}")
+        try:
             await self._handle_gincana_member_update(before, after)
         except Exception as e:
             print(f"[games] erro no on_member_update: {e!r}")
+
+    @dcommands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        self._chip_rank_cache.invalidate_member(member)
+
+    @dcommands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        self._chip_rank_cache.invalidate_member(member)
+
+    @dcommands.Cog.listener()
+    async def on_user_update(self, before: discord.User, after: discord.User):
+        self._chip_rank_cache.user_changed(before, after)
+
+    @dcommands.Cog.listener()
+    async def on_guild_update(self, before: discord.Guild, after: discord.Guild):
+        self._chip_rank_cache.guild_changed(before, after)
+
+    @dcommands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        self._chip_rank_cache.invalidate(guild.id, delay=0.0)
+
+    @dcommands.Cog.listener()
+    async def on_guild_remove(self, guild: discord.Guild):
+        self._chip_rank_cache.drop_guild(guild.id)
+
+    async def cog_unload(self):
+        await self._chip_rank_cache.close()
 
     @dcommands.Cog.listener()
     async def on_message(self, message: discord.Message):

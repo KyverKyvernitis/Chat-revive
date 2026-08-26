@@ -3,8 +3,8 @@
 Organização:
 - `/chatbot profile <acao> [profile?]` — acao=criar|listar|editar|apagar|ativar|desativar
 - `/chatbot memoria` — reseta toda a memória do servidor
-- `/chatbotadmin master <acao>` — acao=ver|editar|transferir (management guild only)
-- `/chatbotadmin reset_global` — apaga toda memória cross-guild (management guild only)
+- `/chatbotadmin master <acao>` — ver/editar no config server; transferir por operador
+- `/chatbotadmin reset_global` — apaga memória cross-guild (dono/operador)
 - Todos exigem permissão Manage Guild (staff).
 - `/reset` — qualquer membro, limpa a memória PESSOAL dele.
 
@@ -12,10 +12,9 @@ Em vez de subgroups (que ficam poluídos no autocomplete do Discord), usamos
 comandos diretos com `app_commands.Choice` pra escolher a ação. Fica apenas 2
 entradas enxutas em `/chatbot` em vez de subgroups espalhados.
 
-Comandos de "operador do bot" (master prompt, reset cross-guild) ficam em um
-grupo separado `/chatbotadmin` registrado só na MANAGEMENT_GUILD_ID. Eles não
-poderiam ficar dentro de /chatbot porque discord.py exige que toda a Group
-seja guild-restricted juntos — não dá pra restringir só alguns subcomandos.
+Comandos globais sensíveis ficam no grupo separado `/chatbotadmin`. A
+autorização é feita por subcomando no runtime: staff do config server pode
+ver/editar, enquanto transferência e reset exigem dono/operador do bot.
 
 Implementação como Mixin: a classe `ChatbotCommandsMixin` é herdada pelo
 `ChatbotCog` em `cog.py`. Isso mantém o `ChatbotCog` como UM cog só (um único
@@ -29,14 +28,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
 
 from . import constants as C
-from .profiles import ChatbotProfile
+from .profiles import ProfileLimitReached
 from .persona import (
     build_persona_generation_payload,
     build_user_style_system_prompt,
@@ -60,12 +59,6 @@ from .views import (
 log = logging.getLogger(__name__)
 
 
-# Decorador que checa permissão Manage Guild (pra comandos de gerenciamento).
-# Usa app_commands.default_permissions que esconde o comando pra não-staff
-# na UI do Discord, MAIS um check em runtime (defense in depth).
-_STAFF_PERMS = app_commands.default_permissions(manage_guild=True)
-
-
 async def _staff_check(interaction: discord.Interaction) -> bool:
     """Check adicional em runtime — pra casos onde o Discord mostra o comando
     mesmo sem permissão (admins do server, ou se o default_permissions não
@@ -80,6 +73,22 @@ async def _staff_check(interaction: discord.Interaction) -> bool:
         return True
     perms = member.guild_permissions
     return perms.manage_guild or perms.administrator
+
+
+async def _operator_check(interaction: discord.Interaction) -> bool:
+    """Dono do bot ou operador explicitamente configurado no ambiente."""
+    try:
+        if await interaction.client.is_owner(interaction.user):
+            return True
+    except Exception:
+        pass
+    configured: set[int] = set()
+    for raw in os.environ.get("CHATBOT_OPERATOR_IDS", "").split(","):
+        try:
+            configured.add(int(raw.strip()))
+        except ValueError:
+            continue
+    return int(getattr(interaction.user, "id", 0) or 0) in configured
 
 
 async def _profile_autocomplete(
@@ -138,7 +147,7 @@ def _safe_slash(func):
     async def wrapper(self, interaction: discord.Interaction, *args, **kwargs):
         try:
             return await func(self, interaction, *args, **kwargs)
-        except Exception as exc:
+        except Exception:
             log.exception("chatbot: exceção em %s", func.__name__)
             err_msg = (
                 "❌ Erro interno no comando. Já anotei nos logs, tenta de novo "
@@ -179,18 +188,12 @@ class ChatbotCommandsMixin:
         default_permissions=discord.Permissions(manage_guild=True),
     )
 
-    # Grupo separado pra comandos cross-guild / "operador do bot" — só fica
-    # registrado e visível na MANAGEMENT_GUILD. discord.py não permite restringir
-    # subcomandos individuais de um Group por guild ("child commands cannot have
-    # default guilds set"), então a única forma de ter comando guild-restricted
-    # é criar um Group inteiro restrito. Por isso esses comandos NÃO ficam
-    # dentro de /chatbot — usar /chatbot teria forçado todo o grupo a virar
-    # guild-only, escondendo /chatbot profile do resto dos servers.
+    # Grupo global separado para operações cross-guild. Não usamos
+    # default_permissions aqui porque isso bloquearia até um operador explícito
+    # sem Manage Guild; cada handler aplica o check correto no runtime.
     chatbot_admin = app_commands.Group(
         name="chatbotadmin",
-        description="Operações administrativas do bot (management guild only)",
-        default_permissions=discord.Permissions(manage_guild=True),
-        guild_ids=[C.MANAGEMENT_GUILD_ID],
+        description="Operações administrativas globais do bot",
     )
 
     # --- Verificação de estado do cog -----------------------------------------
@@ -297,9 +300,10 @@ class ChatbotCommandsMixin:
             )
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         prof = await self._profiles.get_profile(guild.id, profile)
         if prof is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Profile não encontrado.", ephemeral=True
             )
             return
@@ -309,7 +313,7 @@ class ChatbotCommandsMixin:
             prompt=f"Apagar **{discord.utils.escape_markdown(prof.name)}**? Essa ação é irreversível.",
             confirm_label="Apagar",
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             view.prompt, view=view, ephemeral=True
         )
         await view.wait()
@@ -324,9 +328,7 @@ class ChatbotCommandsMixin:
             )
             return
 
-        # Limpa as memórias órfãs daquele profile (pessoal + coletiva).
-        # Fire-and-forget: se falhar, o `clear_all_guild_memory` do reset_server
-        # pega depois. Não bloqueia a resposta ao admin.
+        # Limpa as memórias órfãs daquele profile antes de confirmar a operação.
         memory_count = 0
         try:
             memory_count = await self._memory.clear_profile_memory(
@@ -363,9 +365,10 @@ class ChatbotCommandsMixin:
             )
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         profiles = await self._profiles.list_profiles(guild.id)
         if not profiles:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Nenhum profile ainda. Use `/chatbot profile criar` para o primeiro "
                 f"(limite: {C.MAX_PROFILES_PER_GUILD} por servidor).",
                 ephemeral=True,
@@ -377,7 +380,6 @@ class ChatbotCommandsMixin:
         ]
         for p in profiles:
             status = "⭐ ativo" if p.active else "inativo"
-            kind = "persona" if p.profile_kind == C.PROFILE_KIND_USER_STYLE else "profile"
             prompt_preview = (p.system_prompt or "").strip().replace("\n", " ")
             if len(prompt_preview) > 80:
                 prompt_preview = prompt_preview[:77] + "..."
@@ -395,7 +397,7 @@ class ChatbotCommandsMixin:
         )
 
         text = "\n".join(lines)
-        await interaction.response.send_message(text[:2000], ephemeral=True)
+        await interaction.followup.send(text[:2000], ephemeral=True)
 
     # --- /chatbot ativar <profile> --------------------------------------------
 
@@ -613,8 +615,15 @@ class ChatbotCommandsMixin:
         avatar_url = resolve_member_avatar_url(target)
 
         if config.action == "remove":
+            existing_persona = await self._profiles.get_user_style_profile(
+                guild.id, config.target_user_id,
+            )
             deleted = await self._profiles.delete_user_style_profile(guild.id, config.target_user_id)
             if deleted:
+                if existing_persona is not None and self._memory is not None:
+                    await self._memory.clear_profile_memory(
+                        guild.id, existing_persona.profile_id,
+                    )
                 await interaction.followup.send(
                     f"Persona de **{discord.utils.escape_markdown(display_name)}** removida.",
                     ephemeral=True,
@@ -625,17 +634,35 @@ class ChatbotCommandsMixin:
                 )
             return
 
-        existing = await self._profiles.get_user_style_profile(guild.id, config.target_user_id)
-        if existing is None:
-            count = await self._profiles.count_profiles(guild.id)
-            if count >= C.MAX_PROFILES_PER_GUILD:
-                await interaction.followup.send(
-                    f"Limite de {C.MAX_PROFILES_PER_GUILD} profiles atingido. "
-                    "Apague um profile antes de criar uma persona nova.",
-                    ephemeral=True,
-                )
-                return
+        lease = await self._admission.try_admit(
+            "persona", guild_id=guild.id, user_id=interaction.user.id,
+        )
+        if lease is None:
+            await interaction.followup.send(
+                "⏳ Já há uma persona sua em processamento ou a fila está cheia.",
+                ephemeral=True,
+            )
+            return
+        async with lease:
+            await self._generate_persona_profile(
+                interaction=interaction,
+                config=config,
+                guild=guild,
+                channel=channel,
+                display_name=display_name,
+                avatar_url=avatar_url,
+            )
 
+    async def _generate_persona_profile(
+        self,
+        *,
+        interaction: discord.Interaction,
+        config: PersonaModalConfig,
+        guild: discord.Guild,
+        channel,
+        display_name: str,
+        avatar_url: str,
+    ) -> None:
         try:
             sample_result = await collect_user_persona_samples(
                 channel=channel,
@@ -669,15 +696,14 @@ class ChatbotCommandsMixin:
             avoid_exact_copy=config.options.avoid_exact_copy,
         )
         try:
-            async with self._provider_sem:
-                raw = await asyncio.wait_for(
-                    self._router.chat(
-                        system=system,
-                        messages=messages,
-                        temperature=C.PERSONA_GENERATION_TEMPERATURE,
-                    ),
-                    timeout=C.PERSONA_GENERATION_TIMEOUT_SECONDS,
-                )
+            raw = await asyncio.wait_for(
+                self._router.chat(
+                    system=system,
+                    messages=messages,
+                    temperature=C.PERSONA_GENERATION_TEMPERATURE,
+                ),
+                timeout=C.PERSONA_GENERATION_TIMEOUT_SECONDS,
+            )
         except AllProvidersExhausted:
             await interaction.followup.send(
                 "Nenhum provider de IA está disponível agora.", ephemeral=True
@@ -699,17 +725,25 @@ class ChatbotCommandsMixin:
             return
 
         system_prompt = build_user_style_system_prompt(parsed.style_prompt)
-        profile, created = await self._profiles.upsert_user_style_profile(
-            guild_id=guild.id,
-            source_user_id=config.target_user_id,
-            source_channel_id=config.channel_id,
-            created_by=interaction.user.id,
-            fallback_name=display_name,
-            fallback_avatar_url=avatar_url,
-            system_prompt=system_prompt,
-            sample_count=len(sample_result.samples),
-            activate=config.options.activate_after_create,
-        )
+        try:
+            profile, created = await self._profiles.upsert_user_style_profile(
+                guild_id=guild.id,
+                source_user_id=config.target_user_id,
+                source_channel_id=config.channel_id,
+                created_by=interaction.user.id,
+                fallback_name=display_name,
+                fallback_avatar_url=avatar_url,
+                system_prompt=system_prompt,
+                sample_count=len(sample_result.samples),
+                activate=config.options.activate_after_create,
+            )
+        except ProfileLimitReached:
+            await interaction.followup.send(
+                f"Limite de {C.MAX_PROFILES_PER_GUILD} profiles atingido. "
+                "Apague um profile antes de criar uma persona nova.",
+                ephemeral=True,
+            )
+            return
 
         action_text = "criada" if created else "atualizada"
         active_text = " e ativada" if profile.active else ""
@@ -778,10 +812,8 @@ class ChatbotCommandsMixin:
             return
 
         extrovert_store = self._extrovert
-        previous = await extrovert_store.get_config(guild.id)
-
-        selected_profiles = list(config.profile_ids) or list(previous.profile_ids)
-        selected_channels = list(config.channel_ids) or list(previous.channel_ids)
+        selected_profiles = list(config.profile_ids)
+        selected_channels = list(config.channel_ids)
 
         all_profiles = await self._profiles.list_profiles(guild.id)
         valid_profile_ids = {p.profile_id for p in all_profiles}
@@ -973,12 +1005,8 @@ class ChatbotCommandsMixin:
         await interaction.response.send_modal(modal)
 
     async def _do_master_transferir(
-        self, interaction: discord.Interaction,
+        self, interaction: discord.Interaction, destino: str,
     ):
-        # IMPORTANTE: este comando faz check invertido. O user precisa estar
-        # NO config_guild_id ATUAL (não no novo) pra poder transferir.
-        # Isso previne hijack: ninguém pode "pegar" o bot criando um server
-        # e rodando o comando lá.
         master = getattr(self, "_master", None)
         if master is None:
             await interaction.response.send_message(
@@ -986,40 +1014,25 @@ class ChatbotCommandsMixin:
             )
             return
 
-        if not await _staff_check(interaction):
+        if not await _operator_check(interaction):
             await interaction.response.send_message(
-                "Só staff (Manage Server) pode transferir a config.",
+                "Só o dono do bot ou um operador autorizado pode transferir a config.",
                 ephemeral=True,
             )
             return
-
-        guild = interaction.guild
-        if guild is None:
+        try:
+            target_id = int(str(destino or "").strip())
+        except ValueError:
+            target_id = 0
+        target = self.bot.get_guild(target_id) if target_id > 0 else None
+        if target is None:
             await interaction.response.send_message(
-                "Só funciona em servidor.", ephemeral=True
+                "Informe em `destino` o ID de um servidor em que o bot esteja.",
+                ephemeral=True,
             )
             return
-
         cfg = await master.get()
-
-        # Edge case: se o config_guild_id atual for inválido (ex: server não
-        # existe mais), aceita a transferência de qualquer server com staff.
-        # Permite "recuperação" caso o config original seja perdido.
-        current_config_server = self.bot.get_guild(int(cfg.config_guild_id))
-        if current_config_server is None:
-            # Config server atual é inacessível — libera transferência
-            pass
-        elif int(guild.id) != int(cfg.config_guild_id):
-            await interaction.response.send_message(
-                f"❌ Você precisa estar **no config server atual** pra "
-                f"transferir a autoridade. Config atual: "
-                f"`{cfg.config_guild_id}` (`{current_config_server.name}`).\n"
-                f"-# Rode o comando lá pra mudar a config pra este servidor.",
-                ephemeral=True,
-            )
-            return
-        # Se já é o mesmo, operação é no-op mas avisamos
-        if int(guild.id) == int(cfg.config_guild_id):
+        if target_id == int(cfg.config_guild_id):
             await interaction.response.send_message(
                 "Este servidor **já é** o config server. Nada a fazer.",
                 ephemeral=True,
@@ -1030,8 +1043,8 @@ class ChatbotCommandsMixin:
         view = ConfirmView(
             requester_id=interaction.user.id,
             prompt=(
-                f"⚠️ Transferir autoridade do prompt mestre pra **{guild.name}** "
-                f"(`{guild.id}`)? O server antigo (`{cfg.config_guild_id}`) "
+                f"⚠️ Transferir autoridade do prompt mestre pra **{target.name}** "
+                f"(`{target.id}`)? O server antigo (`{cfg.config_guild_id}`) "
                 f"perderá o acesso ao `/chatbotadmin master`."
             ),
             confirm_label="Transferir",
@@ -1044,11 +1057,11 @@ class ChatbotCommandsMixin:
             return
 
         new_cfg = await master.set_config_guild(
-            guild.id,
+            target.id,
             updated_by=interaction.user.id,
         )
         await interaction.followup.send(
-            f"✅ Config server atualizado pra **{guild.name}** "
+            f"✅ Config server atualizado pra **{target.name}** "
             f"(`{new_cfg.config_guild_id}`).",
             ephemeral=True,
         )
@@ -1135,9 +1148,7 @@ class ChatbotCommandsMixin:
         await self._do_memoria_reset_server(interaction)
 
     # --- /chatbotadmin master <acao> ------------------------------------------
-    # Era /chatbot master, mas movido pro grupo `chatbotadmin` (guild-restrict)
-    # porque só faz sentido na management guild — o comando edita o prompt
-    # mestre global do bot, não tem por que aparecer pra staff de outras guilds.
+    # Grupo global: autorização granular ocorre nos handlers abaixo.
     @chatbot_admin.command(
         name="master",
         description="Ver, editar ou transferir o prompt mestre global",
@@ -1146,36 +1157,38 @@ class ChatbotCommandsMixin:
         acao=[
             app_commands.Choice(name="Ver prompt mestre", value="ver"),
             app_commands.Choice(name="Editar prompt mestre", value="editar"),
-            app_commands.Choice(name="Transferir config pra este servidor", value="transferir"),
+            app_commands.Choice(name="Transferir config para outro servidor", value="transferir"),
         ]
+    )
+    @app_commands.describe(
+        destino="ID do servidor de destino (obrigatório ao transferir)",
     )
     @_safe_slash
     async def chatbotadmin_master(
         self,
         interaction: discord.Interaction,
         acao: app_commands.Choice[str],
+        destino: str = "",
     ):
         if acao.value == "ver":
             await self._do_master_ver(interaction)
         elif acao.value == "editar":
             await self._do_master_editar(interaction)
         elif acao.value == "transferir":
-            await self._do_master_transferir(interaction)
+            await self._do_master_transferir(interaction, destino)
 
     # --- /chatbotadmin reset_global -------------------------------------------
     # Apaga TODA memória do chatbot — todas as guilds, todos os profiles,
-    # pessoal e coletiva. Só registrado na management guild via guild_ids
-    # do Group, então o autocomplete não mostra esse comando em outros servers.
-    # Mantemos confirmação dupla porque é destrutivo e cross-guild.
+    # pessoal e coletiva. O runtime exige dono/operador e confirmação explícita.
     @chatbot_admin.command(
         name="reset_global",
         description="Apagar TODA a memória do chatbot em TODAS as guilds (irreversível)",
     )
     @_safe_slash
     async def chatbotadmin_reset_global(self, interaction: discord.Interaction):
-        if not await _staff_check(interaction):
+        if not await _operator_check(interaction):
             await interaction.response.send_message(
-                "Só staff (Manage Server) pode rodar isso.",
+                "Só o dono do bot ou um operador autorizado pode rodar isso.",
                 ephemeral=True,
             )
             return
@@ -1218,6 +1231,90 @@ class ChatbotCommandsMixin:
     # Top-level (não em /chatbot) porque /chatbot é staff-only via
     # default_permissions. Imagegen é liberado pra qualquer membro.
 
+    async def _run_image_command(
+        self, interaction: discord.Interaction, *, prompt: str
+    ) -> None:
+        import io as _io
+        from . import imagegen as _imagegen
+
+        guild = interaction.guild
+        if guild is None or self._image_service is None:
+            return
+        active = await self._profiles.get_active_profile(guild.id)
+        if active is None:
+            await interaction.followup.send(
+                "Não há profile ativo neste servidor. A staff precisa ativar "
+                "um com `/chatbot profile acao:Ativar` antes.", ephemeral=True,
+            )
+            return
+        active = await self._profile_with_resolved_identity(guild, active)
+        channel_nsfw = bool(getattr(interaction.channel, "nsfw", False))
+        effective_nsfw = channel_nsfw and C.nsfw_enabled_for_guild(guild.id)
+        generated = await self._image_service.generate(
+            prompt=prompt, channel_is_nsfw=effective_nsfw, slot_acquired=True,
+        )
+        if not generated.ok or generated.image is None:
+            await interaction.followup.send(
+                _imagegen.build_image_failure_message(generated), ephemeral=True,
+            )
+            return
+
+        ext = _imagegen.generated_image_extension(generated.image.mime_type)
+        safe_name = "".join(c for c in active.name if c.isalnum())[:20] or "image"
+        filename = f"{safe_name}.{ext}"
+        caption = f"🖼️ Imagem gerada para: *{prompt[:200]}*"
+        channel = interaction.channel
+        if not isinstance(
+            channel,
+            (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread),
+        ):
+            await interaction.followup.send(
+                content=caption,
+                file=discord.File(_io.BytesIO(generated.image.data), filename=filename),
+            )
+            return
+        sent = await self._webhooks.send_as_profile(
+            channel=channel,
+            profile_name=active.name,
+            avatar_url=active.avatar_url,
+            content=caption,
+            files=[discord.File(_io.BytesIO(generated.image.data), filename=filename)],
+        )
+        if sent is None:
+            await interaction.followup.send(
+                content=caption,
+                file=discord.File(_io.BytesIO(generated.image.data), filename=filename),
+            )
+            return
+        await self._remember_sent_profile_message(
+            guild_id=guild.id, channel_id=channel.id,
+            message_id=sent.id, profile_id=active.profile_id,
+        )
+        if self._memory is not None:
+            is_private = bool(
+                isinstance(channel, discord.Thread)
+                and getattr(channel, "is_private", lambda: False)()
+            )
+            from .memory import visibility_scope_for
+            visibility = visibility_scope_for(
+                channel.id, is_nsfw=effective_nsfw, is_private=is_private,
+            )
+            epoch = await self._memory.capture_epoch(guild.id, interaction.user.id)
+            await self._persist_turn(
+                guild_id=guild.id,
+                profile_id=active.profile_id,
+                profile_revision=active.revision,
+                channel_id=channel.id,
+                visibility_scope=visibility,
+                epoch=epoch,
+                user_id=interaction.user.id,
+                user_name=str(getattr(interaction.user, "display_name", interaction.user.name)),
+                user_message=prompt,
+                assistant_message=f"[imagem gerada: {prompt[:500]}]",
+                user_history_size=active.history_size,
+            )
+        await interaction.followup.send("✅ Imagem enviada no canal.", ephemeral=True)
+
     @app_commands.command(
         name="imagem",
         description="Gera uma imagem a partir da descrição (usa o profile ativo)",
@@ -1231,115 +1328,50 @@ class ChatbotCommandsMixin:
         interaction: discord.Interaction,
         prompt: str,
     ):
+        prompt = prompt.strip()
+        if not prompt:
+            await interaction.response.send_message(
+                "Descreva a imagem que você quer gerar.", ephemeral=True
+            )
+            return
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(
                 "Este comando só funciona em servidor.", ephemeral=True
             )
             return
-        if self._profiles is None or self._webhooks is None:
+        if self._profiles is None or self._webhooks is None or self._image_service is None:
             await interaction.response.send_message(
                 "Chatbot não está pronto.", ephemeral=True
             )
             return
 
-        # Rate-limit por usuário — mesma lógica do chat normal
+        if C.SAFE_MODE:
+            await interaction.response.send_message(
+                "Geração de imagem está temporariamente em modo de recuperação.",
+                ephemeral=True,
+            )
+            return
         if self._is_user_on_cooldown(guild.id, interaction.user.id):
             await interaction.response.send_message(
                 "⌛ Espera um pouco antes de pedir outra imagem.", ephemeral=True
             )
             return
-        self._apply_user_cooldown(guild.id, interaction.user.id)
-
-        # Pega profile ativo do server pra dar identidade à imagem
-        active = await self._profiles.get_active_profile(guild.id)
-        if active is None:
+        lease = await self._admission.try_admit(
+            "image", guild_id=guild.id, user_id=interaction.user.id,
+        )
+        if lease is None:
             await interaction.response.send_message(
-                "Não há profile ativo neste servidor. A staff precisa ativar "
-                "um com `/chatbot profile acao:Ativar` antes.",
+                "⏳ A fila de imagens está cheia ou você já tem um pedido em andamento.",
                 ephemeral=True,
             )
             return
-
-        # Imagegen demora, então defer a interaction pra não estourar 3s
         await interaction.response.defer(thinking=True)
-
-        from . import imagegen as _imagegen
-        import io as _io
-
-        try:
-            # NSFW só vale se: (a) canal é age-restricted no Discord, E
-            # (b) a guild está na allowlist de NSFW (constants.nsfw_enabled_for_guild).
-            # Fora da allowlist, força channel_is_nsfw=False — o imagegen vai
-            # tratar como SFW e recusar prompts adultos com a mesma mensagem
-            # genérica que daria pra um canal não-NSFW qualquer.
-            channel_nsfw_flag = bool(getattr(interaction.channel, "nsfw", False))
-            effective_nsfw = channel_nsfw_flag and C.nsfw_enabled_for_guild(guild.id)
-            generated = await _imagegen.generate_image(
-                self._session,
-                prompt=prompt.strip()[:1000],
-                channel_is_nsfw=effective_nsfw,
+        async with lease:
+            self._apply_user_cooldown(guild.id, interaction.user.id)
+            await self._run_image_command(
+                interaction, prompt=prompt[:1000],
             )
-        except Exception:
-            log.exception("chatbot: /imagem falhou")
-            generated = None
-
-        if generated is None or not generated.ok or generated.image is None:
-            if generated is None:
-                err_msg = (
-                    "🖼️ Não consegui gerar a imagem agora. "
-                    "Tenta reescrever o pedido ou espera um pouco."
-                )
-            else:
-                err_msg = _imagegen.build_image_failure_message(generated)
-            await interaction.followup.send(
-                err_msg,
-                ephemeral=True,
-            )
-            return
-
-        # Envia via webhook (com identidade do profile ativo) no canal onde
-        # foi invocado, e confirma na interaction
-        ext = "png" if "png" in (generated.image.mime_type or "") else "jpg"
-        safe_name = "".join(c for c in active.name if c.isalnum())[:20] or "image"
-        filename = f"{safe_name}.{ext}"
-
-        channel = interaction.channel
-        if not isinstance(
-            channel,
-            (discord.TextChannel, discord.VoiceChannel,
-             discord.StageChannel, discord.Thread),
-        ):
-            # Canal esquisito — manda só pela interaction
-            file = discord.File(_io.BytesIO(generated.image.data), filename=filename)
-            await interaction.followup.send(
-                content=f"🖼️ Imagem gerada para: *{prompt[:200]}*",
-                file=file,
-            )
-            return
-
-        file = discord.File(_io.BytesIO(generated.image.data), filename=filename)
-        caption = f"🖼️ Imagem gerada para: *{prompt[:200]}*"
-        sent = await self._webhooks.send_as_profile(
-            channel=channel,
-            profile_name=active.name,
-            avatar_url=active.avatar_url,
-            content=caption[:1900],
-            files=[file],
-        )
-        if sent is None:
-            # Fallback: manda direto na interaction
-            file2 = discord.File(_io.BytesIO(generated.image.data), filename=filename)
-            await interaction.followup.send(
-                content=caption[:1900],
-                file=file2,
-            )
-            return
-        # Deu certo via webhook — confirma na interaction sem duplicar
-        await interaction.followup.send(
-            f"✅ Imagem enviada no canal.",
-            ephemeral=True,
-        )
 
     # --- /reset (sem /chatbot) — qualquer membro ------------------------------
 
@@ -1362,6 +1394,8 @@ class ChatbotCommandsMixin:
             )
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         # Apaga memória do user com TODOS os profiles do server (sem
         # profile_id = wildcard). É o que o user espera: "esquece tudo
         # que sabe sobre mim aqui".
@@ -1372,8 +1406,8 @@ class ChatbotCommandsMixin:
             msg = (
                 f"✅ Sua memória pessoal com o chatbot foi resetada "
                 f"({count} registros). O bot vai começar do zero com você.\n"
-                f"-# A memória coletiva do servidor não foi afetada."
+                f"-# As conversas dos outros membros não foram apagadas."
             )
         else:
             msg = "Você ainda não tinha memória salva com o chatbot."
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)

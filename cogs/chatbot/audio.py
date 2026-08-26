@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 from typing import Optional
 
@@ -23,6 +24,15 @@ import aiohttp
 from . import constants as C
 
 log = logging.getLogger(__name__)
+
+
+async def _read_response_capped(response, limit: int) -> Optional[bytes]:
+    data = bytearray()
+    async for chunk in response.content.iter_chunked(16 * 1024):
+        data.extend(chunk)
+        if len(data) > limit:
+            return None
+    return bytes(data)
 
 
 # -----------------------------------------------------------------------------
@@ -48,7 +58,7 @@ async def transcribe_audio(
         language: ISO-639-1 do idioma esperado (melhora accuracy + latência).
                   Default 'pt' pro nosso bot. Passar None deixa Whisper detectar.
     """
-    if not audio_bytes:
+    if not audio_bytes or len(audio_bytes) > C.MAX_AUDIO_SIZE_BYTES:
         return None
 
     data = aiohttp.FormData()
@@ -69,13 +79,17 @@ async def transcribe_audio(
             timeout=timeout,
         ) as resp:
             if resp.status >= 400:
-                body = await resp.text()
+                body_bytes = await _read_response_capped(resp, 4096)
+                body = (body_bytes or b"").decode("utf-8", errors="replace")
                 log.warning(
                     "chatbot: Whisper HTTP %s: %s",
                     resp.status, body[:200],
                 )
                 return None
-            payload = await resp.json()
+            payload_bytes = await _read_response_capped(resp, 256 * 1024)
+            if payload_bytes is None:
+                raise ValueError("resposta Whisper grande demais")
+            payload = json.loads(payload_bytes.decode("utf-8"))
             text = str(payload.get("text") or "").strip()
             if not text:
                 return None
@@ -137,6 +151,9 @@ async def synthesize_speech(
         async for chunk in communicate.stream():
             if chunk.get("type") == "audio":
                 buf.write(chunk.get("data", b""))
+                if buf.tell() > C.MAX_TTS_OUTPUT_BYTES:
+                    log.warning("chatbot: TTS excedeu limite de bytes")
+                    return None
         data = buf.getvalue()
         if not data:
             return None

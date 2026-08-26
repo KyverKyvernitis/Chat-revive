@@ -1,26 +1,19 @@
-"""Clientes HTTP mínimos para Groq e Gemini.
+"""Router HTTP leve com fallback real de texto e visão.
 
-Decisão explícita de NÃO usar SDKs (groq, google-genai). Motivos:
-- groq SDK instala httpx + pydantic v2 (~30MB, redundantes com aiohttp que já temos)
-- google-genai instala protobuf + grpc (~50MB, pesado demais pra VPS de 1GB)
-- chamadas HTTP diretas com aiohttp são ~40 linhas e dão controle total
-  sobre timeout, retry, cancelamento e tratamento de 429
-
-Este módulo expõe uma interface uniforme:
-
-    client = ProviderRouter(aiohttp_session, groq_key, gemini_key)
-    reply = await client.chat(messages=[...], system="...", temperature=0.8)
-
-`messages` é formato padrão OpenAI ({"role": "user"|"assistant", "content": "..."}).
+Estados são mantidos por provider/modelo, então um modelo removido não derruba
+os demais. Há deadline total, respostas vazias são rejeitadas e o fallback
+Gemini recebe os bytes das imagens — nunca afirma que viu algo que não recebeu.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -30,62 +23,43 @@ log = logging.getLogger(__name__)
 
 
 class ProviderError(Exception):
-    """Erro ao chamar o provider. Pode incluir causa HTTP."""
-
-    def __init__(self, message: str, *, status: Optional[int] = None, retry_after: Optional[float] = None):
+    def __init__(
+        self, message: str, *, status: Optional[int] = None,
+        retry_after: Optional[float] = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after
 
 
 class RateLimitError(ProviderError):
-    """HTTP 429. retry_after indica quanto esperar (ou None)."""
+    pass
 
 
 class AllProvidersExhausted(ProviderError):
-    """Todos os providers falharam — usuário vai receber mensagem genérica."""
+    pass
 
 
 @dataclass
 class ChatMessage:
-    """Mensagem do histórico enviada ao modelo.
-
-    Se `image_urls` estiver preenchido, a mensagem usa o formato multimodal
-    da OpenAI: `content` vira uma lista com um bloco `text` + N blocos
-    `image_url`. O provider decide se suporta — provider sem visão ignora
-    as imagens (recomendação: usar ChatMessage.content simples pra texto
-    puro e só adicionar image_urls quando realmente tem imagem, pra não
-    fazer request mais cara à toa).
-    """
-    role: str  # "user" ou "assistant"
+    role: str
     content: str
     image_urls: list[str] = field(default_factory=list)
 
     def to_openai_payload(self) -> dict:
-        """Serializa pro formato esperado pela API OpenAI-compatible.
-
-        Sem imagens: `{role, content: str}`.
-        Com imagens: `{role, content: [{type:"text",...}, {type:"image_url",...}, ...]}`.
-        """
         if not self.image_urls:
             return {"role": self.role, "content": self.content}
-        # Formato multimodal
         blocks: list[dict] = [{"type": "text", "text": self.content}]
-        for url in self.image_urls[:5]:  # Groq limita a 5 imagens
-            blocks.append({
-                "type": "image_url",
-                "image_url": {"url": url},
-            })
+        for url in self.image_urls[:C.MAX_IMAGES_PER_MESSAGE]:
+            blocks.append({"type": "image_url", "image_url": {"url": url}})
         return {"role": self.role, "content": blocks}
 
 
 @dataclass
 class _ProviderState:
-    """Estado de cooldown interno após 429. Evita marretar um provider que
-    acabou de retornar rate-limit. Não persiste — reseta a cada reinício."""
-
     next_allowed_monotonic: float = 0.0
     consecutive_failures: int = 0
+    last_status: int = 0
 
     def is_available(self) -> bool:
         return time.monotonic() >= self.next_allowed_monotonic
@@ -93,17 +67,68 @@ class _ProviderState:
     def mark_success(self) -> None:
         self.consecutive_failures = 0
         self.next_allowed_monotonic = 0.0
+        self.last_status = 0
 
-    def mark_failure(self, cooldown_seconds: float) -> None:
+    def mark_failure(self, cooldown_seconds: float, *, status: int = 0) -> None:
         self.consecutive_failures += 1
-        # exponential backoff com teto em 5 minutos
-        backoff = min(300.0, cooldown_seconds * (2 ** min(self.consecutive_failures - 1, 4)))
-        self.next_allowed_monotonic = time.monotonic() + backoff
+        factor = 2 ** min(self.consecutive_failures - 1, 4)
+        self.next_allowed_monotonic = time.monotonic() + min(900.0, cooldown_seconds * factor)
+        self.last_status = int(status)
+
+
+def _retry_after(resp: aiohttp.ClientResponse) -> Optional[float]:
+    raw = resp.headers.get("retry-after")
+    try:
+        return max(1.0, min(900.0, float(raw))) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ProviderError("deadline total dos providers esgotado")
+    return min(C.PROVIDER_TIMEOUT_SECONDS, remaining)
+
+
+async def _read_limited_bytes(
+    response: aiohttp.ClientResponse, *, limit: int,
+) -> bytes:
+    raw_length = response.headers.get("Content-Length")
+    try:
+        declared = int(raw_length) if raw_length else 0
+    except (TypeError, ValueError):
+        declared = 0
+    if declared > limit:
+        raise ProviderError("resposta do provider excede o limite")
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        body.extend(chunk)
+        if len(body) > limit:
+            raise ProviderError("resposta do provider excede o limite")
+    return bytes(body)
+
+
+async def _read_json_limited(response: aiohttp.ClientResponse):
+    body = await _read_limited_bytes(
+        response, limit=C.MAX_PROVIDER_RESPONSE_BYTES,
+    )
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProviderError("provider retornou JSON inválido") from exc
+
+
+async def _read_error_excerpt(response: aiohttp.ClientResponse) -> str:
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(1024):
+        body.extend(chunk)
+        if len(body) >= 4096:
+            break
+    return bytes(body[:4096]).decode("utf-8", errors="replace")[:300]
 
 
 class _GroqClient:
-    """Chamadas ao endpoint OpenAI-compatível do Groq."""
-
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     def __init__(self, session: aiohttp.ClientSession, api_key: str):
@@ -111,104 +136,123 @@ class _GroqClient:
         self._api_key = api_key
 
     async def chat(
-        self,
-        *,
-        system: str,
-        messages: list[ChatMessage],
-        temperature: float,
-        model: str,
+        self, *, system: str, messages: list[ChatMessage], temperature: float,
+        model: str, timeout_seconds: float,
     ) -> str:
         payload = {
             "model": model,
             "messages": [{"role": "system", "content": system}]
-            + [m.to_openai_payload() for m in messages],
+            + [message.to_openai_payload() for message in messages],
             "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-            "max_tokens": C.MAX_RESPONSE_TOKENS,
+            "max_completion_tokens": C.MAX_RESPONSE_TOKENS,
             "stream": False,
         }
+        # Evita gastar tokens de raciocínio oculto em conversa casual.
+        if model.startswith("openai/gpt-oss"):
+            payload.update({"reasoning_effort": "low", "include_reasoning": False})
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-
-        timeout = aiohttp.ClientTimeout(total=C.PROVIDER_TIMEOUT_SECONDS)
+        timeout = aiohttp.ClientTimeout(total=max(0.1, timeout_seconds))
         try:
             async with self._session.post(
-                self.BASE_URL,
-                json=payload,
-                headers=headers,
-                timeout=timeout,
+                self.BASE_URL, json=payload, headers=headers, timeout=timeout,
             ) as resp:
                 if resp.status == 429:
-                    retry_after_hdr = resp.headers.get("retry-after")
-                    try:
-                        retry_after = float(retry_after_hdr) if retry_after_hdr else None
-                    except ValueError:
-                        retry_after = None
                     raise RateLimitError(
-                        f"Groq rate-limit ({model})",
-                        status=429,
-                        retry_after=retry_after,
+                        f"Groq rate-limit ({model})", status=429,
+                        retry_after=_retry_after(resp),
                     )
                 if resp.status >= 400:
-                    body = await resp.text()
+                    body = await _read_error_excerpt(resp)
                     raise ProviderError(
-                        f"Groq HTTP {resp.status}: {body[:300]}",
-                        status=resp.status,
+                        f"Groq HTTP {resp.status}: {body[:300]}", status=resp.status,
                     )
-                data = await resp.json()
-        except asyncio.TimeoutError:
-            raise ProviderError(f"Groq timeout após {C.PROVIDER_TIMEOUT_SECONDS}s")
-        except aiohttp.ClientError as e:
-            raise ProviderError(f"Groq erro de rede: {e}")
-
+                data = await _read_json_limited(resp)
+        except asyncio.TimeoutError as exc:
+            raise ProviderError("Groq timeout") from exc
+        except aiohttp.ClientError as exc:
+            raise ProviderError(f"Groq erro de rede: {exc}") from exc
         try:
-            return str(data["choices"][0]["message"]["content"]).strip()
-        except (KeyError, IndexError, TypeError) as e:
-            raise ProviderError(f"Groq resposta malformada: {e}")
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderError(f"Groq resposta malformada: {exc}") from exc
+        reply = content.strip() if isinstance(content, str) else ""
+        if not reply:
+            raise ProviderError("Groq retornou resposta vazia")
+        return reply
 
 
 class _GeminiClient:
-    """Chamadas ao endpoint REST do Gemini (não o SDK)."""
-
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    _ALLOWED_IMAGE_HOST_SUFFIXES = (
+        ".discordapp.com", ".discordapp.net", ".discord.com",
+    )
 
     def __init__(self, session: aiohttp.ClientSession, api_key: str):
         self._session = session
         self._api_key = api_key
 
+    async def _download_inline_image(self, url: str, deadline: float) -> dict:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not any(
+            host.endswith(suffix) for suffix in self._ALLOWED_IMAGE_HOST_SUFFIXES
+        ):
+            raise ProviderError("host de imagem não permitido")
+        timeout = aiohttp.ClientTimeout(
+            total=_remaining(deadline),
+            connect=min(C.MEDIA_CONNECT_TIMEOUT_SECONDS, _remaining(deadline)),
+            sock_read=min(C.MEDIA_READ_TIMEOUT_SECONDS, _remaining(deadline)),
+        )
+        try:
+            async with self._session.get(url, timeout=timeout) as resp:
+                if resp.status >= 400:
+                    raise ProviderError(
+                        f"download da imagem HTTP {resp.status}", status=resp.status,
+                    )
+                mime = (resp.headers.get("Content-Type") or "").split(";", 1)[0].lower()
+                if mime not in C.SUPPORTED_IMAGE_MIMES:
+                    raise ProviderError(f"MIME de imagem inválido: {mime or 'ausente'}")
+                try:
+                    declared = int(resp.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    declared = 0
+                if declared > C.MAX_GEMINI_IMAGE_BYTES:
+                    raise ProviderError("imagem excede limite do fallback")
+                data = bytearray()
+                async for chunk in resp.content.iter_chunked(64 * 1024):
+                    data.extend(chunk)
+                    if len(data) > C.MAX_GEMINI_IMAGE_BYTES:
+                        raise ProviderError("imagem excede limite do fallback")
+        except asyncio.TimeoutError as exc:
+            raise ProviderError("timeout ao baixar imagem") from exc
+        except aiohttp.ClientError as exc:
+            raise ProviderError(f"erro ao baixar imagem: {exc}") from exc
+        if not data:
+            raise ProviderError("imagem vazia")
+        return {
+            "inlineData": {
+                "mimeType": mime,
+                "data": base64.b64encode(bytes(data)).decode("ascii"),
+            }
+        }
+
     async def chat(
-        self,
-        *,
-        system: str,
-        messages: list[ChatMessage],
-        temperature: float,
-        model: str,
+        self, *, system: str, messages: list[ChatMessage], temperature: float,
+        model: str, timeout_seconds: float,
     ) -> str:
-        # Gemini tem formato próprio: "contents" ao invés de "messages",
-        # roles são "user"/"model" (não "assistant"), system vai em campo separado.
-        # Imagens: Gemini aceita inlineData base64, mas implementar o download
-        # local é trabalhoso. Como Groq já cobre o caminho feliz de visão,
-        # o fallback Gemini ignora imagens e responde baseado só no texto.
-        # O prompt do bot menciona que há imagem, então não fica totalmente cego.
-        any_has_images = any(getattr(m, "image_urls", None) for m in messages)
-        if any_has_images:
-            log.info("chatbot: Gemini fallback com imagem — respondendo só texto")
-
-        contents = []
-        for m in messages:
-            role = "user" if m.role == "user" else "model"
-            # Nota pro modelo se a mensagem tinha imagem que não pudemos anexar
-            content_text = m.content
-            if getattr(m, "image_urls", None):
-                content_text = (
-                    f"{content_text}\n"
-                    f"(nota: o usuário anexou {len(m.image_urls)} imagem(ns), "
-                    f"mas neste fallback a visão não está disponível — "
-                    f"responda reconhecendo que vê a imagem mas sem detalhes)"
-                )
-            contents.append({"role": role, "parts": [{"text": content_text}]})
-
+        deadline = time.monotonic() + max(0.1, timeout_seconds)
+        contents: list[dict] = []
+        for message in messages:
+            parts: list[dict] = [{"text": message.content}]
+            for url in message.image_urls[:C.MAX_IMAGES_PER_MESSAGE]:
+                parts.append(await self._download_inline_image(url, deadline))
+            contents.append({
+                "role": "user" if message.role == "user" else "model",
+                "parts": parts,
+            })
         payload = {
             "contents": contents,
             "systemInstruction": {"parts": [{"text": system}]},
@@ -217,144 +261,152 @@ class _GeminiClient:
                 "maxOutputTokens": C.MAX_RESPONSE_TOKENS,
             },
         }
-        url = self.BASE_URL.format(model=model) + f"?key={self._api_key}"
-        headers = {"Content-Type": "application/json"}
-
-        timeout = aiohttp.ClientTimeout(total=C.PROVIDER_TIMEOUT_SECONDS)
+        headers = {"Content-Type": "application/json", "x-goog-api-key": self._api_key}
+        timeout = aiohttp.ClientTimeout(total=_remaining(deadline))
         try:
             async with self._session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=timeout,
+                self.BASE_URL.format(model=model), json=payload,
+                headers=headers, timeout=timeout,
             ) as resp:
                 if resp.status == 429:
-                    retry_after_hdr = resp.headers.get("retry-after")
-                    try:
-                        retry_after = float(retry_after_hdr) if retry_after_hdr else None
-                    except ValueError:
-                        retry_after = None
                     raise RateLimitError(
-                        f"Gemini rate-limit ({model})",
-                        status=429,
-                        retry_after=retry_after,
+                        f"Gemini rate-limit ({model})", status=429,
+                        retry_after=_retry_after(resp),
                     )
                 if resp.status >= 400:
-                    body = await resp.text()
+                    body = await _read_error_excerpt(resp)
                     raise ProviderError(
-                        f"Gemini HTTP {resp.status}: {body[:300]}",
-                        status=resp.status,
+                        f"Gemini HTTP {resp.status}: {body[:300]}", status=resp.status,
                     )
-                data = await resp.json()
-        except asyncio.TimeoutError:
-            raise ProviderError(f"Gemini timeout após {C.PROVIDER_TIMEOUT_SECONDS}s")
-        except aiohttp.ClientError as e:
-            raise ProviderError(f"Gemini erro de rede: {e}")
-
+                data = await _read_json_limited(resp)
+        except asyncio.TimeoutError as exc:
+            raise ProviderError("Gemini timeout") from exc
+        except aiohttp.ClientError as exc:
+            raise ProviderError(f"Gemini erro de rede: {exc}") from exc
         try:
             parts = data["candidates"][0]["content"]["parts"]
-            return "".join(p.get("text", "") for p in parts).strip()
-        except (KeyError, IndexError, TypeError) as e:
-            raise ProviderError(f"Gemini resposta malformada: {e}")
+            reply = "".join(
+                part.get("text", "") for part in parts if isinstance(part, dict)
+            ).strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderError(f"Gemini resposta malformada: {exc}") from exc
+        if not reply:
+            raise ProviderError("Gemini retornou resposta vazia")
+        return reply
 
 
 class ProviderRouter:
-    """Fachada: tenta Groq primeiro, cai em Gemini se falhar.
-
-    Uso:
-        async with aiohttp.ClientSession() as session:
-            router = ProviderRouter(session, groq_key="...", gemini_key="...")
-            reply = await router.chat(
-                system="Você é um pirata alegre.",
-                messages=[ChatMessage("user", "oi")],
-                temperature=0.9,
-            )
-    """
-
     def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        *,
-        groq_key: Optional[str] = None,
+        self, session: aiohttp.ClientSession, *, groq_key: Optional[str] = None,
         gemini_key: Optional[str] = None,
-    ):
-        self._session = session
+    ) -> None:
         self._groq = _GroqClient(session, groq_key) if groq_key else None
         self._gemini = _GeminiClient(session, gemini_key) if gemini_key else None
-        self._groq_state = _ProviderState()
-        self._gemini_state = _ProviderState()
-
+        self._states: dict[tuple[str, str], _ProviderState] = {}
         if not self._groq and not self._gemini:
-            log.warning(
-                "ProviderRouter: nenhuma API key configurada. Chamadas vão falhar."
+            log.warning("ProviderRouter: nenhuma API key configurada")
+
+    def _state(self, provider: str, model: str) -> _ProviderState:
+        return self._states.setdefault((provider, model), _ProviderState())
+
+    def _mark_provider_failure(
+        self,
+        provider: str,
+        models: tuple[str, ...],
+        cooldown_seconds: float,
+        *,
+        status: int,
+    ) -> None:
+        """Abre o circuito de todos os modelos quando a falha é da conta/rede."""
+        for candidate in models:
+            self._state(provider, candidate).mark_failure(
+                cooldown_seconds, status=status,
             )
+
+    def snapshot(self) -> dict[str, dict[str, float | int | bool]]:
+        now = time.monotonic()
+        return {
+            f"{provider}/{model}": {
+                "available": state.is_available(),
+                "cooldown_seconds": max(0.0, state.next_allowed_monotonic - now),
+                "failures": state.consecutive_failures,
+                "last_status": state.last_status,
+            }
+            for (provider, model), state in self._states.items()
+        }
 
     async def chat(
-        self,
-        *,
-        system: str,
-        messages: list[ChatMessage],
+        self, *, system: str, messages: list[ChatMessage],
         temperature: float = C.DEFAULT_TEMPERATURE,
     ) -> str:
-        # Detecta se há imagens em alguma mensagem. Se sim, precisamos usar
-        # um modelo de visão — os modelos padrão (Llama 3.3/3.1) não aceitam
-        # blocos `image_url`. Prepend do vision model na lista de tentativas.
-        has_images = any(getattr(m, "image_urls", None) for m in messages)
-
-        attempts: list[tuple[str, _ProviderState, object, tuple[str, ...]]] = []
-        if self._groq is not None and self._groq_state.is_available():
-            if has_images:
-                # Com imagem: só o vision model no Groq. Se falhar, cai pro
-                # Gemini (que também suporta imagem nativamente).
-                groq_models = (C.GROQ_VISION_MODEL,)
-            else:
-                groq_models = C.GROQ_MODELS
-            attempts.append(("groq", self._groq_state, self._groq, groq_models))
-        if self._gemini is not None and self._gemini_state.is_available():
-            # Gemini 2.0 Flash aceita imagem nativamente — mesmos modelos.
-            attempts.append(("gemini", self._gemini_state, self._gemini, C.GEMINI_MODELS))
-
+        has_images = any(message.image_urls for message in messages)
+        attempts: list[tuple[str, object, tuple[str, ...]]] = []
+        if self._groq:
+            attempts.append((
+                "groq", self._groq,
+                C.GROQ_VISION_MODELS if has_images else C.GROQ_MODELS,
+            ))
+        if self._gemini:
+            # Uma única tentativa multimodal evita baixar os mesmos anexos duas
+            # vezes; para texto mantemos a cadeia completa de modelos.
+            attempts.append((
+                "gemini", self._gemini,
+                C.GEMINI_MODELS[:1] if has_images else C.GEMINI_MODELS,
+            ))
         if not attempts:
-            raise AllProvidersExhausted(
-                "Todos os providers estão em cooldown ou não configurados"
-            )
+            raise AllProvidersExhausted("nenhum provider configurado")
 
+        deadline = time.monotonic() + C.PROVIDER_ROUTER_TIMEOUT_SECONDS
         last_error: Optional[Exception] = None
-        for provider_name, state, client, models in attempts:
+        attempted = 0
+        for provider_name, client, models in attempts:
             for model in models:
+                state = self._state(provider_name, model)
+                if not state.is_available():
+                    continue
                 try:
+                    attempted += 1
                     reply = await client.chat(
-                        system=system,
-                        messages=messages,
-                        temperature=temperature,
-                        model=model,
+                        system=system, messages=messages, temperature=temperature,
+                        model=model, timeout_seconds=_remaining(deadline),
                     )
                     state.mark_success()
-                    log.debug("chatbot: %s/%s respondeu %d chars", provider_name, model, len(reply))
                     return reply
-                except RateLimitError as e:
-                    cooldown = float(e.retry_after) if e.retry_after else 30.0
-                    state.mark_failure(cooldown)
-                    last_error = e
-                    log.warning("chatbot: %s/%s rate-limited (retry=%s), próximo modelo", provider_name, model, cooldown)
-                    break  # não insiste no mesmo provider, próximo
-                except ProviderError as e:
-                    last_error = e
-                    status = int(getattr(e, "status", 0) or 0)
-                    # Erros de credencial, instabilidade do provider e erro de
-                    # rede sem status tendem a afetar todos os modelos. Pausa
-                    # o provider inteiro para não martelar API quebrada.
-                    if status in (401, 403) or status >= 500 or status == 0:
-                        cooldown = 60.0 if status in (401, 403) else 20.0
-                        state.mark_failure(cooldown)
-                        log.warning(
-                            "chatbot: %s/%s falhou (%s), provider em cooldown %.0fs: %s",
-                            provider_name, model, status or "rede", cooldown, e,
+                except RateLimitError as exc:
+                    last_error = exc
+                    cooldown = float(exc.retry_after or 30.0)
+                    self._mark_provider_failure(
+                        provider_name, models, cooldown, status=429,
+                    )
+                    # Rate limit tende a ser da conta/provider, então pula seus
+                    # outros modelos e segue ao provider seguinte.
+                    log.warning("chatbot: %s/%s rate-limited", provider_name, model)
+                    break
+                except ProviderError as exc:
+                    last_error = exc
+                    status = int(exc.status or 0)
+                    if status in (401, 403):
+                        self._mark_provider_failure(
+                            provider_name, models, 900.0, status=status,
                         )
+                        log.error("chatbot: credencial inválida em %s", provider_name)
                         break
-                    log.warning("chatbot: %s/%s falhou: %s", provider_name, model, e)
-                    # erros de modelo específico, como 404, tentam o próximo modelo
+                    if status in (400, 404, 422):
+                        state.mark_failure(300.0, status=status)
+                    elif status >= 500 or status == 0:
+                        self._mark_provider_failure(
+                            provider_name, models, 20.0, status=status,
+                        )
+                    log.warning("chatbot: %s/%s falhou: %s", provider_name, model, exc)
+                    if status == 0 or status >= 500:
+                        # Falha de rede/serviço costuma afetar o provider todo;
+                        # preserva o deadline para o fallback seguinte.
+                        break
+                    if time.monotonic() >= deadline:
+                        break
                     continue
-
-        # chegou aqui? todos os modelos de todos providers falharam.
-        raise AllProvidersExhausted(f"Todos providers falharam. Último erro: {last_error}")
+            if time.monotonic() >= deadline:
+                break
+        if attempted == 0:
+            raise AllProvidersExhausted("todos os modelos estão em cooldown")
+        raise AllProvidersExhausted(f"todos providers falharam: {last_error}")

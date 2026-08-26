@@ -13,9 +13,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from cogs.chatbot.imagegen import classify_image_prompt, generate_image
+from cogs.chatbot.imagegen import (
+    classify_image_prompt,
+    generate_image,
+    generated_image_extension,
+    parse_image_intent,
+)
 from cogs.chatbot.image_providers_ext import (
     ImageProfile,
+    _pollinations_model,
     aihorde_models_for_profile,
     detect_style,
     provider_order_for_profile,
@@ -25,9 +31,31 @@ from cogs.chatbot.image_providers_ext import (
 class ClassifyTests(unittest.TestCase):
     def test_classify_image_prompt(self):
         self.assertEqual(classify_image_prompt("gere uma paisagem bonita"), "safe")
+        self.assertEqual(
+            classify_image_prompt("criança brincando num parque ensolarado"),
+            "safe",
+        )
         self.assertEqual(classify_image_prompt("gere uma imagem nsfw"), "adult_allowed")
         self.assertEqual(
+            classify_image_prompt(
+                "mulher adulta fictícia nua, pintura em estilo realista"
+            ),
+            "adult_allowed",
+        )
+        self.assertEqual(
             classify_image_prompt("gere cena de menor de idade em conteúdo sexual"),
+            "blocked",
+        )
+        self.assertEqual(
+            classify_image_prompt("generate a nude image of an underage teen"),
+            "blocked",
+        )
+        self.assertEqual(
+            classify_image_prompt("draw non-consensual hentai"),
+            "blocked",
+        )
+        self.assertEqual(
+            classify_image_prompt("foto nude da minha ex"),
             "blocked",
         )
 
@@ -45,8 +73,26 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(detect_style("uma montanha nevada"), "generic")
         self.assertEqual(detect_style("a dog"), "generic")
 
+    def test_generated_image_extension_matches_validated_mime(self):
+        self.assertEqual(generated_image_extension("image/png"), "png")
+        self.assertEqual(generated_image_extension("image/jpeg"), "jpg")
+        self.assertEqual(generated_image_extension("image/webp"), "webp")
+
+    def test_english_image_intent_is_detected_and_classified(self):
+        intent = parse_image_intent("generate a nude illustration of an adult elf")
+        self.assertTrue(intent.requested)
+        self.assertEqual(intent.category, "adult_allowed")
+
 
 class ProviderOrderTests(unittest.TestCase):
+    def test_pollinations_uses_a_current_model_id_for_every_style(self):
+        for style in ("generic", "anime", "realistic"):
+            with self.subTest(style=style):
+                self.assertEqual(
+                    _pollinations_model(ImageProfile(nsfw=False, style=style)),
+                    "flux",
+                )
+
     def test_sfw_generic_prefers_pollinations(self):
         order = provider_order_for_profile(ImageProfile(nsfw=False, style="generic"))
         self.assertEqual(order[0], "pollinations")
@@ -256,17 +302,15 @@ class NsfwGuildAllowlistTests(unittest.TestCase):
         self.assertFalse(C.nsfw_enabled_for_guild(None))
 
 
-class ManagementGuildScopingTests(unittest.TestCase):
-    """Garante que comandos admin estão restritos à management guild."""
+class AdminCommandScopingTests(unittest.TestCase):
+    """O grupo é global; cada subcomando aplica autorização em runtime."""
 
-    def test_chatbot_admin_group_is_guild_restricted(self):
-        from cogs.chatbot import constants as C
+    def test_chatbot_admin_group_is_global(self):
         from cogs.chatbot.commands import ChatbotCommandsMixin
         admin = ChatbotCommandsMixin.__dict__["chatbot_admin"]
-        self.assertEqual(admin._guild_ids, [C.MANAGEMENT_GUILD_ID])
+        self.assertIsNone(getattr(admin, "_guild_ids", None))
 
     def test_chatbot_group_is_global(self):
-        # /chatbot continua disponível em qualquer guild — só o admin é restrito.
         from cogs.chatbot.commands import ChatbotCommandsMixin
         chatbot = ChatbotCommandsMixin.__dict__["chatbot"]
         self.assertIsNone(getattr(chatbot, "_guild_ids", None))

@@ -15,12 +15,13 @@ Também exporta uma View simples pra confirmação de ações destrutivas
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
+from urllib.parse import urlsplit
 
 import discord
 
 from . import constants as C
-from .profiles import ChatbotProfile, ProfileStore
+from .profiles import ChatbotProfile, ProfileLimitReached, ProfileStore
 from .persona import PersonaModalConfig, PersonaOptions
 from .extrovert import ExtrovertConfig, ExtrovertModalConfig, ExtrovertOptions
 
@@ -43,25 +44,40 @@ _NAME_PLACEHOLDER = (
 )
 
 
-def _parse_float_safe(text: str, default: float, lo: float, hi: float) -> float:
-    """Parse defensivo de float. Aceita vírgula decimal (pt-BR)."""
-    if not text:
+def _parse_float_strict(text: str, default: float, lo: float, hi: float) -> float:
+    raw = str(text or "").strip()
+    if not raw:
         return default
     try:
-        val = float(text.strip().replace(",", "."))
-    except (ValueError, TypeError):
-        return default
-    return max(lo, min(hi, val))
+        value = float(raw.replace(",", "."))
+    except ValueError as exc:
+        raise ValueError("Temperatura precisa ser um número, por exemplo `0.8`.") from exc
+    if not lo <= value <= hi:
+        raise ValueError(f"Temperatura precisa ficar entre {lo} e {hi}.")
+    return value
 
 
-def _parse_int_safe(text: str, default: int, lo: int, hi: int) -> int:
-    if not text:
+def _parse_int_strict(text: str, default: int, lo: int, hi: int) -> int:
+    raw = str(text or "").strip()
+    if not raw:
         return default
     try:
-        val = int(text.strip())
-    except (ValueError, TypeError):
-        return default
-    return max(lo, min(hi, val))
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("Memória precisa ser um número inteiro.") from exc
+    if not lo <= value <= hi:
+        raise ValueError(f"Memória precisa ficar entre {lo} e {hi} mensagens.")
+    return value
+
+
+def _validate_avatar_url(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("A URL do avatar precisa começar com `https://` ou `http://`.")
+    return raw
 
 
 def _modal_label(text: str, component: discord.ui.Item, description: str | None = None):
@@ -219,8 +235,8 @@ class PersonaConfigModal(discord.ui.Modal, title="Criar persona"):
         try:
             selected_user = self.user_select.values[0]
             selected_channel = self.channel_select.values[0]
-            target_user_id = int(getattr(selected_user, "id"))
-            channel_id = int(getattr(selected_channel, "id"))
+            target_user_id = int(selected_user.id)
+            channel_id = int(selected_channel.id)
             sample_limit = int(self.depth_group.value or C.PERSONA_MAX_MESSAGES)
             selected_options = set(self.options_group.values or [])
             config = PersonaModalConfig(
@@ -332,10 +348,17 @@ class ExtrovertConfigModal(discord.ui.Modal, title="Chatbot extrovert"):
                 discord.ChannelType.news,
                 discord.ChannelType.voice,
                 discord.ChannelType.stage_voice,
+                discord.ChannelType.public_thread,
+                discord.ChannelType.private_thread,
+                discord.ChannelType.news_thread,
             ],
             min_values=0,
             max_values=C.EXTROVERT_CHANNEL_SELECT_LIMIT,
             required=False,
+            default_values=[
+                discord.Object(id=int(channel_id))
+                for channel_id in current_config.channel_ids[:C.EXTROVERT_CHANNEL_SELECT_LIMIT]
+            ],
         )
 
         opts = current_config.options
@@ -413,7 +436,7 @@ class ExtrovertConfigModal(discord.ui.Modal, title="Chatbot extrovert"):
             enabled = str(self.status_group.value or "off") == "on"
             chance = int(self.chance_group.value or C.EXTROVERT_DEFAULT_CHANCE_PERCENT)
             profile_ids = tuple(str(v) for v in (self.profile_select.values or []) if str(v or "").strip())
-            channel_ids = tuple(int(getattr(ch, "id")) for ch in (self.channel_select.values or []))
+            channel_ids = tuple(int(ch.id) for ch in (self.channel_select.values or []))
             selected_options = set(self.options_group.values or [])
             options = ExtrovertOptions(
                 allow_text_channels=("allow_text" in selected_options),
@@ -498,33 +521,22 @@ class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):
             )
             return
 
-        # Checa limite aqui (não antes do modal) pra não estourar o timeout
-        # de 3s da interaction em servidores com Mongo mais lento.
         try:
-            count = await self._store.count_profiles(guild.id)
-        except Exception:
-            log.exception("chatbot: falha ao contar profiles")
+            temp = _parse_float_strict(
+                str(self.temperature_input.value), C.DEFAULT_TEMPERATURE,
+                C.MIN_TEMPERATURE, C.MAX_TEMPERATURE,
+            )
+            hist = _parse_int_strict(
+                str(self.history_size_input.value), C.DEFAULT_HISTORY_SIZE,
+                1, C.MAX_HISTORY_SIZE,
+            )
+            avatar_url = _validate_avatar_url(str(self.avatar_input.value or ""))
+        except ValueError as exc:
             await interaction.response.send_message(
-                "❌ Erro ao acessar banco. Tenta de novo em alguns segundos.",
-                ephemeral=True,
+                f"❌ {exc}", ephemeral=True,
             )
             return
-        if count >= self._guild_limit:
-            await interaction.response.send_message(
-                f"❌ Limite de {self._guild_limit} profiles atingido. "
-                f"Apague algum com `/chatbot profile apagar` antes de criar outro.",
-                ephemeral=True,
-            )
-            return
-
-        temp = _parse_float_safe(
-            str(self.temperature_input.value), C.DEFAULT_TEMPERATURE,
-            C.MIN_TEMPERATURE, C.MAX_TEMPERATURE,
-        )
-        hist = _parse_int_safe(
-            str(self.history_size_input.value), C.DEFAULT_HISTORY_SIZE,
-            1, C.MAX_HISTORY_SIZE,
-        )
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
             profile = await self._store.create_profile(
@@ -532,13 +544,19 @@ class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):
                 name=str(self.name_input.value),
                 created_by=interaction.user.id,
                 system_prompt=str(self.system_prompt_input.value),
-                avatar_url=str(self.avatar_input.value or ""),
+                avatar_url=avatar_url,
                 temperature=temp,
                 history_size=hist,
             )
+        except ProfileLimitReached:
+            await interaction.followup.send(
+                f"❌ Limite de {self._guild_limit} profiles atingido. "
+                "Apague um profile antes de criar outro.", ephemeral=True,
+            )
+            return
         except Exception:
             log.exception("chatbot: falha ao criar profile")
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Falha ao criar profile. Tenta de novo.", ephemeral=True
             )
             return
@@ -553,7 +571,7 @@ class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):
             f"a IA vai seguir. Cuidado ao editar.\n"
             f"-# Limite: {C.MAX_PROFILES_PER_GUILD} profiles por servidor."
         )
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
         if self._on_complete is not None:
             try:
@@ -626,33 +644,39 @@ class ProfileEditModal(discord.ui.Modal, title="Editar profile do chatbot"):
             )
             return
 
-        temp = _parse_float_safe(
-            str(self.temperature_input.value), self._profile.temperature,
-            C.MIN_TEMPERATURE, C.MAX_TEMPERATURE,
-        )
-        hist = _parse_int_safe(
-            str(self.history_size_input.value), self._profile.history_size,
-            1, C.MAX_HISTORY_SIZE,
-        )
+        try:
+            temp = _parse_float_strict(
+                str(self.temperature_input.value), self._profile.temperature,
+                C.MIN_TEMPERATURE, C.MAX_TEMPERATURE,
+            )
+            hist = _parse_int_strict(
+                str(self.history_size_input.value), self._profile.history_size,
+                1, C.MAX_HISTORY_SIZE,
+            )
+            avatar_url = _validate_avatar_url(str(self.avatar_input.value or ""))
+        except ValueError as exc:
+            await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
             updated = await self._store.update_profile(
                 guild.id, self._profile.profile_id,
                 name=str(self.name_input.value),
-                avatar_url=str(self.avatar_input.value or ""),
+                avatar_url=avatar_url,
                 system_prompt=str(self.system_prompt_input.value),
                 temperature=temp,
                 history_size=hist,
             )
         except Exception:
             log.exception("chatbot: falha ao editar profile")
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Falha ao editar. Tenta de novo.", ephemeral=True
             )
             return
 
         if updated is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Profile não encontrado (foi apagado?).", ephemeral=True
             )
             return
@@ -670,7 +694,7 @@ class ProfileEditModal(discord.ui.Modal, title="Editar profile do chatbot"):
                 "server vai conversar com esse profile. Se escrever algo "
                 "malicioso, a IA vai seguir."
             )
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 class ConfirmView(discord.ui.View):
@@ -769,6 +793,7 @@ class MasterEditModal(discord.ui.Modal, title="Editar prompt mestre global"):
         self.add_item(self.prompt_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             cfg = await self._store.update_prompt(
                 str(self.prompt_input.value),
@@ -776,13 +801,13 @@ class MasterEditModal(discord.ui.Modal, title="Editar prompt mestre global"):
             )
         except Exception:
             log.exception("chatbot: falha ao salvar master prompt")
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Falha ao salvar. Tenta de novo.", ephemeral=True
             )
             return
 
         char_count = len(cfg.prompt)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Prompt mestre atualizado ({char_count} chars). "
             f"Vai valer imediatamente na próxima mensagem processada "
             f"(cache invalidado).",

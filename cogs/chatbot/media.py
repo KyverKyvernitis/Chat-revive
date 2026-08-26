@@ -10,6 +10,7 @@ sessão aiohttp pra baixar, é passada como argumento.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from dataclasses import dataclass
@@ -136,8 +137,13 @@ async def download_attachment_bytes(
     Retorna None se o download falhar ou exceder `max_bytes`.
     """
     limit = max_bytes or media.size_bytes
+    timeout = aiohttp.ClientTimeout(
+        total=C.MEDIA_READ_TIMEOUT_SECONDS,
+        connect=C.MEDIA_CONNECT_TIMEOUT_SECONDS,
+        sock_read=C.MEDIA_READ_TIMEOUT_SECONDS,
+    )
     try:
-        async with session.get(media.url) as resp:
+        async with session.get(media.url, timeout=timeout) as resp:
             if resp.status >= 400:
                 log.warning("media: download %s falhou HTTP %s", media.url, resp.status)
                 return None
@@ -149,6 +155,6 @@ async def download_attachment_bytes(
                     log.warning("media: download %s passou do limite %s", media.url, limit)
                     return None
             return buf.getvalue()
-    except aiohttp.ClientError as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         log.warning("media: erro de rede ao baixar %s: %s", media.url, e)
         return None

@@ -2,13 +2,13 @@
 
 Estende o imagegen.py com:
 - Classificação de estilo (realistic/anime/generic) além do nsfw/safe.
-- Provider Pollinations (URL-based, sem chave pra SFW, com token opcional pra NSFW).
+- Provider Pollinations (API atual com chave e endpoint legado SFW sem chave).
 - Provider Cloudflare Workers AI (10k neurons/dia grátis, FLUX schnell, só SFW).
 - Seleção de modelos do AI Horde por perfil (anime NSFW vai pro Pony, realistic NSFW
   vai pro Juggernaut, etc).
 
 Env vars usadas:
-- POLLINATIONS_API_KEY: opcional, aumenta rate limit e libera NSFW.
+- POLLINATIONS_API_KEY: opcional, usa a API unificada e aumenta o rate limit.
 - CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN: opcional, habilita Cloudflare Workers AI.
 
 Ambos os providers novos são pulados silenciosamente se as chaves não tiverem setadas.
@@ -16,6 +16,7 @@ Ambos os providers novos são pulados silenciosamente se as chaves não tiverem 
 from __future__ import annotations
 
 import logging
+import json
 import re
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -23,9 +24,51 @@ from urllib.parse import quote
 
 import aiohttp
 
+from . import constants as C
+
 log = logging.getLogger(__name__)
 
 Style = Literal["realistic", "anime", "generic"]
+
+
+async def _read_limited(response) -> Optional[bytes]:
+    try:
+        declared = int(response.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    if declared > C.MAX_GENERATED_IMAGE_BYTES:
+        return None
+    data = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        data.extend(chunk)
+        if len(data) > C.MAX_GENERATED_IMAGE_BYTES:
+            return None
+    return bytes(data) if data else None
+
+
+async def _read_text_excerpt(response, *, limit: int = 4096) -> str:
+    data = bytearray()
+    async for chunk in response.content.iter_chunked(1024):
+        data.extend(chunk)
+        if len(data) >= limit:
+            break
+    return bytes(data[:limit]).decode("utf-8", errors="replace")
+
+
+async def _read_json_limited(response):
+    limit = (C.MAX_GENERATED_IMAGE_BYTES * 4 // 3) + 1024 * 1024
+    try:
+        declared = int(response.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    if declared > limit:
+        raise ValueError("JSON grande demais")
+    data = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        data.extend(chunk)
+        if len(data) > limit:
+            raise ValueError("JSON grande demais")
+    return json.loads(bytes(data).decode("utf-8"))
 
 
 # -----------------------------------------------------------------------------
@@ -143,20 +186,20 @@ def aihorde_models_for_profile(profile: ImageProfile, override: str = "") -> lis
 # -----------------------------------------------------------------------------
 # Provider: Pollinations
 # -----------------------------------------------------------------------------
-# Endpoint: https://image.pollinations.ai/prompt/{prompt}?model=X&width=W&height=H
-# SFW funciona sem chave. NSFW precisa de token (registra em auth.pollinations.ai).
-# O token vai na query string como `token=...` ou no header `Authorization: Bearer ...`.
+# Endpoint atual: https://gen.pollinations.ai/image/{prompt}?model=X&width=W&height=H
+# O endpoint legado continua sendo usado apenas como fallback SFW sem chave.
 # Retorno é a imagem direto (binary), com Content-Type image/jpeg ou image/png.
 
-_POLLINATIONS_BASE = "https://image.pollinations.ai/prompt"
+_POLLINATIONS_BASE = "https://gen.pollinations.ai/image"
+_POLLINATIONS_LEGACY_BASE = "https://image.pollinations.ai/prompt"
 
 
 def _pollinations_model(profile: ImageProfile) -> str:
-    """Escolhe variante do FLUX no Pollinations pelo perfil."""
-    if profile.style == "anime":
-        return "flux-anime"
-    if profile.style == "realistic":
-        return "flux-realism"
+    """Usa um ID presente na API atual e no fallback legado.
+
+    Os antigos ``flux-anime``/``flux-realism`` não fazem mais parte do
+    catálogo oficial; o estilo continua explícito no prompt do usuário.
+    """
     return "flux"
 
 
@@ -175,7 +218,8 @@ async def generate_with_pollinations(
     o motivo ("missing_key" só se NSFW sem token, "provider_blocked",
     "network_error", "timeout", "no_image_returned").
     """
-    # SFW roda sem chave. Pra NSFW, chave é necessária (política do provider).
+    # O router atual não envia NSFW ao Pollinations; callers legados ainda
+    # precisam apresentar uma chave para qualquer tentativa desse tipo.
     if profile.nsfw and not api_key:
         return False, None, None, "missing_key"
 
@@ -184,15 +228,18 @@ async def generate_with_pollinations(
 
     # Monta URL: prompt vai no path (encoded), params na query.
     encoded_prompt = quote(prompt[:1500], safe="")
-    url = f"{_POLLINATIONS_BASE}/{encoded_prompt}"
+    current_api = bool(api_key)
+    base = _POLLINATIONS_BASE if current_api else _POLLINATIONS_LEGACY_BASE
+    url = f"{base}/{encoded_prompt}"
     params = {
         "model": model,
         "width": str(width),
         "height": str(height),
-        "nologo": "true",
-        "enhance": "false",  # já temos nosso próprio augment
-        "safe": "false" if profile.nsfw else "true",
+        # Na API atual, `nsfw` habilita os filtros sexual + violência.
+        "safe": "false" if profile.nsfw else ("nsfw" if current_api else "true"),
     }
+    if not current_api:
+        params.update({"nologo": "false", "enhance": "false"})
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -204,12 +251,14 @@ async def generate_with_pollinations(
             url, params=params, headers=headers, timeout=timeout,
         ) as resp:
             if resp.status >= 400:
-                body = (await resp.text())[:250].lower()
+                body = (await _read_text_excerpt(resp))[:250].lower()
                 if resp.status == 408:
                     reason = "timeout"
                 elif resp.status == 429:
                     reason = "no_worker"
-                elif resp.status in (400, 401, 403, 422):
+                elif resp.status == 401:
+                    reason = "missing_key"
+                elif resp.status in (400, 403, 422):
                     reason = "provider_blocked"
                 elif resp.status in (500, 502, 503, 504):
                     reason = "no_worker"
@@ -224,14 +273,14 @@ async def generate_with_pollinations(
             content_type = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0]
             if "image/" not in content_type:
                 # Às vezes retorna JSON com erro e status 200.
-                text = (await resp.text())[:250]
+                text = (await _read_text_excerpt(resp))[:250]
                 log.warning(
                     "chatbot: imagegen pollinations sem imagem | content_type=%s body=%s",
                     content_type, text,
                 )
                 return False, None, None, "no_image_returned"
 
-            data = await resp.read()
+            data = await _read_limited(resp)
             if not data:
                 return False, None, None, "no_image_returned"
             return True, data, content_type, ""
@@ -294,12 +343,14 @@ async def generate_with_cloudflare(
             url, json=payload, headers=headers, timeout=timeout,
         ) as resp:
             if resp.status >= 400:
-                body = (await resp.text())[:250].lower()
+                body = (await _read_text_excerpt(resp))[:250].lower()
                 if resp.status == 408:
                     reason = "timeout"
                 elif resp.status == 429:
                     reason = "no_worker"
-                elif resp.status in (400, 401, 403, 422):
+                elif resp.status == 401:
+                    reason = "missing_key"
+                elif resp.status in (400, 403, 422):
                     reason = "provider_blocked"
                 elif resp.status in (500, 502, 503, 504):
                     reason = "no_worker"
@@ -315,7 +366,7 @@ async def generate_with_cloudflare(
             # ou image/png binário dependendo do modelo. FLUX schnell → JSON base64.
             content_type = (resp.headers.get("Content-Type") or "").lower()
             if "application/json" in content_type:
-                body = await resp.json()
+                body = await _read_json_limited(resp)
                 if not body.get("success"):
                     errors = body.get("errors") or []
                     log.warning(
@@ -328,14 +379,19 @@ async def generate_with_cloudflare(
                 if not b64:
                     return False, None, None, "no_image_returned"
                 try:
-                    data = _b64.b64decode(b64)
+                    if len(str(b64)) > (C.MAX_GENERATED_IMAGE_BYTES * 4 // 3) + 16:
+                        raise ValueError("imagem grande demais")
+                    data = _b64.b64decode(b64, validate=True)
                 except Exception:
                     return False, None, None, "no_image_returned"
-                return True, data, "image/png", ""
+                if len(data) > C.MAX_GENERATED_IMAGE_BYTES:
+                    return False, None, None, "no_image_returned"
+                # FLUX Workers AI codifica JPEG no campo JSON.
+                return True, data, "image/jpeg", ""
 
             # Alguns modelos CF retornam binário direto.
             if "image/" in content_type:
-                data = await resp.read()
+                data = await _read_limited(resp)
                 if not data:
                     return False, None, None, "no_image_returned"
                 return True, data, content_type.split(";")[0], ""
@@ -354,9 +410,8 @@ async def generate_with_cloudflare(
 # -----------------------------------------------------------------------------
 # Ordem de preferência de providers por perfil
 # -----------------------------------------------------------------------------
-# Ranking pensado com "qualidade primeiro", baseado em avaliações públicas
-# (abril 2026). Router tenta em ordem, pula quem não tá configurado, e faz
-# fallback pro próximo se o primeiro der timeout/no_worker/network_error.
+# Ranking equilibra qualidade e previsibilidade. APIs de produção vêm antes da
+# fila voluntária do Horde em SFW; o router ainda reserva deadline para fallback.
 # "provider_blocked" (política, não rate limit) também vira fallback — pode
 # ser que um provider filtrou um termo que outro aceita.
 
@@ -384,7 +439,6 @@ def provider_order_for_profile(profile: ImageProfile) -> list[ProviderName]:
     if profile.style == "realistic":
         return ["pollinations", "cloudflare", "gemini", "aihorde", "huggingface"]
     if profile.style == "anime":
-        # Pollinations flux-anime > Horde Animagine pro SFW anime.
-        return ["pollinations", "aihorde", "huggingface", "cloudflare", "gemini"]
+        return ["pollinations", "gemini", "cloudflare", "aihorde", "huggingface"]
     # SFW genérico: FLUX em Pollinations é o melhor all-around.
     return ["pollinations", "cloudflare", "gemini", "aihorde", "huggingface"]

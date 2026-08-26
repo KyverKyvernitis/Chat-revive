@@ -555,6 +555,73 @@ class TTSAudioMixin:
             self.guild_states[guild_id] = state
         return state
 
+    async def synthesize_chatbot_attachment(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        text: str,
+        voice: str,
+        language: str = "pt-br",
+        rate: str = "+0%",
+        pitch: str = "+0Hz",
+        timeout_seconds: float = 18.0,
+        max_bytes: int = 8 * 1024 * 1024,
+    ) -> bytes | None:
+        """Adapter público e estreito para o chatbot reutilizar cache/singleflight.
+
+        A marca de prefetch mantém a prioridade abaixo da fala normal da call;
+        se a mesma fala for enfileirada em seguida, ela reaproveita o cache.
+        """
+        clean_text = str(text or "").strip()[:800]
+        if not _has_speakable_tts_text(clean_text):
+            return None
+        item = QueueItem(
+            guild_id=int(guild_id),
+            channel_id=0,
+            author_id=int(user_id),
+            text=clean_text,
+            engine="edge",
+            voice=str(voice or "pt-BR-FranciscaNeural"),
+            language=str(language or "pt-br"),
+            rate=str(rate or "+0%"),
+            pitch=str(pitch or "+0Hz"),
+        )
+        setattr(item, "_tts_prefetch", True)
+        state = self._get_state(int(guild_id))
+        resolve_task = self._schedule_tts_background(
+            self._resolve_or_generate_singleflight_audio(
+                state, item, read_cache=True, store_in_cache=True,
+            )
+        )
+        if resolve_task is None:
+            return None
+
+        # Se o chatbot perder seu deadline, a síntese compartilhada continua:
+        # a fila de voz pode estar aguardando exatamente a mesma chave de cache.
+        # O runtime de TTS rastreia/cancela a task no unload.
+        def _observe(done: asyncio.Task) -> None:
+            if not done.cancelled():
+                with contextlib.suppress(Exception):
+                    done.exception()
+
+        resolve_task.add_done_callback(_observe)
+        try:
+            path, _generated = await asyncio.wait_for(
+                asyncio.shield(resolve_task),
+                timeout=max(1.0, float(timeout_seconds)),
+            )
+            def _read() -> bytes:
+                with open(path, "rb") as handle:
+                    return handle.read(max_bytes + 1)
+            data = await asyncio.to_thread(_read)
+        except (asyncio.TimeoutError, OSError, ValueError):
+            logger.warning("[tts_voice] adapter chatbot falhou | guild=%s", guild_id)
+            return None
+        if not data or len(data) > max_bytes:
+            return None
+        return data
+
 
     def _cleanup_guild_state_if_idle(self, guild_id: int) -> bool:
         state = self.guild_states.get(guild_id)

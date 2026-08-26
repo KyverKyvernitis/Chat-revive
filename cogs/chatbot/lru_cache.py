@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
-from typing import Any, Generic, Optional, TypeVar
+from typing import Generic, Optional, TypeVar
 
 K = TypeVar("K")
 V = TypeVar("V")

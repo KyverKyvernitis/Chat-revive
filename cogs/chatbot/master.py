@@ -16,8 +16,8 @@ Por que 1 doc só?
 
 Segurança:
 - Só membros com Manage Guild do `config_guild_id` atual conseguem editar.
-- `set_config_guild` também exige estar no config atual — impossível
-  hijackar mudando o destino de outro server.
+- Transferência e reset global são autorizados separadamente pelo dono do bot
+  ou pelos IDs em `CHATBOT_OPERATOR_IDS`; o store não decide autorização.
 - Bootstrap: se o doc não existir, usa `DEFAULT_MASTER_PROMPT` hardcoded
   e `DEFAULT_MASTER_CONFIG_GUILD_ID` como dono inicial.
 """

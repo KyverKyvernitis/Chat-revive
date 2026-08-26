@@ -1,4 +1,4 @@
-"""Geração de imagem via Gemini 2.5 Flash Image.
+"""Geração de imagem multi-provider com deadline e validação centralizados.
 
 Endpoint REST, payload JSON, response tem a imagem em base64 no campo
 `inlineData.data` de algum `part` dentro da primeira candidate.
@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 import logging
 import os
 import re
@@ -35,6 +36,96 @@ class GeneratedImage:
     data: bytes          # bytes da imagem (PNG ou JPEG)
     mime_type: str       # "image/png" geralmente
     caption: Optional[str] = None  # texto opcional que o modelo gerou junto
+
+
+def generated_image_extension(mime_type: str) -> str:
+    return {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/gif": "gif",
+        "image/webp": "webp",
+    }.get(str(mime_type or "").lower(), "bin")
+
+
+def _detected_image_mime(data: bytes) -> Optional[str]:
+    """Valida assinatura, sem confiar no Content-Type do provider."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def validate_generated_result(result: "ImageGenerationResult") -> "ImageGenerationResult":
+    """Aplica o mesmo limite e validação a todos os providers."""
+    if not result.ok or result.image is None:
+        return result
+    data = result.image.data
+    mime = _detected_image_mime(data)
+    if not data or len(data) > C.MAX_GENERATED_IMAGE_BYTES or mime is None:
+        return ImageGenerationResult(
+            ok=False,
+            provider=result.provider,
+            prompt_class=result.prompt_class,
+            reason="no_image_returned",
+            detail="invalid_or_oversized_image",
+        )
+    return ImageGenerationResult(
+        ok=True,
+        provider=result.provider,
+        prompt_class=result.prompt_class,
+        image=GeneratedImage(
+            data=data, mime_type=mime, caption=result.image.caption,
+        ),
+    )
+
+
+async def _read_limited(response, limit: int = C.MAX_GENERATED_IMAGE_BYTES) -> Optional[bytes]:
+    try:
+        declared = int(response.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    if declared > limit:
+        return None
+    data = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        data.extend(chunk)
+        if len(data) > limit:
+            return None
+    return bytes(data) if data else None
+
+
+async def _read_json_limited(response, *, limit: Optional[int] = None):
+    json_limit = int(limit or ((C.MAX_GENERATED_IMAGE_BYTES * 4 // 3) + 1024 * 1024))
+    raw = await _read_limited(response, json_limit)
+    if raw is None:
+        raise ValueError("JSON vazio ou grande demais")
+    return json.loads(raw.decode("utf-8"))
+
+
+async def _read_text_excerpt(response, *, limit: int = 4096) -> str:
+    data = bytearray()
+    async for chunk in response.content.iter_chunked(1024):
+        data.extend(chunk)
+        if len(data) >= limit:
+            break
+    return bytes(data[:limit]).decode("utf-8", errors="replace")
+
+
+def _decode_b64_limited(value: str) -> Optional[bytes]:
+    raw = (value or "").strip()
+    # Base64 adiciona ~4/3 de overhead. Recusa antes de alocar o resultado.
+    if not raw or len(raw) > ((C.MAX_GENERATED_IMAGE_BYTES * 4 // 3) + 16):
+        return None
+    try:
+        decoded = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError, TypeError):
+        return None
+    return decoded if len(decoded) <= C.MAX_GENERATED_IMAGE_BYTES else None
 
 
 PromptClass = Literal["safe", "adult_allowed", "blocked"]
@@ -62,6 +153,21 @@ class ImageGenerationResult:
     detail: Optional[str] = None
 
 
+def _with_prompt_class(
+    result: ImageGenerationResult, prompt_class: PromptClass,
+) -> ImageGenerationResult:
+    if result.prompt_class == prompt_class:
+        return result
+    return ImageGenerationResult(
+        ok=result.ok,
+        provider=result.provider,
+        prompt_class=prompt_class,
+        image=result.image,
+        reason=result.reason,
+        detail=result.detail,
+    )
+
+
 @dataclass(frozen=True)
 class ImageIntent:
     requested: bool
@@ -82,6 +188,10 @@ _IMAGE_REQUEST_RE = re.compile(
     r"|me\s+mostra\s+(uma\s+|um\s+)?(imagem|desenho)"
     r"|cria\s+(uma\s+|um\s+)?(imagem|foto|arte|ilustra..o)"
     r"|imagina\s+(uma\s+|um\s+)?(cena|imagem)"
+    r"|generate\s+(an?\s+)?(image|photo|picture|drawing|illustration)"
+    r"|create\s+(an?\s+)?(image|photo|picture|drawing|illustration)"
+    r"|draw\s+"
+    r"|show\s+me\s+(an?\s+)?(image|photo|picture|drawing)"
     r")\b",
     re.IGNORECASE | re.UNICODE,
 )
@@ -119,29 +229,38 @@ def parse_image_intent(text: str) -> ImageIntent:
 # Classificação de pedido (safe | adulto permitido | bloqueado)
 # -----------------------------------------------------------------------------
 
-_BLOCKED_PATTERNS = (
+_MINOR_PATTERNS = (
     r"menor(es)?\b",
     r"crian[cç]a(s)?\b",
     r"infantilizad[oa]s?\b",
-    r"estupro\b",
+    r"\b(child|children|kid|kids|minor|underage|teen(?:ager)?|loli|shota)\b",
+    r"\b(?:1[0-7]|[0-9])\s*(?:anos?|years?\s*old|yo)\b",
+)
+_NONCONSENSUAL_PATTERNS = (
     r"for[çc]ad[oa]\b",
     r"sem\s+consentimento\b",
     r"n[ãa]o\s+consensual\b",
+    r"\bforced\b",
+    r"\bnon[-\s]?consensual\b",
+    r"\bwithout\s+consent\b",
+)
+_EXPLICIT_SEXUAL_ABUSE_PATTERNS = (
+    r"estupro\b",
     r"viol[êe]ncia\s+sexual\b",
+    r"\brape(?:d)?\b",
+    r"\bsexual\s+(?:assault|violence)\b",
     r"revenge\s*porn\b",
 )
 _REAL_PERSON_PATTERNS = (
-    r"foto\s+da?\s+",
-    r"parecid[oa]\s+com\b",
-    r"realista\b",
     r"celebridade\b",
+    r"\bcelebrity\b",
 )
 _ADULT_HINT_PATTERNS = (
     r"\bnsfw\b",
     r"\b18\+\b",
     r"conte[uú]do\s+adulto",
     r"er[oó]tic[oa]",
-    r"nu[dz]?\b",
+    r"\bnu(?:a|as|s)?\b",
     r"nudez\b",
     r"sexo\b",
     r"sexual\b",
@@ -163,7 +282,8 @@ _ADULT_HINT_PATTERNS = (
     r"hentai\b",
 )
 _ADULT_IMAGE_VERB_RE = re.compile(
-    r"\b(gere|gera|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|mostrar?|mostre)\b",
+    r"\b(gere|gera|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|"
+    r"mostrar?|mostre|generate|create|draw|show)\b",
     re.IGNORECASE | re.UNICODE,
 )
 _GENERIC_ADULT_WORDS_RE = re.compile(
@@ -174,6 +294,7 @@ _NONCONSENSUAL_LEAK_PATTERNS = (
     r"vazad[oa]s?\b",
     r"vazamento\s+de\s+nude",
     r"nudes?\s+vazad[oa]s?",
+    r"\bleaked\s+nudes?\b",
 )
 _REAL_PERSON_ADULT_PATTERNS = (
     r"pessoa\s+real\b",
@@ -183,6 +304,8 @@ _REAL_PERSON_ADULT_PATTERNS = (
     r"meu\s+ex\b",
     r"minha\s+namorada\b",
     r"meu\s+namorado\b",
+    r"\ba\s+real\s+(?:person|woman|man)\b",
+    r"\bmy\s+(?:ex|girlfriend|boyfriend)\b",
     r"instagram\b",
     r"onlyfans\b",
 )
@@ -210,21 +333,30 @@ def classify_image_prompt(prompt: str) -> PromptClass:
     if not text.strip():
         return "safe"
 
-    if any(re.search(pat, text, flags=re.IGNORECASE) for pat in _BLOCKED_PATTERNS):
+    adult_hint = text_has_adult_hint(text)
+    if any(
+        re.search(pat, text, flags=re.IGNORECASE)
+        for pat in _EXPLICIT_SEXUAL_ABUSE_PATTERNS
+    ):
+        return "blocked"
+    if adult_hint and any(
+        re.search(pat, text, flags=re.IGNORECASE)
+        for pat in (*_MINOR_PATTERNS, *_NONCONSENSUAL_PATTERNS)
+    ):
         return "blocked"
     if (
-        any(re.search(pat, text, flags=re.IGNORECASE) for pat in _ADULT_HINT_PATTERNS)
+        adult_hint
         and any(re.search(pat, text, flags=re.IGNORECASE) for pat in _REAL_PERSON_PATTERNS)
     ):
         return "blocked"
     if (
-        any(re.search(pat, text, flags=re.IGNORECASE) for pat in _ADULT_HINT_PATTERNS)
+        adult_hint
         and any(re.search(pat, text, flags=re.IGNORECASE) for pat in _REAL_PERSON_ADULT_PATTERNS)
     ):
         return "blocked"
     if any(re.search(pat, text, flags=re.IGNORECASE) for pat in _NONCONSENSUAL_LEAK_PATTERNS):
         return "blocked"
-    if text_has_adult_hint(text):
+    if adult_hint:
         return "adult_allowed"
     return "safe"
 
@@ -259,15 +391,15 @@ def build_image_failure_message(result: ImageGenerationResult) -> str:
             return "⚙️ Geração adulta está indisponível no momento."
         return "⚙️ Geração de imagem não configurada no momento."
     if result.reason == "no_worker":
-        return "🧵 Nenhum worker adulto disponível agora. Tente novamente em instantes."
+        return "🧵 Nenhum worker de imagem está disponível agora. Tente novamente em instantes."
     if result.reason == "timeout":
-        return "⏱️ O provedor adulto demorou demais para responder."
+        return "⏱️ O provedor de imagem demorou demais para responder."
     if result.reason == "network_error":
         return "🌐 Falha de conexão com o provedor de imagem. Tenta novamente."
     if result.reason == "provider_blocked":
-        return "🛡️ O provedor adulto bloqueou este pedido por política interna."
+        return "🛡️ O provedor de imagem bloqueou este pedido por política interna."
     if result.reason == "no_image_returned":
-        return "🖼️ O provedor adulto respondeu sem imagem. Tente descrever melhor a cena."
+        return "🖼️ O provedor respondeu sem uma imagem válida. Tente descrever melhor a cena."
     return (
         "🖼️ Não consegui gerar imagem agora (o provedor respondeu sem imagem). "
         "Tenta reescrever o pedido."
@@ -385,12 +517,16 @@ async def _generate_with_gemini(
             url, json=payload, headers=headers, timeout=timeout,
         ) as resp:
             if resp.status >= 400:
-                body = await resp.text()
+                body = await _read_text_excerpt(resp)
                 lowered = body.lower()
                 reason: FailureReason = "network_error"
                 if resp.status == 408:
                     reason = "timeout"
-                elif resp.status in (400, 403, 422, 429):
+                elif resp.status == 429:
+                    reason = "no_worker"
+                elif resp.status == 401:
+                    reason = "missing_key"
+                elif resp.status in (400, 403, 422):
                     reason = "provider_blocked"
                 log.warning(
                     "chatbot: imagegen gemini falhou | status=%s reason=%s body=%s",
@@ -405,7 +541,7 @@ async def _generate_with_gemini(
                     reason=reason,
                     detail=f"http_{resp.status}",
                 )
-            data = await resp.json()
+            data = await _read_json_limited(resp)
     except aiohttp.ServerTimeoutError:
         return ImageGenerationResult(
             ok=False,
@@ -464,7 +600,7 @@ async def _generate_with_gemini(
             mime = inline.get("mimeType") or inline.get("mime_type") or "image/png"
             if b64:
                 try:
-                    image_data = base64.b64decode(b64)
+                    image_data = _decode_b64_limited(str(b64))
                     image_mime = mime
                 except (ValueError, TypeError) as e:
                     log.warning("chatbot: imagegen falha decodificar base64: %s", e)
@@ -526,14 +662,16 @@ async def _generate_with_adult_provider(
     try:
         async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status >= 400:
-                body = (await resp.text()).lower()
+                body = (await _read_text_excerpt(resp)).lower()
                 reason: FailureReason = "network_error"
                 if resp.status == 408:
                     reason = "timeout"
                 elif resp.status == 429:
                     # Rate limit — tratável como "sem worker agora", retryable
                     reason = "no_worker"
-                elif resp.status in (400, 401, 403, 422):
+                elif resp.status == 401:
+                    reason = "missing_key"
+                elif resp.status in (400, 403, 422):
                     reason = "provider_blocked"
                 elif resp.status in (500, 502, 503, 504):
                     reason = "no_worker"
@@ -550,7 +688,7 @@ async def _generate_with_adult_provider(
                     reason=reason,
                     detail=f"http_{resp.status}",
                 )
-            data = await resp.json()
+            data = await _read_json_limited(resp)
     except aiohttp.ServerTimeoutError:
         return ImageGenerationResult(
             ok=False,
@@ -586,7 +724,9 @@ async def _generate_with_adult_provider(
                 prompt_class="adult_allowed",
                 reason="no_image_returned",
             )
-        image_data = base64.b64decode(b64)
+        image_data = _decode_b64_limited(str(b64))
+        if image_data is None:
+            raise ValueError("imagem inválida ou grande demais")
     except Exception:
         return ImageGenerationResult(
             ok=False,
@@ -619,7 +759,11 @@ async def _generate_with_huggingface(
             reason="missing_key",
         )
 
-    url = f"https://api-inference.huggingface.co/models/{model}"
+    endpoint = os.environ.get(
+        "HUGGINGFACE_INFERENCE_URL",
+        "https://router.huggingface.co/hf-inference/models/{model}",
+    ).strip()
+    url = endpoint.format(model=model)
     pos, neg = _augment_adult_prompt(prompt)
     payload = {
         "inputs": pos[:2000],
@@ -641,14 +785,16 @@ async def _generate_with_huggingface(
         async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
             content_type = (resp.headers.get("Content-Type") or "").lower()
             if resp.status >= 400:
-                body = (await resp.text()).lower()
+                body = (await _read_text_excerpt(resp)).lower()
                 reason: FailureReason = "network_error"
                 if resp.status == 408:
                     reason = "timeout"
                 elif resp.status == 429:
                     # Rate limit do HF — retryable, não é bloqueio de política
                     reason = "no_worker"
-                elif resp.status in (400, 401, 403, 422):
+                elif resp.status == 401:
+                    reason = "missing_key"
+                elif resp.status in (400, 403, 422):
                     reason = "provider_blocked"
                 elif resp.status in (500, 502, 503, 504):
                     reason = "no_worker"
@@ -667,7 +813,7 @@ async def _generate_with_huggingface(
                 )
 
             if "image/" in content_type:
-                data = await resp.read()
+                data = await _read_limited(resp)
                 if not data:
                     return ImageGenerationResult(
                         ok=False,
@@ -682,7 +828,7 @@ async def _generate_with_huggingface(
                     image=GeneratedImage(data=data, mime_type=content_type.split(";")[0]),
                 )
 
-            payload_json = await resp.json()
+            payload_json = await _read_json_limited(resp, limit=1024 * 1024)
             if isinstance(payload_json, dict) and payload_json.get("error"):
                 return ImageGenerationResult(
                     ok=False,
@@ -722,6 +868,23 @@ async def _generate_with_huggingface(
         )
 
 
+async def _cancel_aihorde_job(
+    session: aiohttp.ClientSession, *, base: str, req_id: str, headers: dict
+) -> None:
+    """Libera o job remoto quando nosso deadline/cancelamento vence."""
+    if not req_id:
+        return
+    try:
+        async with session.delete(
+            f"{base}/v2/generate/status/{req_id}",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=5.0),
+        ):
+            pass
+    except Exception:
+        log.debug("chatbot: não foi possível cancelar job Horde %s", req_id)
+
+
 async def _generate_with_aihorde(
     session: aiohttp.ClientSession,
     *,
@@ -745,10 +908,9 @@ async def _generate_with_aihorde(
     # Timeouts desacoplados:
     #   - http_timeout: limite por chamada HTTP individual (submit, check, status, fetch).
     #     Curto porque cada request é leve; se travar, desiste rápido sem queimar o deadline.
-    #   - poll_deadline: limite total pro loop de polling da fila do Horde. Fila NSFW
-    #     pode levar minutos em horário de pico, então damos no mínimo 4 minutos.
+    #   - poll_deadline: limite total do job, definido pelo router.
     http_timeout = aiohttp.ClientTimeout(total=20)
-    poll_deadline = time.monotonic() + max(timeout_seconds, 240.0)
+    poll_deadline = time.monotonic() + max(1.0, timeout_seconds)
     headers = {
         "Content-Type": "application/json",
         "apikey": key,
@@ -788,13 +950,15 @@ async def _generate_with_aihorde(
             timeout=http_timeout,
         ) as resp:
             if resp.status >= 400:
-                body = (await resp.text()).lower()
+                body = (await _read_text_excerpt(resp)).lower()
                 reason: FailureReason = "network_error"
                 if resp.status == 408:
                     reason = "timeout"
                 elif resp.status == 429:
                     reason = "no_worker"
-                elif resp.status in (400, 401, 403, 422):
+                elif resp.status == 401:
+                    reason = "missing_key"
+                elif resp.status in (400, 403, 422):
                     reason = "provider_blocked"
                 elif resp.status in (500, 502, 503, 504):
                     reason = "no_worker"
@@ -811,7 +975,7 @@ async def _generate_with_aihorde(
                     reason=reason,
                     detail=f"http_{resp.status}",
                 )
-            submit_data = await resp.json()
+            submit_data = await _read_json_limited(resp, limit=1024 * 1024)
     except aiohttp.ServerTimeoutError:
         return ImageGenerationResult(
             ok=False,
@@ -856,7 +1020,7 @@ async def _generate_with_aihorde(
                         reason="network_error",
                         detail=f"http_{resp.status}",
                     )
-                check = await resp.json()
+                check = await _read_json_limited(resp, limit=1024 * 1024)
 
             done = bool((check or {}).get("done"))
             faulted = bool((check or {}).get("faulted"))
@@ -876,7 +1040,11 @@ async def _generate_with_aihorde(
             if done or faulted:
                 break
             await asyncio.sleep(1.5)
+    except asyncio.CancelledError:
+        await _cancel_aihorde_job(session, base=base, req_id=req_id, headers=headers)
+        raise
     except aiohttp.ServerTimeoutError:
+        await _cancel_aihorde_job(session, base=base, req_id=req_id, headers=headers)
         return ImageGenerationResult(
             ok=False,
             provider="aihorde",
@@ -884,6 +1052,7 @@ async def _generate_with_aihorde(
             reason="timeout",
         )
     except aiohttp.ClientError as e:
+        await _cancel_aihorde_job(session, base=base, req_id=req_id, headers=headers)
         log.warning("chatbot: imagegen aihorde erro de rede check: %s", e)
         return ImageGenerationResult(
             ok=False,
@@ -893,6 +1062,8 @@ async def _generate_with_aihorde(
         )
 
     if not done or faulted:
+        if not done:
+            await _cancel_aihorde_job(session, base=base, req_id=req_id, headers=headers)
         return ImageGenerationResult(
             ok=False,
             provider="aihorde",
@@ -915,7 +1086,7 @@ async def _generate_with_aihorde(
                     reason="network_error",
                     detail=f"http_{resp.status}",
                 )
-            status_data = await resp.json()
+            status_data = await _read_json_limited(resp)
     except aiohttp.ServerTimeoutError:
         return ImageGenerationResult(
             ok=False,
@@ -956,7 +1127,7 @@ async def _generate_with_aihorde(
                         reason="no_image_returned",
                     )
                 content_type = (img_resp.headers.get("Content-Type") or "image/png").split(";")[0]
-                data = await img_resp.read()
+                data = await _read_limited(img_resp)
                 if not data:
                     return ImageGenerationResult(
                         ok=False,
@@ -980,9 +1151,8 @@ async def _generate_with_aihorde(
             )
 
     raw_b64 = img_ref.split(",", 1)[-1].strip()
-    try:
-        decoded = base64.b64decode(raw_b64)
-    except (binascii.Error, ValueError):
+    decoded = _decode_b64_limited(raw_b64)
+    if decoded is None:
         return ImageGenerationResult(
             ok=False,
             provider="aihorde",
@@ -997,12 +1167,12 @@ async def _generate_with_aihorde(
     )
 
 
-async def generate_image(
+async def _generate_image_impl(
     session: aiohttp.ClientSession,
     *,
     prompt: str,
     channel_is_nsfw: bool,
-    timeout_seconds: float = 45.0,
+    timeout_seconds: float,
 ) -> ImageGenerationResult:
     """Geração de imagem com roteamento multi-provider por perfil.
 
@@ -1057,9 +1227,17 @@ async def generate_image(
     aihorde_key = raw_adult_key or "0000000000"
     hf_key = os.environ.get("HUGGINGFACE_API_KEY", "").strip() or raw_adult_key
     custom_key = raw_adult_key
-    adult_url = (
+    legacy_adult_url = (
         os.environ.get("ADULT_IMAGEGEN_URL", "https://aihorde.net/api").strip()
         or "https://aihorde.net/api"
+    )
+    aihorde_url = (
+        os.environ.get("AIHORDE_BASE_URL", "").strip()
+        or (legacy_adult_url if "aihorde" in legacy_adult_url else "https://aihorde.net/api")
+    )
+    custom_url = (
+        os.environ.get("CUSTOM_IMAGEGEN_URL", "").strip()
+        or (legacy_adult_url if "aihorde" not in legacy_adult_url else "")
     )
     adult_model_override = os.environ.get("ADULT_IMAGEGEN_MODEL", "").strip()
     pollinations_key = os.environ.get("POLLINATIONS_API_KEY", "").strip()
@@ -1072,8 +1250,7 @@ async def generate_image(
     ).strip().lower()
     use_auto_router = adult_provider in ("auto", "auto_free", "free")
 
-    # Timeout mais generoso pra NSFW (fila do Horde) e razoável pra SFW.
-    eff_timeout = max(timeout_seconds, 120.0 if profile.nsfw else 60.0)
+    eff_timeout = max(1.0, float(timeout_seconds))
 
     # Modo legacy: usuário forçou um provider específico. Respeita e sai.
     if not use_auto_router and profile.nsfw:
@@ -1085,7 +1262,8 @@ async def generate_image(
             aihorde_key=aihorde_key,
             hf_key=hf_key,
             custom_key=custom_key,
-            adult_url=adult_url,
+            aihorde_url=aihorde_url,
+            custom_url=custom_url,
             adult_model_override=adult_model_override,
             eff_timeout=eff_timeout,
         )
@@ -1099,23 +1277,56 @@ async def generate_image(
     )
 
     attempts: list[ImageGenerationResult] = []
-    for provider_name in order:
-        result = await _try_provider(
-            provider_name,
-            session=session,
-            profile=profile,
-            prompt_clean=prompt_clean,
-            timeout_seconds=eff_timeout,
-            gemini_key=gemini_key,
-            aihorde_key=aihorde_key,
-            hf_key=hf_key,
-            custom_key=custom_key,
-            adult_url=adult_url,
-            adult_model_override=adult_model_override,
-            pollinations_key=pollinations_key,
-            cf_account=cf_account,
-            cf_token=cf_token,
-        )
+    deadline = time.monotonic() + eff_timeout
+    for index, provider_name in enumerate(order):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.1:
+            break
+        if provider_name == "aihorde":
+            # Horde é uma fila remota; reserva tempo real para providers
+            # seguintes em vez de deixar uma tentativa consumir o job inteiro.
+            has_fallback = index < len(order) - 1
+            reserve = min(
+                C.IMAGE_FALLBACK_RESERVE_SECONDS,
+                max(0.0, remaining - 10.0),
+            ) if has_fallback else 0.0
+            attempt_budget = min(
+                C.IMAGE_HORDE_ATTEMPT_TIMEOUT_SECONDS,
+                max(5.0, remaining - reserve),
+            )
+        else:
+            attempt_budget = min(
+                C.IMAGE_PROVIDER_ATTEMPT_TIMEOUT_SECONDS, remaining,
+            )
+        try:
+            result = await asyncio.wait_for(
+                _try_provider(
+                    provider_name,
+                    session=session,
+                    profile=profile,
+                    prompt_clean=prompt_clean,
+                    timeout_seconds=attempt_budget,
+                    gemini_key=gemini_key,
+                    aihorde_key=aihorde_key,
+                    hf_key=hf_key,
+                    custom_key=custom_key,
+                    aihorde_url=aihorde_url,
+                    custom_url=custom_url,
+                    adult_model_override=adult_model_override,
+                    pollinations_key=pollinations_key,
+                    cf_account=cf_account,
+                    cf_token=cf_token,
+                ),
+                timeout=attempt_budget,
+            )
+        except asyncio.TimeoutError:
+            result = ImageGenerationResult(
+                ok=False,
+                provider=provider_name,
+                prompt_class=pclass,
+                reason="timeout",
+                detail="attempt_deadline",
+            )
         if result is None:
             # Provider não configurado (sem chave) ou não aplicável ao perfil.
             continue
@@ -1169,7 +1380,8 @@ async def _try_provider(
     aihorde_key: str,
     hf_key: str,
     custom_key: str,
-    adult_url: str,
+    aihorde_url: str,
+    custom_url: str,
     adult_model_override: str,
     pollinations_key: str,
     cf_account: str,
@@ -1243,39 +1455,44 @@ async def _try_provider(
     if name == "aihorde":
         model_list = ext.aihorde_models_for_profile(profile, override=adult_model_override)
         model_str = ",".join(model_list)
-        return await _generate_with_aihorde(
+        result = await _generate_with_aihorde(
             session,
             api_key=aihorde_key,
-            base_url=adult_url,
+            base_url=aihorde_url,
             model=model_str,
             prompt=prompt_clean,
             timeout_seconds=timeout_seconds,
             is_nsfw=profile.nsfw,
+        )
+        return _with_prompt_class(
+            result, "adult_allowed" if profile.nsfw else "safe",
         )
 
     if name == "huggingface":
         hf_models = _hf_fallback_models(adult_model_override)
         if not hf_models:
             return None
-        return await _generate_with_huggingface(
+        result = await _generate_with_huggingface(
             session,
             api_key=hf_key,
             model=hf_models[0],
             prompt=prompt_clean,
             timeout_seconds=timeout_seconds,
         )
+        return _with_prompt_class(
+            result, "adult_allowed" if profile.nsfw else "safe",
+        )
 
     if name == "adult_custom":
         has_config = bool(
-            adult_model_override and adult_url
-            and "aihorde.net/api" not in adult_url
+            adult_model_override and custom_url
         )
         if not has_config:
             return None
         return await _generate_with_adult_provider(
             session,
             api_key=custom_key,
-            api_url=adult_url,
+            api_url=custom_url,
             model=adult_model_override,
             prompt=prompt_clean,
             timeout_seconds=timeout_seconds,
@@ -1293,7 +1510,8 @@ async def _run_legacy_nsfw_provider(
     aihorde_key: str,
     hf_key: str,
     custom_key: str,
-    adult_url: str,
+    aihorde_url: str,
+    custom_url: str,
     adult_model_override: str,
     eff_timeout: float,
 ) -> ImageGenerationResult:
@@ -1307,7 +1525,7 @@ async def _run_legacy_nsfw_provider(
         return await _generate_with_aihorde(
             session,
             api_key=aihorde_key,
-            base_url=adult_url,
+            base_url=aihorde_url,
             model=",".join(model_list),
             prompt=prompt_clean,
             timeout_seconds=eff_timeout,
@@ -1338,8 +1556,37 @@ async def _run_legacy_nsfw_provider(
     return await _generate_with_adult_provider(
         session,
         api_key=custom_key,
-        api_url=adult_url,
+        api_url=custom_url,
         model=adult_model_override,
         prompt=prompt_clean,
         timeout_seconds=eff_timeout,
     )
+
+
+async def generate_image(
+    session: aiohttp.ClientSession,
+    *,
+    prompt: str,
+    channel_is_nsfw: bool,
+    timeout_seconds: Optional[float] = None,
+) -> ImageGenerationResult:
+    """API pública com um deadline único envolvendo toda a cascata."""
+    budget = max(1.0, float(timeout_seconds or C.IMAGE_JOB_TIMEOUT_SECONDS))
+    try:
+        return await asyncio.wait_for(
+            _generate_image_impl(
+                session,
+                prompt=prompt,
+                channel_is_nsfw=channel_is_nsfw,
+                timeout_seconds=budget,
+            ),
+            timeout=budget,
+        )
+    except asyncio.TimeoutError:
+        return ImageGenerationResult(
+            ok=False,
+            provider="router",
+            prompt_class=classify_image_prompt(prompt),
+            reason="timeout",
+            detail="total_deadline",
+        )

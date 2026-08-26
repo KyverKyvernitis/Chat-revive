@@ -5,6 +5,24 @@ Valores pensados para VPS de 1GB de RAM — NÃO inflacionar sem testar.
 """
 from __future__ import annotations
 
+import os
+
+
+def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Lê uma lista CSV do ambiente sem aceitar uma cadeia vazia."""
+    raw = os.environ.get(name, "")
+    values = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return values or default
+
+
+def _env_float(name: str, default: float, lo: float, hi: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(lo, min(hi, value))
+
+
 # -----------------------------------------------------------------------------
 # Banco de dados
 # -----------------------------------------------------------------------------
@@ -64,32 +82,46 @@ DEFAULT_TEMPERATURE = 0.8
 MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 1.5
 
-# Modelos preferidos por provider. Primeiro da lista é o default.
-# Llama 3.3 70B é o mais capaz no Groq free; llama 3.1 8B é fallback rápido.
-GROQ_MODELS = ("llama-3.3-70b-versatile", "llama-3.1-8b-instant")
+# Modelos preferidos por provider. Os antigos Llama 3.1/3.3 foram desligados
+# pelo Groq em 16/08/2026. IDs ficam configuráveis para não exigir patch a
+# cada depreciação futura.
+GROQ_MODELS = _env_csv(
+    "CHATBOT_GROQ_MODELS",
+    ("openai/gpt-oss-20b", "openai/gpt-oss-120b"),
+)
 
 # Fallback Gemini para quando Groq rate-limitar.
 # Evita os IDs antigos 2.0 que estavam retornando HTTP 404 na API atual.
 # Mantenha modelos estáveis em produção; previews ficam fora da cadeia padrão.
-GEMINI_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
+GEMINI_MODELS = _env_csv(
+    "CHATBOT_GEMINI_MODELS",
+    ("gemini-2.5-flash", "gemini-2.5-flash-lite"),
+)
 
 # Modelo de visão (aceita imagens via image_url ou base64). Usado só quando
 # a mensagem tem imagem — pra texto puro, os modelos acima são mais capazes
-# conversacionalmente. Llama 4 Scout: free tier Groq, multimodal nativo.
-GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# conversacionalmente. Qwen 3.6 é multimodal; o Llama 4 Scout anterior foi
+# desligado pelo Groq em 17/07/2026.
+GROQ_VISION_MODELS = _env_csv(
+    "CHATBOT_GROQ_VISION_MODELS",
+    ("qwen/qwen3.6-27b",),
+)
+# Alias mantido para imports/configurações antigas.
+GROQ_VISION_MODEL = GROQ_VISION_MODELS[0]
 
 # Whisper Large V3 Turbo — STT grátis via Groq. ~300 req/dia free tier.
 # Usado pra transcrever voice messages do Discord.
 GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"
 GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
-# Gemini 2.5 Flash Image — geração de imagem nativa via Gemini API.
-# Gemini 2.0 flash image gen foi descontinuado em março/2026; o substituto é
-# gemini-2.5-flash-image (ou gemini-3-flash-preview). Usa a MESMA key Gemini
+# Gemini 3.1 Flash Image — geração de imagem nativa via Gemini API.
+# O 2.5 Flash Image será desligado em 02/10/2026. Usa a MESMA key Gemini
 # que o bot já tem pra chat. Response vem com imagem em base64 no inlineData.
 # Se a key do user for nova e não tiver esse modelo ativo, cai fallback
 # graceful pro texto.
-GEMINI_IMAGEGEN_MODEL = "gemini-2.5-flash-image"
+GEMINI_IMAGEGEN_MODEL = os.environ.get(
+    "CHATBOT_GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"
+).strip() or "gemini-3.1-flash-image"
 GEMINI_IMAGEGEN_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent"
@@ -98,7 +130,10 @@ GEMINI_IMAGEGEN_URL = (
 # Limites de anexos processáveis. Acima disso ignoramos (sem crash).
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024   # 20MB (limite do Groq via URL)
 MAX_AUDIO_SIZE_BYTES = 25 * 1024 * 1024   # 25MB (limite do Groq Whisper)
-MAX_IMAGES_PER_MESSAGE = 5                 # Groq limita 5/request
+MAX_IMAGES_PER_MESSAGE = 3                 # menor limite comum dos modelos de visão
+MAX_GEMINI_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_GENERATED_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_TTS_OUTPUT_BYTES = 8 * 1024 * 1024
 SUPPORTED_IMAGE_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
 SUPPORTED_AUDIO_MIMES = {
     "audio/ogg", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a",
@@ -107,9 +142,13 @@ SUPPORTED_AUDIO_MIMES = {
 
 # Timeout por chamada HTTP ao provider. Se passar disso, abortamos.
 PROVIDER_TIMEOUT_SECONDS = 25.0
+PROVIDER_ROUTER_TIMEOUT_SECONDS = 38.0
+MEDIA_CONNECT_TIMEOUT_SECONDS = 5.0
+MEDIA_READ_TIMEOUT_SECONDS = 25.0
 
 # Máximo de tokens na resposta do modelo.
 MAX_RESPONSE_TOKENS = 500
+MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
 
 # -----------------------------------------------------------------------------
 # Concorrência e rate limiting interno
@@ -123,6 +162,21 @@ MAX_CONCURRENT_REQUESTS = 2
 # Evita acumular coroutines pendentes que gastam RAM.
 MAX_QUEUE_SIZE = 15
 
+# Admissão por classe de trabalho. Chat inclui todo o turno; STT e imagegen
+# ainda usam slots de recurso próprios para não competirem com o TTS do bot.
+STT_MAX_CONCURRENT_REQUESTS = 1
+IMAGE_MAX_CONCURRENT_REQUESTS = 1
+IMAGE_MAX_QUEUE_SIZE = 3
+PERSONA_MAX_CONCURRENT_REQUESTS = 1
+PERSONA_MAX_QUEUE_SIZE = 2
+IMAGE_JOB_TIMEOUT_SECONDS = _env_float(
+    "CHATBOT_IMAGE_JOB_TIMEOUT_SECONDS", 150.0, 45.0, 240.0
+)
+IMAGE_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 35.0
+IMAGE_HORDE_ATTEMPT_TIMEOUT_SECONDS = 90.0
+IMAGE_FALLBACK_RESERVE_SECONDS = 35.0
+TASK_SHUTDOWN_TIMEOUT_SECONDS = 8.0
+
 # Cooldown por usuário — não dispara >1 mensagem a cada X segundos.
 USER_COOLDOWN_SECONDS = 2.0
 
@@ -132,7 +186,14 @@ CONTEXT_LOAD_TIMEOUT_SECONDS = 6.0
 
 # Tempo máximo de um turno de chat comum. Imagegen fica fora desse limite
 # porque provedores de imagem podem demorar mais e já têm controles próprios.
-CHAT_TURN_TIMEOUT_SECONDS = 45.0
+CHAT_TURN_TIMEOUT_SECONDS = 68.0
+
+# Modo de recuperação: mantém só chat textual direto. Não executa extrovert,
+# transcrição nem geração de imagem. Útil para recuperar provider/cota sem
+# derrubar o cog inteiro.
+SAFE_MODE = os.environ.get("CHATBOT_SAFE_MODE", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 
 # Locks por canal/profile ficam em RAM para preservar ordem das respostas.
 # Depois de inativos, são limpos pelo watchdog para não crescer indefinidamente.
@@ -145,6 +206,7 @@ MAX_USER_HISTORY_CONTEXT_CHARS = 6000
 MAX_GUILD_CONTEXT_CHARS = 4000
 MAX_CHANNEL_CONTEXT_CHARS = 3000
 MAX_MODEL_REPLY_CHARS = 4000
+MAX_STORED_MESSAGE_CHARS = 4000
 
 
 # -----------------------------------------------------------------------------
@@ -176,8 +238,8 @@ PERSONA_COMMAND_PREFIXES = ("/", "!", "?", ".", "_", ";")
 WEBHOOK_CACHE_MAX_ENTRIES = 100
 WEBHOOK_CACHE_TTL_SECONDS = 1800  # 30 min
 
-PROFILE_CACHE_MAX_ENTRIES = 50
-PROFILE_CACHE_TTL_SECONDS = 600   # 10 min
+PROFILE_CACHE_MAX_ENTRIES = 200
+PROFILE_CACHE_TTL_SECONDS = 30    # curto: reduz Mongo sem esconder mudanças externas
 
 # Mapping de message_id → profile_id (para resolver replies).
 # TTL longo porque o usuário pode replicar uma mensagem antiga.
@@ -234,14 +296,20 @@ SYSTEM_PROMPT_WARNING = (
 )
 
 # -----------------------------------------------------------------------------
-# Chaves Mongo (reusamos a coleção settings existente via campo `type`)
+# Chaves Mongo da coleção dedicada, separadas pelo campo `type`
 # -----------------------------------------------------------------------------
 
 DOC_TYPE_PROFILE = "chatbot_profile"
 DOC_TYPE_MEMORY = "chatbot_memory"
+DOC_TYPE_MEMORY_V2 = "chatbot_memory_v2"
+DOC_TYPE_MEMORY_EPOCH = "chatbot_memory_epoch"
 DOC_TYPE_MESSAGE_MAP = "chatbot_msg_map"
+DOC_TYPE_WEBHOOK = "chatbot_webhook"
 DOC_TYPE_EXTROVERT = "chatbot_extrovert"
 DOC_TYPE_MASTER = "chatbot_master"
+DOC_TYPE_GUILD_CONFIG = "chatbot_guild_config"
+DOC_TYPE_MIGRATION = "chatbot_migration"
+CHATBOT_SCHEMA_VERSION = 2
 
 # -----------------------------------------------------------------------------
 # System prompt mestre — configurado pelo dono em UM server específico
@@ -249,8 +317,8 @@ DOC_TYPE_MASTER = "chatbot_master"
 
 # ID do servidor onde o /chatbot master pode ser usado. É o "servidor de
 # configuração do bot" — só a staff desse server mexe no prompt mestre.
-# Pode ser re-configurado via `/chatbot master set_config_server` a partir
-# do próprio config server atual (safeguard contra hijack).
+# Pode ser reconfigurado por dono/operador via
+# `/chatbotadmin master acao:Transferir destino:<guild_id>`.
 DEFAULT_MASTER_CONFIG_GUILD_ID = 927002914449424404
 
 # Limite de caracteres do master prompt. É global (aplicado a TODOS os
@@ -372,19 +440,15 @@ CHANNEL_HISTORY_CACHE_MAX_ENTRIES = 50
 # -----------------------------------------------------------------------------
 # Guild de gerenciamento + allowlist de NSFW
 # -----------------------------------------------------------------------------
-# A "management guild" é a única guild onde:
-#   1) Comandos administrativos cross-guild (`/chatbot master`, reset global)
-#      ficam visíveis no autocomplete (via @app_commands.guilds(...)).
-#   2) Features NSFW (imagegen adulto + diretiva NSFW do chatbot) são habilitadas.
+# A "management guild" é usada somente como allowlist inicial de recursos
+# NSFW (imagegen adulto + diretiva NSFW do chatbot). Os comandos
+# `/chatbotadmin` são globais e protegidos pelos checks de operador/config.
 # Em qualquer outra guild, mesmo que o canal seja age-restricted no Discord,
 # o bot trata como SFW: imagegen adulto é recusado e o chatbot recebe a diretiva
 # SFW. Profiles continuam funcionando normalmente em todas as guilds (sem
 # nenhuma menção a essa restrição); a única diferença é o limite de conteúdo.
 
-import discord as _discord  # só pra criar o Object; não exportamos pra fora
-
 MANAGEMENT_GUILD_ID: int = 927002914449424404
-MANAGEMENT_GUILD_OBJ: _discord.Object = _discord.Object(id=MANAGEMENT_GUILD_ID)
 
 _NSFW_ENABLED_GUILDS: frozenset[int] = frozenset({MANAGEMENT_GUILD_ID})
 
@@ -396,4 +460,3 @@ def nsfw_enabled_for_guild(guild_id: int | None) -> bool:
     if guild_id is None:
         return False
     return guild_id in _NSFW_ENABLED_GUILDS
-

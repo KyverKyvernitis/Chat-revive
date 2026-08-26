@@ -7,6 +7,7 @@ dinâmica, como personas baseadas em membros.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Optional
 
@@ -75,6 +76,9 @@ class MessageProfileIndex:
                     "message_id": int(message_id),
                     "profile_id": str(profile_id),
                     "created_at": now,
+                    "expires_at": datetime.now(timezone.utc) + timedelta(
+                        seconds=C.MESSAGE_PROFILE_CACHE_TTL_SECONDS
+                    ),
                 }
             },
             upsert=True,

@@ -48,56 +48,117 @@ async def ensure_indexes(coll) -> None:
     if coll is None:
         return
 
-    try:
-        # Índice de suporte — acelera list_profiles por guild.
-        await coll.create_index(
+    specs = [
+        (
             [("type", 1), ("guild_id", 1)],
-            name="type_1_guild_id_1",
-        )
-
-        # UNIQUE em profile_id dentro do guild (só pra docs de profile).
-        # Se o profile_id colidir, preferimos receber DuplicateKeyError
-        # (bug detectável) do que silenciosamente criar dois profiles
-        # com mesmo ID.
-        await coll.create_index(
+            {"name": "type_1_guild_id_1"},
+        ),
+        (
             [("type", 1), ("guild_id", 1), ("profile_id", 1)],
-            name="chatbot_profile_unique",
-            unique=True,
-            partialFilterExpression={"type": "chatbot_profile"},
-        )
-
-        # Suporte pra lookup de memória por (profile, user) — sparse pra
-        # não gastar espaço com docs sem profile_id (legados).
-        await coll.create_index(
+            {
+                "name": "chatbot_profile_unique",
+                "unique": True,
+                "partialFilterExpression": {"type": C.DOC_TYPE_PROFILE},
+            },
+        ),
+        # Legado: não-unique de propósito. A memória V1 deixa de ser lida, mas
+        # o índice continua ajudando comandos de limpeza/rollback.
+        (
             [("type", 1), ("guild_id", 1), ("scope", 1),
              ("profile_id", 1), ("user_id", 1)],
-            name="chatbot_memory_lookup",
-            sparse=True,
-        )
-
-        # Reply robusto: mensagem enviada pelo webhook -> profile que enviou.
-        await coll.create_index(
-            [("type", 1), ("message_id", 1)],
-            name="chatbot_msg_map_lookup",
-            unique=True,
-            partialFilterExpression={"type": C.DOC_TYPE_MESSAGE_MAP},
-        )
-        await coll.create_index(
-            [("type", 1), ("guild_id", 1), ("created_at", 1)],
-            name="chatbot_msg_map_cleanup",
-            partialFilterExpression={"type": C.DOC_TYPE_MESSAGE_MAP},
-        )
-
-        # Config única do modo extrovert por guild.
-        await coll.create_index(
+            {"name": "chatbot_memory_lookup", "sparse": True},
+        ),
+        (
+            [
+                ("type", 1), ("scope", 1), ("guild_id", 1),
+                ("profile_id", 1), ("profile_revision", 1),
+                ("channel_id", 1), ("visibility_scope", 1),
+                ("global_generation", 1), ("guild_generation", 1),
+                ("user_id", 1), ("user_generation", 1),
+            ],
+            {
+                "name": "chatbot_memory_v2_unique",
+                "unique": True,
+                "partialFilterExpression": {"type": C.DOC_TYPE_MEMORY_V2},
+            },
+        ),
+        (
+            [("type", 1), ("epoch_key", 1)],
+            {
+                "name": "chatbot_memory_epoch_unique",
+                "unique": True,
+                "partialFilterExpression": {"type": C.DOC_TYPE_MEMORY_EPOCH},
+            },
+        ),
+        (
             [("type", 1), ("guild_id", 1)],
-            name="chatbot_extrovert_unique",
-            unique=True,
-            partialFilterExpression={"type": C.DOC_TYPE_EXTROVERT},
-        )
+            {
+                "name": "chatbot_guild_config_unique",
+                "unique": True,
+                "partialFilterExpression": {"type": C.DOC_TYPE_GUILD_CONFIG},
+            },
+        ),
+        (
+            [("type", 1)],
+            {
+                "name": "chatbot_master_singleton",
+                "unique": True,
+                "partialFilterExpression": {"type": C.DOC_TYPE_MASTER},
+            },
+        ),
+        (
+            [("type", 1), ("message_id", 1)],
+            {
+                "name": "chatbot_msg_map_lookup",
+                "unique": True,
+                "partialFilterExpression": {"type": C.DOC_TYPE_MESSAGE_MAP},
+            },
+        ),
+        (
+            [("expires_at", 1)],
+            {
+                "name": "chatbot_msg_map_ttl",
+                "expireAfterSeconds": 0,
+                "partialFilterExpression": {"type": C.DOC_TYPE_MESSAGE_MAP},
+            },
+        ),
+        (
+            [("type", 1), ("guild_id", 1)],
+            {
+                "name": "chatbot_extrovert_unique",
+                "unique": True,
+                "partialFilterExpression": {"type": C.DOC_TYPE_EXTROVERT},
+            },
+        ),
+        (
+            [("type", 1), ("channel_id", 1)],
+            {
+                "name": "chatbot_webhook_unique",
+                "unique": True,
+                "partialFilterExpression": {"type": C.DOC_TYPE_WEBHOOK},
+            },
+        ),
+        (
+            [("type", 1), ("migration_id", 1)],
+            {
+                "name": "chatbot_migration_unique",
+                "unique": True,
+                "partialFilterExpression": {"type": C.DOC_TYPE_MIGRATION},
+            },
+        ),
+    ]
 
+    failures = 0
+    for keys, kwargs in specs:
+        try:
+            await coll.create_index(keys, **kwargs)
+        except Exception:
+            failures += 1
+            # Cada índice é isolado: um legado duplicado não impede os índices
+            # V2 e TTL seguintes de serem criados.
+            log.exception("chatbot: falha ao criar índice %s", kwargs.get("name"))
+
+    if failures:
+        log.warning("chatbot: índices verificados com %s falha(s)", failures)
+    else:
         log.info("chatbot: índices do %s verificados", C.CHATBOT_COLLECTION_NAME)
-    except Exception:
-        # Não é fatal. Bot continua funcionando, só sem os índices
-        # (queries ficam mais lentas mas corretas).
-        log.exception("chatbot: falha ao criar índices — continuando")

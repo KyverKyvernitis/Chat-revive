@@ -82,6 +82,7 @@ class GamesChipProfileRendererTests(unittest.TestCase):
             1,
             race_name="Sortudo",
             achievement_count=2,
+            achievement_total=6,
             daily_available=True,
             recharge_available=True,
         )
@@ -96,7 +97,34 @@ class GamesChipProfileRendererTests(unittest.TestCase):
             ["chips", "rank", "bonus", "weekly"],
         )
         self.assertEqual(build_profile_metrics(complete)[-1].label, "SEMANAL")
-        self.assertEqual(len(build_profile_badges(complete)), 4)
+        self.assertEqual(
+            build_profile_badges(complete),
+            (
+                "RAÇA · Sortudo",
+                "Conquistas • 2 de 6",
+                "_daily disponível",
+                "_recarga disponível",
+            ),
+        )
+
+    def test_unavailable_profile_actions_are_not_rendered_as_badges(self) -> None:
+        data = ChipProfileData(
+            "Nome global",
+            190,
+            0,
+            0,
+            1,
+            achievement_count=2,
+            achievement_total=6,
+            daily_available=False,
+            recharge_available=False,
+        )
+
+        badges = build_profile_badges(data)
+
+        self.assertEqual(badges, ("Conquistas • 2 de 6",))
+        self.assertNotIn("_daily disponível", badges)
+        self.assertNotIn("_recarga disponível", badges)
 
     def test_complete_profile_name_is_not_cut_when_it_fits(self) -> None:
         font = RENDERER._load_font(40, bold=False)

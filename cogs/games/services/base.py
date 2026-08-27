@@ -2788,6 +2788,11 @@ class GincanaBase:
         except Exception:
             recharge_available = False
 
+        unlocked_achievement_count = len(
+            self._get_unlocked_achievement_keys(guild_id, user_id)
+        )
+        achievement_total = len(self._achievement_catalog())
+
         return ChipProfileData(
             display_name=self._chip_profile_global_name(member),
             chips=int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0),
@@ -2795,7 +2800,8 @@ class GincanaBase:
             weekly_delta=weekly_delta,
             rank_position=self._chip_rank_cache.get_position(member.guild, user_id),
             race_name=race_name,
-            achievement_count=len(self._get_unlocked_achievement_keys(guild_id, user_id)),
+            achievement_count=unlocked_achievement_count,
+            achievement_total=achievement_total,
             daily_available=daily_available,
             recharge_available=recharge_available,
         )

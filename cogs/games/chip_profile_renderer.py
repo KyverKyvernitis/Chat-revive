@@ -42,6 +42,7 @@ class ChipProfileData:
     achievement_count: int = 0
     daily_available: bool = False
     recharge_available: bool = False
+    achievement_total: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,12 +388,14 @@ def build_profile_badges(data: ChipProfileData) -> tuple[str, ...]:
     badges: list[str] = []
     if data.race_name:
         badges.append(f"RAÇA · {data.race_name}")
-    if int(data.achievement_count) > 0:
-        badges.append(f"CONQUISTAS · {int(data.achievement_count)}")
+    achievement_count = max(0, int(data.achievement_count))
+    achievement_total = max(achievement_count, int(data.achievement_total))
+    if achievement_count > 0:
+        badges.append(f"Conquistas • {achievement_count} de {achievement_total}")
     if data.daily_available:
-        badges.append("DIÁRIO DISPONÍVEL")
+        badges.append("_daily disponível")
     if data.recharge_available:
-        badges.append("RECARGA DISPONÍVEL")
+        badges.append("_recarga disponível")
     return tuple(badges)
 
 

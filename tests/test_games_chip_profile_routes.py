@@ -55,6 +55,17 @@ class GamesChipProfileRouteTests(unittest.TestCase):
         self.assertIn("MAX_PROFILE_IMAGES = 48", cache_source)
         self.assertIn("asyncio.to_thread", cache_source)
 
+    def test_profile_achievement_total_comes_from_the_live_catalog(self) -> None:
+        base_source = (ROOT / "cogs" / "games" / "services" / "base.py").read_text(
+            encoding="utf-8"
+        )
+        builder_source = base_source.split("def _build_chip_profile_data", 1)[1].split(
+            "async def _send_chip_profile", 1
+        )[0]
+
+        self.assertIn("achievement_total = len(self._achievement_catalog())", builder_source)
+        self.assertIn("achievement_total=achievement_total", builder_source)
+
 
 if __name__ == "__main__":
     unittest.main()

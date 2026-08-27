@@ -254,6 +254,20 @@ class ChipRankCache:
             return None
         return entry.positions.get(int(user_id))
 
+    def get_position(self, guild: discord.Guild, user_id: int) -> int | None:
+        """Resolve a posição sem rede caso o aquecimento ainda não tenha terminado."""
+        cached = self.get_cached_position(int(guild.id), int(user_id))
+        if cached is not None:
+            return cached
+        for row in self._build_ranked_rows(guild):
+            if int(row.user_id) == int(user_id):
+                return int(row.position)
+        return None
+
+    def get_cached_token_icons(self) -> dict[str, bytes]:
+        """Compartilha somente cópias dos pequenos ícones já aquecidos."""
+        return dict(self._token_icons)
+
     async def get_rank(
         self,
         guild: discord.Guild,

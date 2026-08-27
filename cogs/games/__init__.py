@@ -608,7 +608,7 @@ class GamesCog(dcommands.Cog, GamesCore):
     async def ficha(self, ctx: dcommands.Context):
         if not await self._ensure_games_command_entry(ctx, trigger_hint="ficha"):
             return
-        await ctx.reply(view=self._make_chip_balance_view(ctx.author), mention_author=False)
+        await self._send_chip_profile(ctx.reply, ctx.author, mention_author=False)
 
     @dcommands.command(name="extrato")
     async def extrato_command(self, ctx: dcommands.Context):
@@ -972,14 +972,17 @@ class GamesCog(dcommands.Cog, GamesCore):
     @dcommands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         self._chip_rank_cache.invalidate_member(member)
+        self._chip_profile_cache.invalidate_member(member)
 
     @dcommands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         self._chip_rank_cache.invalidate_member(member)
+        self._chip_profile_cache.invalidate_member(member)
 
     @dcommands.Cog.listener()
     async def on_user_update(self, before: discord.User, after: discord.User):
         self._chip_rank_cache.user_changed(before, after)
+        self._chip_profile_cache.user_changed(before, after)
 
     @dcommands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
@@ -988,11 +991,15 @@ class GamesCog(dcommands.Cog, GamesCore):
     @dcommands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild):
         self._chip_rank_cache.drop_guild(guild.id)
+        self._chip_profile_cache.drop_guild(guild.id)
         self._forget_guild_achievement_notice_groups(guild.id)
 
     async def cog_unload(self):
         await self._close_achievement_notice_groups()
-        await self._chip_rank_cache.close()
+        await asyncio.gather(
+            self._chip_profile_cache.close(),
+            self._chip_rank_cache.close(),
+        )
 
     @dcommands.Cog.listener()
     async def on_message(self, message: discord.Message):

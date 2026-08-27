@@ -12,6 +12,7 @@ import discord
 from discord.ext import commands
 
 from config import OFF_COLOR, ON_COLOR
+from ..chip_profile_renderer import ChipProfileData
 from ..constants import (
     CHIPS_DEFAULT,
     CHIPS_INITIAL,
@@ -31,6 +32,7 @@ from ..constants import (
 from db import SettingsDB
 from ..rank_renderer import format_number, format_weekly_delta
 from .achievement_notices import AchievementNoticeBurst, merge_achievement_keys
+from .chip_profile_cache import ChipProfileCache, PROFILE_FILENAME
 from .rank_cache import (
     ChipRankCache,
     ChipRankResponse,
@@ -297,6 +299,7 @@ class GincanaBase:
         self._achievement_notice_cleanup_task: asyncio.Task | None = None
         self._race_private_notices: dict[tuple[int, int], list[str]] = {}
         self._chip_rank_cache = ChipRankCache(bot, db)
+        self._chip_profile_cache = ChipProfileCache(bot, self._chip_rank_cache)
 
 
     def _touch_runtime_state(self, state: dict | None, *, kind: str | None = None, guild_id: int | None = None) -> float:
@@ -2746,6 +2749,86 @@ class GincanaBase:
     def _chip_rank_position_text(self, guild: discord.Guild, user_id: int) -> str | None:
         position = self._chip_rank_cache.get_cached_position(guild.id, user_id)
         return f"🏆 Rank: **#{position}**" if position is not None else None
+
+    @staticmethod
+    def _chip_profile_global_name(member: discord.Member) -> str:
+        """Nome do perfil global: nunca apelido da guild, tag ou @usuário."""
+        global_name = " ".join(str(getattr(member, "global_name", "") or "").split())
+        username = " ".join(str(getattr(member, "name", "") or "Usuário").split()) or "Usuário"
+        return global_name or username
+
+    def _build_chip_profile_data(self, member: discord.Member) -> ChipProfileData:
+        guild_id = int(member.guild.id)
+        user_id = int(member.id)
+        weekly_getter = getattr(self.db, "get_user_chip_week_delta", None)
+        try:
+            weekly_delta = int(weekly_getter(guild_id, user_id) if callable(weekly_getter) else 0)
+        except (TypeError, ValueError):
+            weekly_delta = 0
+
+        race_info = self._get_user_race_info(guild_id, user_id) or {}
+        race_name = " ".join(str(race_info.get("name") or "").split()) or None
+        if race_name and not self._is_user_race_active(guild_id, user_id):
+            race_name = f"{race_name} (inativa)"
+
+        try:
+            daily_status = self.db.get_user_daily_status(guild_id, user_id) or {}
+            daily_available = bool(daily_status.get("available"))
+        except Exception:
+            daily_available = False
+        try:
+            recharge_available = bool(self._chip_recharge_state(guild_id, user_id).get("available"))
+        except Exception:
+            recharge_available = False
+
+        return ChipProfileData(
+            display_name=self._chip_profile_global_name(member),
+            chips=int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0),
+            bonus_chips=int(self._get_user_bonus_chips(guild_id, user_id) or 0),
+            weekly_delta=weekly_delta,
+            rank_position=self._chip_rank_cache.get_position(member.guild, user_id),
+            race_name=race_name,
+            achievement_count=len(self._get_unlocked_achievement_keys(guild_id, user_id)),
+            daily_available=daily_available,
+            recharge_available=recharge_available,
+        )
+
+    @staticmethod
+    def _make_chip_profile_view(description: str) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(
+            discord.ui.Container(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(
+                        f"attachment://{PROFILE_FILENAME}",
+                        description=str(description or "Perfil de fichas")[:256],
+                    )
+                )
+            )
+        )
+        return view
+
+    async def _send_chip_profile(self, sender, member: discord.Member, **send_kwargs):
+        """Envia o mesmo perfil visual pelos comandos com prefixo e por texto livre."""
+        try:
+            data = self._build_chip_profile_data(member)
+            response = await self._chip_profile_cache.get_profile(member, data)
+            image = discord.File(io.BytesIO(response.image_bytes), filename=PROFILE_FILENAME)
+            return await sender(
+                file=image,
+                view=self._make_chip_profile_view(response.accessible_description),
+                **send_kwargs,
+            )
+        except Exception as exc:
+            print(
+                f"[games] erro ao montar imagem do perfil "
+                f"guild={getattr(getattr(member, 'guild', None), 'id', 0)} "
+                f"user={getattr(member, 'id', 0)}: {exc!r}"
+            )
+            return await sender(
+                view=self._make_chip_balance_view(member),
+                **send_kwargs,
+            )
 
     def _make_chip_balance_view(self, member: discord.Member) -> discord.ui.LayoutView:
         guild_id = member.guild.id

@@ -61,7 +61,7 @@ class GincanaMessageRouterMixin:
         if message.guild is None:
             return True
         if content in {"ficha", "fichas"}:
-            await message.channel.send(view=self._make_chip_balance_view(message.author))
+            await self._send_chip_profile(message.channel.send, message.author)
             return True
         if content == "extrato":
             await message.channel.send(view=self._make_chip_history_view(message.author, limit=10))

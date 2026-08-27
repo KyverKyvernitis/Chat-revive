@@ -988,8 +988,10 @@ class GamesCog(dcommands.Cog, GamesCore):
     @dcommands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild):
         self._chip_rank_cache.drop_guild(guild.id)
+        self._forget_guild_achievement_notice_groups(guild.id)
 
     async def cog_unload(self):
+        await self._close_achievement_notice_groups()
         await self._chip_rank_cache.close()
 
     @dcommands.Cog.listener()

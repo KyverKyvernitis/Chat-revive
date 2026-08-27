@@ -1033,6 +1033,11 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         for member in bullseye_members:
             if await self._unlock_achievement(guild.id, member.id, "target_bullseye"):
                 bullseye_achievement_user_ids.append(member.id)
+        achievement_notices_by_user: dict[int, list[str]] = {}
+        for user_id in first_game_user_ids:
+            achievement_notices_by_user.setdefault(int(user_id), []).append("first_game")
+        for user_id in bullseye_achievement_user_ids:
+            achievement_notices_by_user.setdefault(int(user_id), []).append("target_bullseye")
         result_delivered = False
         if message is not None:
             final_view = _TargetStateView(self, guild, session, finished=True)
@@ -1046,9 +1051,13 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             or getattr(lobby_message, "channel", None)
             or guild.get_channel(int(session.get("text_channel_id", 0) or 0))
         )
-        await self._send_first_game_notices(achievement_channel, guild.id, first_game_user_ids)
-        for user_id in bullseye_achievement_user_ids:
-            await self._send_achievement_notice(achievement_channel, guild.id, user_id, "target_bullseye")
+        for user_id, achievement_keys in achievement_notices_by_user.items():
+            await self._send_achievement_notices(
+                achievement_channel,
+                guild.id,
+                user_id,
+                achievement_keys,
+            )
         current = self._target_sessions.get(guild_id)
         if current is session:
             self._target_sessions.pop(guild_id, None)

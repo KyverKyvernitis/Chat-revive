@@ -1807,10 +1807,14 @@ class GincanaRoletaMixin:
                 lost=result_kind == "loss",
             )
             await self._deliver_game_result(source_message, spin_message, view=result_view)
-            if first_game_unlocked:
-                await self._send_achievement_notice(source_message.channel, guild.id, actor.id, "first_game")
-            for achievement_key in roulette_achievements:
-                await self._send_achievement_notice(source_message.channel, guild.id, actor.id, achievement_key)
+            achievement_keys = (["first_game"] if first_game_unlocked else []) + roulette_achievements
+            if achievement_keys:
+                await self._send_achievement_notices(
+                    source_message.channel,
+                    guild.id,
+                    actor.id,
+                    achievement_keys,
+                )
             return True
 
         async def _execute_carta_round(
@@ -1949,10 +1953,14 @@ class GincanaRoletaMixin:
                 lost=result_kind == "loss",
             )
             await self._deliver_game_result(source_message, spin_message, view=result_view)
-            if first_game_unlocked:
-                await self._send_achievement_notice(source_message.channel, guild.id, actor.id, "first_game")
-            for achievement_key in roulette_achievements:
-                await self._send_achievement_notice(source_message.channel, guild.id, actor.id, achievement_key)
+            achievement_keys = (["first_game"] if first_game_unlocked else []) + roulette_achievements
+            if achievement_keys:
+                await self._send_achievement_notices(
+                    source_message.channel,
+                    guild.id,
+                    actor.id,
+                    achievement_keys,
+                )
             return True
         async def _run_carta_trigger_locked(self, message: discord.Message) -> bool:
             guild = message.guild

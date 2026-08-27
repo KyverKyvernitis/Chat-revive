@@ -30,6 +30,7 @@ from ..constants import (
 )
 from db import SettingsDB
 from ..rank_renderer import format_number, format_weekly_delta
+from .achievement_notices import AchievementNoticeBurst, merge_achievement_keys
 from .rank_cache import (
     ChipRankCache,
     ChipRankResponse,
@@ -292,6 +293,8 @@ class GincanaBase:
         self._gincana_message_edit_locks: dict[int, asyncio.Lock] = {}
         self._race_progress_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._achievement_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._achievement_notice_groups: dict[tuple[int, int, int], AchievementNoticeBurst] = {}
+        self._achievement_notice_cleanup_task: asyncio.Task | None = None
         self._race_private_notices: dict[tuple[int, int], list[str]] = {}
         self._chip_rank_cache = ChipRankCache(bot, db)
 
@@ -904,6 +907,7 @@ class GincanaBase:
                 doc.pop(field, None)
             await self.db._save_user_doc(guild_id, user_id, doc)
             await self.db.clear_user_game_achievements(guild_id, user_id)
+            self._forget_achievement_notice_groups(guild_id, user_id)
             return int(amount)
 
     async def _force_full_reset_ficha_profile(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
@@ -928,6 +932,7 @@ class GincanaBase:
                 doc.pop(field, None)
             await self.db._save_user_doc(guild_id, user_id, doc)
             await self.db.clear_user_game_achievements(guild_id, user_id)
+            self._forget_achievement_notice_groups(guild_id, user_id)
             return int(doc["chips"])
 
     def _iter_active_chip_user_ids(self, guild_id: int) -> list[int]:
@@ -982,6 +987,70 @@ class GincanaBase:
             lock = asyncio.Lock()
             self._achievement_locks[key] = lock
         return lock
+
+    def _achievement_notice_key(self, channel, guild_id: int, user_id: int) -> tuple[int, int, int]:
+        try:
+            channel_id = int(getattr(channel, "id", 0) or 0)
+        except (TypeError, ValueError):
+            channel_id = 0
+        if channel_id <= 0:
+            channel_id = id(channel)
+        return int(guild_id), channel_id, int(user_id)
+
+    def _prune_achievement_notice_groups(self, now: float) -> None:
+        for key, burst in list(self._achievement_notice_groups.items()):
+            if burst.is_expired(now):
+                self._achievement_notice_groups.pop(key, None)
+
+    def _ensure_achievement_notice_cleanup_task(self) -> None:
+        task = self._achievement_notice_cleanup_task
+        if task is None or task.done():
+            self._achievement_notice_cleanup_task = asyncio.create_task(
+                self._achievement_notice_cleanup_loop(),
+                name="games-achievement-notice-cleanup",
+            )
+
+    async def _achievement_notice_cleanup_loop(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            while self._achievement_notice_groups:
+                now = time.monotonic()
+                self._prune_achievement_notice_groups(now)
+                if not self._achievement_notice_groups:
+                    return
+                next_expiration = min(
+                    burst.expires_at()
+                    for burst in self._achievement_notice_groups.values()
+                )
+                await asyncio.sleep(max(0.05, next_expiration - now))
+        finally:
+            if self._achievement_notice_cleanup_task is current_task:
+                self._achievement_notice_cleanup_task = None
+
+    async def _close_achievement_notice_groups(self) -> None:
+        task = self._achievement_notice_cleanup_task
+        self._achievement_notice_cleanup_task = None
+        self._achievement_notice_groups.clear()
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def _forget_achievement_notice_groups(self, guild_id: int, user_id: int) -> None:
+        guild_id = int(guild_id)
+        user_id = int(user_id)
+        for key in list(self._achievement_notice_groups):
+            if key[0] == guild_id and key[2] == user_id:
+                self._achievement_notice_groups.pop(key, None)
+
+    def _forget_guild_achievement_notice_groups(self, guild_id: int) -> None:
+        guild_id = int(guild_id)
+        for key in list(self._achievement_notice_groups):
+            if key[0] == guild_id:
+                self._achievement_notice_groups.pop(key, None)
 
     def _normalize_game_achievements(self, raw: object) -> dict:
         source = raw if isinstance(raw, dict) else {}
@@ -1135,31 +1204,36 @@ class GincanaBase:
 
     def _make_achievement_view(
         self,
-        achievement_key: str,
+        achievement_keys,
         mention: str,
         *,
         unlocked_count: int,
         total_count: int,
         thumbnail_url: str | None = None,
     ) -> discord.ui.LayoutView | None:
-        item = self._achievement_catalog().get(str(achievement_key or ""))
-        if item is None:
+        raw_keys = (achievement_keys,) if isinstance(achievement_keys, str) else tuple(achievement_keys or ())
+        catalog = self._achievement_catalog()
+        items = [catalog[key] for key in merge_achievement_keys((), raw_keys) if key in catalog]
+        if not items:
             return None
         total = max(1, int(total_count or 0))
         count = max(1, min(total, int(unlocked_count or 0)))
-        description = str(item["description"]).format(mention=str(mention or "Alguém"))
-        content = (
-            f"### 🏆 Conquista desbloqueada ({count}/{total})\n\n"
-            f"{item['emoji']} **{item['name']}**\n"
-            f"-# {description}"
-        )
+        if len(items) == 1:
+            title = "Conquista desbloqueada"
+        else:
+            title = f"{len(items)} conquistas desbloqueadas"
+        blocks = []
+        for item in items:
+            description = str(item["description"]).format(mention=str(mention or "Alguém"))
+            blocks.append(f"{item['emoji']} **{item['name']}**\n-# {description}")
+        content = f"### 🏆 {title} ({count}/{total})\n\n" + "\n\n".join(blocks)
         body = discord.ui.TextDisplay(content)
         if thumbnail_url:
             body = discord.ui.Section(
                 body,
                 accessory=discord.ui.Thumbnail(
                     str(thumbnail_url),
-                    description="Conquista desbloqueada",
+                    description=title,
                 ),
             )
         view = discord.ui.LayoutView(timeout=None)
@@ -1169,22 +1243,15 @@ class GincanaBase:
         ))
         return view
 
-    async def _send_achievement_notice(
+    async def _dispatch_achievement_notice(
         self,
         channel,
-        guild_id: int,
-        user_id: int,
-        achievement_key: str,
-    ) -> bool:
-        if channel is None or not hasattr(channel, "send"):
-            guild = self.bot.get_guild(int(guild_id)) if getattr(self, "bot", None) is not None else None
-            channel = self._get_gincana_channel(guild) if guild is not None else None
-        if channel is None or not hasattr(channel, "send"):
-            return False
-        unlocked_count, total_count = self._achievement_progress_for_key(guild_id, user_id, achievement_key)
-        if unlocked_count <= 0:
-            return False
-        mention = f"<@{int(user_id)}>"
+        achievement_keys,
+        mention: str,
+        *,
+        unlocked_count: int,
+        total_count: int,
+    ) -> tuple[bool, object | None]:
         thumbnail_path = self._ACHIEVEMENT_THUMBNAIL_PATH
         use_thumbnail = thumbnail_path.is_file()
         attachment_url = (
@@ -1193,14 +1260,14 @@ class GincanaBase:
             else None
         )
         view = self._make_achievement_view(
-            achievement_key,
+            achievement_keys,
             mention,
             unlocked_count=unlocked_count,
             total_count=total_count,
             thumbnail_url=attachment_url,
         )
         if view is None:
-            return False
+            return False, None
 
         if use_thumbnail:
             image_file = None
@@ -1209,12 +1276,12 @@ class GincanaBase:
                     str(thumbnail_path),
                     filename=self._ACHIEVEMENT_THUMBNAIL_FILENAME,
                 )
-                await channel.send(
+                sent_message = await channel.send(
                     view=view,
                     file=image_file,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                return True
+                return True, sent_message
             except Exception:
                 pass
             finally:
@@ -1225,21 +1292,133 @@ class GincanaBase:
                         pass
 
         fallback_view = self._make_achievement_view(
-            achievement_key,
+            achievement_keys,
             mention,
             unlocked_count=unlocked_count,
             total_count=total_count,
         )
         if fallback_view is None:
-            return False
+            return False, None
         try:
-            await channel.send(
+            sent_message = await channel.send(
                 view=fallback_view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            return True, sent_message
+        except Exception:
+            return False, None
+
+    async def _delete_replaced_achievement_notice(self, message) -> bool:
+        if message is None or not hasattr(message, "delete"):
+            return False
+        try:
+            await message.delete()
+            return True
+        except discord.NotFound:
             return True
         except Exception:
             return False
+
+    async def _send_achievement_notices(
+        self,
+        channel,
+        guild_id: int,
+        user_id: int,
+        achievement_keys,
+    ) -> bool:
+        if channel is None or not hasattr(channel, "send"):
+            guild = self.bot.get_guild(int(guild_id)) if getattr(self, "bot", None) is not None else None
+            channel = self._get_gincana_channel(guild) if guild is not None else None
+        if channel is None or not hasattr(channel, "send"):
+            return False
+
+        raw_keys = (achievement_keys,) if isinstance(achievement_keys, str) else (achievement_keys or ())
+        incoming_keys = merge_achievement_keys((), raw_keys)
+        if not incoming_keys:
+            return False
+
+        guild_id = int(guild_id)
+        user_id = int(user_id)
+        notice_key = self._achievement_notice_key(channel, guild_id, user_id)
+        async with self._achievement_lock(guild_id, user_id):
+            now = time.monotonic()
+            self._prune_achievement_notice_groups(now)
+            previous_burst = self._achievement_notice_groups.get(notice_key)
+            can_merge = bool(
+                previous_burst is not None
+                and previous_burst.message is not None
+                and previous_burst.can_merge(now)
+            )
+
+            progress_by_key: dict[str, tuple[int, int]] = {}
+            valid_incoming: list[str] = []
+            for achievement_key in incoming_keys:
+                progress = self._achievement_progress_for_key(guild_id, user_id, achievement_key)
+                progress_by_key[achievement_key] = progress
+                if progress[0] > 0:
+                    valid_incoming.append(achievement_key)
+            if not valid_incoming:
+                return False
+
+            previous_keys = previous_burst.achievement_keys if can_merge and previous_burst is not None else ()
+            combined_keys = merge_achievement_keys(previous_keys, valid_incoming)
+            for achievement_key in combined_keys:
+                progress_by_key.setdefault(
+                    achievement_key,
+                    self._achievement_progress_for_key(guild_id, user_id, achievement_key),
+                )
+            combined_keys = tuple(
+                sorted(
+                    (key for key in combined_keys if progress_by_key[key][0] > 0),
+                    key=lambda key: (progress_by_key[key][0], key),
+                )
+            )
+            if not combined_keys:
+                return False
+            if can_merge and previous_burst is not None and combined_keys == previous_burst.achievement_keys:
+                return True
+
+            unlocked_count = max(progress_by_key[key][0] for key in combined_keys)
+            total_count = max(progress_by_key[key][1] for key in combined_keys)
+            sent_ok, sent_message = await self._dispatch_achievement_notice(
+                channel,
+                combined_keys,
+                f"<@{user_id}>",
+                unlocked_count=unlocked_count,
+                total_count=total_count,
+            )
+            if not sent_ok:
+                return False
+            if sent_message is None:
+                return True
+
+            previous_message = previous_burst.message if can_merge and previous_burst is not None else None
+            self._achievement_notice_groups[notice_key] = AchievementNoticeBurst(
+                achievement_keys=combined_keys,
+                started_at=previous_burst.started_at if can_merge and previous_burst is not None else now,
+                last_at=time.monotonic(),
+                message=sent_message,
+            )
+            self._ensure_achievement_notice_cleanup_task()
+            # Confirma o novo envio antes de apagar o anterior para uma falha de API
+            # nunca fazer uma conquista já desbloqueada desaparecer do canal.
+            if previous_message is not None and previous_message is not sent_message:
+                await self._delete_replaced_achievement_notice(previous_message)
+            return True
+
+    async def _send_achievement_notice(
+        self,
+        channel,
+        guild_id: int,
+        user_id: int,
+        achievement_key: str,
+    ) -> bool:
+        return await self._send_achievement_notices(
+            channel,
+            guild_id,
+            user_id,
+            (achievement_key,),
+        )
 
     async def _unlock_and_send_achievement(
         self,

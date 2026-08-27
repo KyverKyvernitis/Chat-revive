@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import io
 import random
@@ -33,6 +35,7 @@ from .rank_cache import (
     ChipRankResponse,
     RANK_FILENAME,
     format_weekly_chip_summary,
+    rank_page_target,
 )
 from .session_registry import GameSessionRegistry, MAX_ACTIVE_GAME_USERS_PER_GUILD
 
@@ -40,6 +43,9 @@ from .session_registry import GameSessionRegistry, MAX_ACTIVE_GAME_USERS_PER_GUI
 SORTUDO_BLESSING_INTERVAL_SECONDS = 7 * 60 * 60
 SORTUDO_DAILY_EXTRA_BONUS = 5
 SORTUDO_STREAK_EXTRA_BONUS = 5
+RANK_PREVIOUS_EMOJI = "<a:k0_SetaE:1542282885153816596>"
+RANK_NEXT_EMOJI = "<a:k0_SetaD:1542282957966802986>"
+RANK_PAGINATION_TIMEOUT_SECONDS = 10 * 60
 
 
 class _NegativeDebtConfirmView(discord.ui.View):
@@ -103,6 +109,147 @@ class _NegativeDebtConfirmView(discord.ui.View):
                 await self.message.edit(view=None)
         except Exception:
             pass
+
+
+class _ChipRankPageButton(discord.ui.Button):
+    def __init__(
+        self,
+        panel: "_ChipRankPaginationView",
+        *,
+        direction: int,
+        source_page: int,
+        disabled: bool,
+    ):
+        self.panel = panel
+        self.direction = -1 if int(direction) < 0 else 1
+        self.source_page = int(source_page)
+        emoji = RANK_PREVIOUS_EMOJI if self.direction < 0 else RANK_NEXT_EMOJI
+        custom_direction = "previous" if self.direction < 0 else "next"
+        super().__init__(
+            emoji=emoji,
+            style=discord.ButtonStyle.secondary,
+            disabled=bool(disabled),
+            custom_id=f"games:rank:{custom_direction}:{self.source_page}",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.panel.change_page(
+            interaction,
+            direction=self.direction,
+            source_page=self.source_page,
+        )
+
+
+class _ChipRankPaginationView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        cog: "GincanaBase",
+        *,
+        guild: discord.Guild,
+        requester: discord.Member | None,
+        response: ChipRankResponse,
+    ):
+        super().__init__(timeout=float(RANK_PAGINATION_TIMEOUT_SECONDS))
+        self.cog = cog
+        self.guild = guild
+        self.requester = requester
+        self.response = response
+        self.message: discord.Message | None = None
+        self._page_lock = asyncio.Lock()
+        self._rebuild()
+
+    def _rebuild(self, *, include_controls: bool = True) -> None:
+        self.clear_items()
+        controls = None
+        if include_controls and self.response.page_count > 1:
+            source_page = int(self.response.page_index)
+            previous_button = _ChipRankPageButton(
+                self,
+                direction=-1,
+                source_page=source_page,
+                disabled=source_page <= 0,
+            )
+            next_button = _ChipRankPageButton(
+                self,
+                direction=1,
+                source_page=source_page,
+                disabled=source_page >= self.response.page_count - 1,
+            )
+            controls = discord.ui.ActionRow(previous_button, next_button)
+        self.add_item(
+            discord.ui.Container(
+                *self.cog._chip_rank_components(self.response, self.guild, controls=controls)
+            )
+        )
+
+    async def change_page(
+        self,
+        interaction: discord.Interaction,
+        *,
+        direction: int,
+        source_page: int,
+    ) -> None:
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+
+        async with self._page_lock:
+            # Dois cliques feitos sobre a mesma página não podem avançar duas vezes.
+            target_page = rank_page_target(
+                self.response.page_index,
+                self.response.page_count,
+                direction,
+                source_page,
+            )
+            if target_page is None:
+                return
+
+            previous_response = self.response
+            try:
+                response = await self.cog._chip_rank_cache.get_rank(
+                    self.guild,
+                    self.requester,
+                    page_index=target_page,
+                )
+                self.response = response
+                self._rebuild()
+                image = discord.File(io.BytesIO(response.image_bytes), filename=RANK_FILENAME)
+                edited = await interaction.edit_original_response(
+                    attachments=[image],
+                    view=self,
+                )
+                if edited is not None:
+                    self.message = edited
+                if response.page_count <= 1:
+                    self.stop()
+            except Exception as exc:
+                self.response = previous_response
+                self._rebuild()
+                print(
+                    f"[games] erro ao paginar rank guild={getattr(self.guild, 'id', 0)} "
+                    f"page={target_page}: {exc!r}"
+                )
+                try:
+                    await interaction.followup.send(
+                        view=self.cog._make_v2_notice(
+                            "Rank indisponível",
+                            ["Não foi possível abrir essa página agora"],
+                            ok=False,
+                        ),
+                        ephemeral=True,
+                    )
+                except Exception:
+                    pass
+
+    async def on_timeout(self) -> None:
+        async with self._page_lock:
+            self._rebuild(include_controls=False)
+            try:
+                if self.message is not None:
+                    await self.message.edit(view=self)
+            except Exception:
+                pass
 
 
 class GincanaBase:
@@ -2630,14 +2777,22 @@ class GincanaBase:
         escaped = discord.utils.escape_markdown(normalized)
         return discord.utils.escape_mentions(escaped)
 
-    def _make_chip_rank_view(self, response: ChipRankResponse, guild: discord.Guild) -> discord.ui.LayoutView:
+    def _chip_rank_components(
+        self,
+        response: ChipRankResponse,
+        guild: discord.Guild,
+        *,
+        controls: discord.ui.ActionRow | None = None,
+    ) -> list[discord.ui.Item]:
         guild_name = self._safe_chip_rank_markdown(getattr(guild, "name", None), fallback="Servidor")
         components = [
-            discord.ui.TextDisplay(f"# {guild_name}"),
+            discord.ui.TextDisplay(f"# {guild_name} • Top {response.top_number}"),
             discord.ui.MediaGallery(
                 discord.MediaGalleryItem(f"attachment://{RANK_FILENAME}")
             ),
         ]
+        if controls is not None:
+            components.append(controls)
         if response.requester_line:
             components.extend(
                 [
@@ -2645,11 +2800,25 @@ class GincanaBase:
                     discord.ui.TextDisplay(response.requester_line),
                 ]
             )
+        return components
 
+    def _make_chip_rank_view(
+        self,
+        response: ChipRankResponse,
+        guild: discord.Guild,
+        requester: discord.Member | None,
+    ) -> discord.ui.LayoutView:
+        if response.page_count > 1:
+            return _ChipRankPaginationView(
+                self,
+                guild=guild,
+                requester=requester,
+                response=response,
+            )
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(
             discord.ui.Container(
-                *components,
+                *self._chip_rank_components(response, guild),
             )
         )
         return view
@@ -2659,11 +2828,15 @@ class GincanaBase:
         try:
             response = await self._chip_rank_cache.get_rank(guild, requester)
             image = discord.File(io.BytesIO(response.image_bytes), filename=RANK_FILENAME)
-            return await sender(
+            view = self._make_chip_rank_view(response, guild, requester)
+            message = await sender(
                 file=image,
-                view=self._make_chip_rank_view(response, guild),
+                view=view,
                 **send_kwargs,
             )
+            if isinstance(view, _ChipRankPaginationView):
+                view.message = message
+            return message
         except Exception as exc:
             print(
                 f"[games] erro ao montar imagem do rank "
@@ -2686,7 +2859,7 @@ class GincanaBase:
         visible.sort(key=lambda item: (-int(item[1].get("chips", 0) or 0), item[0].name.casefold(), item[0].id))
 
         guild_name = self._safe_chip_rank_markdown(getattr(guild, "name", None), fallback="Servidor")
-        lines = [f"# {guild_name}", ""]
+        lines = [f"# {guild_name} • Top {min(10, len(visible))}", ""]
         previous_chips = None
         shared_position = 0
         requester_position = None

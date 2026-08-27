@@ -52,6 +52,9 @@ if CREATED_DISCORD_STUB:
 
 ChipRankCache = cache_module.ChipRankCache
 format_weekly_chip_summary = cache_module.format_weekly_chip_summary
+rank_page_count = cache_module.rank_page_count
+rank_page_target = cache_module.rank_page_target
+rank_page_top = cache_module.rank_page_top
 
 
 class _FakeAvatar:
@@ -128,6 +131,24 @@ class _FakeDB:
 
 
 class GamesRankCacheTests(unittest.TestCase):
+    def test_page_titles_use_the_real_cumulative_top(self) -> None:
+        self.assertEqual(rank_page_count(0), 1)
+        self.assertEqual(rank_page_count(10), 1)
+        self.assertEqual(rank_page_count(12), 2)
+        self.assertEqual(rank_page_top(0, 12), 10)
+        self.assertEqual(rank_page_top(1, 12), 12)
+        self.assertEqual(rank_page_top(1, 17), 17)
+        self.assertEqual(rank_page_top(1, 20), 20)
+        self.assertEqual(rank_page_top(2, 21), 21)
+
+    def test_page_target_rejects_stale_and_boundary_clicks(self) -> None:
+        self.assertEqual(rank_page_target(0, 3, 1, 0), 1)
+        self.assertEqual(rank_page_target(1, 3, 1, 1), 2)
+        self.assertEqual(rank_page_target(1, 3, -1, 1), 0)
+        self.assertIsNone(rank_page_target(1, 3, 1, 0))
+        self.assertIsNone(rank_page_target(0, 3, -1, 0))
+        self.assertIsNone(rank_page_target(2, 3, 1, 2))
+
     def test_weekly_summary_uses_chip_emojis_and_hides_zero(self) -> None:
         self.assertEqual(
             format_weekly_chip_summary(37),
@@ -216,6 +237,56 @@ class GamesRankCacheTests(unittest.TestCase):
                 cache_module.render_rank_image = original_renderer
                 await cache.close()
             self.assertEqual(db.listeners, [])
+
+        asyncio.run(scenario())
+
+    def test_rank_pages_are_sliced_cached_and_clamped(self) -> None:
+        async def scenario() -> None:
+            guild = _FakeGuild()
+            rows = []
+            for user_id in range(1, 13):
+                guild.members[user_id] = _FakeMember(guild, user_id, f"user_{user_id:02d}")
+                rows.append(
+                    {
+                        "user_id": user_id,
+                        "chips": 1_000 - user_id,
+                        "bonus_chips": 0,
+                        "weekly_delta": 0,
+                    }
+                )
+
+            cache = ChipRankCache(_FakeBot(guild), _FakeDB(rows))
+            original_renderer = cache_module.render_rank_image
+            render_calls = 0
+
+            def counting_renderer(*args, **kwargs):
+                nonlocal render_calls
+                render_calls += 1
+                return original_renderer(*args, **kwargs)
+
+            cache_module.render_rank_image = counting_renderer
+            try:
+                first = await cache.get_rank(guild, guild.members[1], page_index=0)
+                self.assertEqual(first.page_index, 0)
+                self.assertEqual(first.page_count, 2)
+                self.assertEqual(first.top_number, 10)
+                self.assertEqual([row.user_id for row in first.top_rows], list(range(1, 11)))
+
+                second = await cache.get_rank(guild, guild.members[1], page_index=1)
+                self.assertEqual(second.page_index, 1)
+                self.assertEqual(second.page_count, 2)
+                self.assertEqual(second.top_number, 12)
+                self.assertEqual([row.user_id for row in second.top_rows], [11, 12])
+
+                clamped = await cache.get_rank(guild, guild.members[1], page_index=99)
+                self.assertEqual(clamped.page_index, 1)
+                self.assertEqual(clamped.image_bytes, second.image_bytes)
+                first_again = await cache.get_rank(guild, guild.members[1], page_index=0)
+                self.assertEqual(first_again.image_bytes, first.image_bytes)
+                self.assertEqual(render_calls, 2)
+            finally:
+                cache_module.render_rank_image = original_renderer
+                await cache.close()
 
         asyncio.run(scenario())
 

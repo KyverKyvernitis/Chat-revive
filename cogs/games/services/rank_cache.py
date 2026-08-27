@@ -28,7 +28,10 @@ RANK_FILENAME = "rank-fichas.png"
 MAX_GUILD_IMAGES = 48
 MAX_AVATAR_THUMBNAILS = 160
 TOP_IMAGE_ROWS = 10
-PRELOAD_CANDIDATES = 12
+MAX_CACHED_PAGES_PER_GUILD = 4
+# A página zero é preservada no cache; sobram três posições para páginas
+# visitadas/próximas sem provocar aquecimento e expulsão em ciclo.
+MAX_WARM_PAGE_REQUESTS = MAX_CACHED_PAGES_PER_GUILD - 1
 DEBOUNCE_SECONDS = 0.18
 NORMAL_CHIP_EMOJI = "<:emoji_63:1485041721573249135>"
 LOSS_CHIP_EMOJI = "<:emoji_65:1485043671077228786>"
@@ -54,6 +57,35 @@ def format_weekly_chip_summary(value: int) -> str:
     return f"**{format_weekly_delta(amount)}** {emoji} {movement} nessa semana"
 
 
+def rank_page_count(total_rows: int) -> int:
+    return max(1, (max(0, int(total_rows)) + TOP_IMAGE_ROWS - 1) // TOP_IMAGE_ROWS)
+
+
+def clamp_rank_page(page_index: int, total_rows: int) -> int:
+    return min(max(0, int(page_index)), rank_page_count(total_rows) - 1)
+
+
+def rank_page_top(page_index: int, total_rows: int) -> int:
+    total = max(0, int(total_rows))
+    page = clamp_rank_page(page_index, total)
+    return min(total, (page + 1) * TOP_IMAGE_ROWS)
+
+
+def rank_page_target(
+    current_page: int,
+    page_count: int,
+    direction: int,
+    source_page: int,
+) -> int | None:
+    """Resolve um clique sem deixar interações antigas pularem páginas."""
+    current = max(0, int(current_page))
+    if int(source_page) != current:
+        return None
+    last_page = max(0, int(page_count) - 1)
+    target = min(max(0, current + (-1 if int(direction) < 0 else 1)), last_page)
+    return target if target != current else None
+
+
 @dataclass(frozen=True, slots=True)
 class ChipRankRow:
     position: int
@@ -71,21 +103,34 @@ class ChipRankResponse:
     image_bytes: bytes
     top_rows: tuple[ChipRankRow, ...]
     requester_line: str
+    page_index: int
+    page_count: int
+    top_number: int
+    total_rows: int
 
 
 @dataclass(frozen=True, slots=True)
-class _GuildRankEntry:
+class _CachedRankPage:
     image_bytes: bytes
-    top_rows: tuple[ChipRankRow, ...]
+    rows: tuple[ChipRankRow, ...]
+    data_signature: tuple[object, ...]
+    asset_signature: tuple[object, ...]
+    download_attempted: bool
+    generated_at: float
+
+
+@dataclass(slots=True)
+class _GuildRankEntry:
+    ranked_rows: tuple[ChipRankRow, ...]
     positions: dict[int, int]
     week_key: str
     data_signature: tuple[object, ...]
-    asset_signature: tuple[object, ...]
+    pages: OrderedDict[int, _CachedRankPage]
     generated_at: float
 
 
 class ChipRankCache:
-    """Cache compartilhado do Top 10, com render e avatares fora do comando."""
+    """Cache paginado do rank, com render e avatares fora das interações."""
 
     def __init__(self, bot: discord.Client, db: Any):
         self.bot = bot
@@ -96,8 +141,10 @@ class ChipRankCache:
         self._token_generation = 0
         self._dirty: set[int] = set()
         self._asset_warm_needed: set[int] = set()
+        self._warm_page_requests: dict[int, OrderedDict[int, None]] = {}
         self._revisions: dict[int, int] = {}
         self._guild_locks: dict[int, asyncio.Lock] = {}
+        self._page_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._refresh_tasks: dict[int, asyncio.Task] = {}
         self._render_semaphore = asyncio.Semaphore(1)
         self._avatar_prepare_semaphore = asyncio.Semaphore(2)
@@ -138,6 +185,8 @@ class ChipRankCache:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._refresh_tasks.clear()
+        self._warm_page_requests.clear()
+        self._page_locks.clear()
 
     def _on_chip_change(self, guild_id: int, user_id: int) -> None:
         if self._closed:
@@ -191,7 +240,10 @@ class ChipRankCache:
         self._entries.pop(gid, None)
         self._dirty.discard(gid)
         self._asset_warm_needed.discard(gid)
+        self._warm_page_requests.pop(gid, None)
         self._revisions.pop(gid, None)
+        for key in [key for key in self._page_locks if key[0] == gid]:
+            self._page_locks.pop(key, None)
         lock = self._guild_locks.get(gid)
         if lock is None or not lock.locked():
             self._guild_locks.pop(gid, None)
@@ -202,7 +254,13 @@ class ChipRankCache:
             return None
         return entry.positions.get(int(user_id))
 
-    async def get_rank(self, guild: discord.Guild, requester: discord.Member | None) -> ChipRankResponse:
+    async def get_rank(
+        self,
+        guild: discord.Guild,
+        requester: discord.Member | None,
+        *,
+        page_index: int = 0,
+    ) -> ChipRankResponse:
         gid = int(guild.id)
         entry = self._entries.get(gid)
         current_week = self._current_week_key()
@@ -222,8 +280,19 @@ class ChipRankCache:
 
         if entry is None:
             entry = await self.refresh_guild(guild, allow_download=False)
+
+        safe_page = clamp_rank_page(page_index, len(entry.ranked_rows))
+        page, missing_real_avatar = await self._ensure_page_image(
+            guild,
+            entry,
+            safe_page,
+            allow_download=False,
+        )
+        if missing_real_avatar:
+            self._asset_warm_needed.add(gid)
+        self._request_page_warm(gid, entry, safe_page, safe_page + 1)
         self._entries.move_to_end(gid)
-        return self._make_response(entry, requester)
+        return self._make_response(entry, page, requester, page_index=safe_page)
 
     async def refresh_guild(self, guild: discord.Guild, *, allow_download: bool) -> _GuildRankEntry:
         gid = int(guild.id)
@@ -232,94 +301,246 @@ class ChipRankCache:
             async with self._refresh_semaphore:
                 revision = int(self._revisions.get(gid, 0))
                 week_key = self._current_week_key()
-                ranked_rows = self._build_ranked_rows(guild)
-                top_rows = tuple(ranked_rows[:TOP_IMAGE_ROWS])
+                ranked_rows = tuple(self._build_ranked_rows(guild))
                 positions = {row.user_id: row.position for row in ranked_rows}
-                data_signature = self._data_signature(week_key, top_rows)
-
-                preload_rows = ranked_rows[:PRELOAD_CANDIDATES]
-                avatar_results = await asyncio.gather(
-                    *(self._prepared_avatar(row, allow_download=allow_download) for row in preload_rows),
-                    return_exceptions=True,
-                )
-                prepared_by_user: dict[int, bytes] = {}
-                asset_markers: list[tuple[int, str]] = []
-                missing_real_avatar = False
-                top_user_ids = {row.user_id for row in top_rows}
-                for row, result in zip(preload_rows, avatar_results):
-                    if isinstance(result, Exception):
-                        result = None
-                    if result is None:
-                        missing_real_avatar = True
-                        result = await self._fallback_avatar(row)
-                        marker = f"fallback:{row.display_name}"
-                    else:
-                        marker = row.avatar_key
-                    if row.user_id in top_user_ids:
-                        prepared_by_user[row.user_id] = result
-                        asset_markers.append((row.user_id, marker))
-
-                if missing_real_avatar and not allow_download:
-                    self._asset_warm_needed.add(gid)
-                    if self._started:
-                        self._schedule_refresh(gid, delay=0.0)
-
-                asset_signature: tuple[object, ...] = (
-                    self._token_generation,
-                    *asset_markers,
-                )
+                data_signature = self._data_signature(week_key, ranked_rows)
                 previous = self._entries.get(gid)
-                if (
-                    previous is not None
-                    and previous.data_signature == data_signature
-                    and previous.asset_signature == asset_signature
-                ):
-                    entry = _GuildRankEntry(
-                        image_bytes=previous.image_bytes,
-                        top_rows=top_rows,
-                        positions=positions,
-                        week_key=week_key,
-                        data_signature=data_signature,
-                        asset_signature=asset_signature,
-                        generated_at=previous.generated_at,
-                    )
-                else:
-                    render_rows = [
-                        RankRenderRow(
-                            position=row.position,
-                            user_id=row.user_id,
-                            display_name=row.display_name,
-                            chips=row.chips,
-                            bonus_chips=row.bonus_chips,
-                            weekly_delta=row.weekly_delta,
-                            avatar_png=prepared_by_user.get(row.user_id),
+                pages: OrderedDict[int, _CachedRankPage] = OrderedDict()
+                if previous is not None and previous.week_key == week_key:
+                    for cached_page_index, cached_page in previous.pages.items():
+                        current_rows = self._page_rows(ranked_rows, cached_page_index)
+                        current_signature = self._data_signature(week_key, current_rows)
+                        if cached_page.data_signature != current_signature:
+                            continue
+                        pages[cached_page_index] = _CachedRankPage(
+                            image_bytes=cached_page.image_bytes,
+                            rows=current_rows,
+                            data_signature=current_signature,
+                            asset_signature=cached_page.asset_signature,
+                            download_attempted=cached_page.download_attempted,
+                            generated_at=cached_page.generated_at,
                         )
-                        for row in top_rows
-                    ]
-                    async with self._render_semaphore:
-                        image_bytes = await asyncio.to_thread(
-                            render_rank_image,
-                            render_rows,
-                            normal_icon_png=self._token_icons.get("normal"),
-                            bonus_icon_png=self._token_icons.get("bonus"),
-                            debt_icon_png=self._token_icons.get("debt"),
-                        )
-                    entry = _GuildRankEntry(
-                        image_bytes=image_bytes,
-                        top_rows=top_rows,
-                        positions=positions,
-                        week_key=week_key,
-                        data_signature=data_signature,
-                        asset_signature=asset_signature,
-                        generated_at=time.monotonic(),
+
+                entry = _GuildRankEntry(
+                    ranked_rows=ranked_rows,
+                    positions=positions,
+                    week_key=week_key,
+                    data_signature=data_signature,
+                    pages=pages,
+                    generated_at=(
+                        previous.generated_at
+                        if previous is not None and previous.data_signature == data_signature
+                        else time.monotonic()
+                    ),
+                )
+
+                warm_pages = {0}
+                if allow_download:
+                    warm_pages.update(self._warm_page_requests.get(gid, ()))
+                missing_real_avatar = False
+                for warm_page in sorted(warm_pages):
+                    if warm_page < 0 or warm_page >= rank_page_count(len(ranked_rows)):
+                        continue
+                    _page, page_missing_avatar = await self._ensure_page_image(
+                        guild,
+                        entry,
+                        warm_page,
+                        allow_download=allow_download,
                     )
+                    missing_real_avatar = missing_real_avatar or page_missing_avatar
 
                 self._store_entry(gid, entry)
                 if int(self._revisions.get(gid, 0)) == revision:
                     self._dirty.discard(gid)
                 if allow_download:
-                    self._asset_warm_needed.discard(gid)
+                    requested_pages = self._warm_page_requests.get(gid, ())
+                    still_needs_warm = any(
+                        self._page_needs_warm(entry.pages.get(requested_page))
+                        for requested_page in requested_pages
+                        if 0 <= requested_page < rank_page_count(len(ranked_rows))
+                    )
+                    if still_needs_warm:
+                        self._asset_warm_needed.add(gid)
+                    else:
+                        self._asset_warm_needed.discard(gid)
+                elif missing_real_avatar:
+                    self._asset_warm_needed.add(gid)
+                    if self._started:
+                        self._schedule_refresh(gid, delay=0.0)
                 return entry
+
+    @staticmethod
+    def _page_rows(rows: tuple[ChipRankRow, ...], page_index: int) -> tuple[ChipRankRow, ...]:
+        page = clamp_rank_page(page_index, len(rows))
+        start = page * TOP_IMAGE_ROWS
+        return tuple(rows[start : start + TOP_IMAGE_ROWS])
+
+    @staticmethod
+    def _page_needs_warm(page: _CachedRankPage | None) -> bool:
+        if page is None:
+            return True
+        if page.download_attempted:
+            return False
+        return any(
+            isinstance(marker, tuple)
+            and len(marker) == 2
+            and str(marker[1]).startswith("fallback:")
+            for marker in page.asset_signature[1:]
+        )
+
+    def _store_cached_page(self, entry: _GuildRankEntry, page_index: int, page: _CachedRankPage) -> None:
+        entry.pages[int(page_index)] = page
+        entry.pages.move_to_end(int(page_index))
+        while len(entry.pages) > MAX_CACHED_PAGES_PER_GUILD:
+            evict_page = next((key for key in entry.pages if key != 0), None)
+            if evict_page is None:
+                break
+            entry.pages.pop(evict_page, None)
+
+    async def _ensure_page_image(
+        self,
+        guild: discord.Guild,
+        entry: _GuildRankEntry,
+        page_index: int,
+        *,
+        allow_download: bool,
+    ) -> tuple[_CachedRankPage, bool]:
+        gid = int(guild.id)
+        safe_page = clamp_rank_page(page_index, len(entry.ranked_rows))
+        page_rows = self._page_rows(entry.ranked_rows, safe_page)
+        page_signature = self._data_signature(entry.week_key, page_rows)
+        cached = entry.pages.get(safe_page)
+        cached_is_current = bool(
+            cached is not None
+            and cached.data_signature == page_signature
+            and cached.asset_signature[:1] == (self._token_generation,)
+        )
+        if cached_is_current and (not allow_download or not self._page_needs_warm(cached)):
+            entry.pages.move_to_end(safe_page)
+            return cached, self._page_needs_warm(cached)
+
+        page_lock = self._page_locks.setdefault((gid, safe_page), asyncio.Lock())
+
+        async def prepare_assets() -> tuple[dict[int, bytes], tuple[object, ...], bool]:
+            avatar_results = await asyncio.gather(
+                *(self._prepared_avatar(row, allow_download=allow_download) for row in page_rows),
+                return_exceptions=True,
+            )
+            prepared_by_user: dict[int, bytes] = {}
+            asset_markers: list[tuple[int, str]] = []
+            missing_real_avatar = False
+            for row, result in zip(page_rows, avatar_results):
+                if isinstance(result, Exception):
+                    result = None
+                if result is None:
+                    missing_real_avatar = True
+                    result = await self._fallback_avatar(row)
+                    marker = f"fallback:{row.display_name}"
+                else:
+                    marker = row.avatar_key
+                prepared_by_user[row.user_id] = result
+                asset_markers.append((row.user_id, marker))
+            return (
+                prepared_by_user,
+                (self._token_generation, *asset_markers),
+                missing_real_avatar,
+            )
+
+        if allow_download:
+            prepared_by_user, asset_signature, missing_real_avatar = await prepare_assets()
+            await page_lock.acquire()
+        else:
+            await page_lock.acquire()
+            try:
+                cached = entry.pages.get(safe_page)
+                if (
+                    cached is not None
+                    and cached.data_signature == page_signature
+                    and cached.asset_signature[:1] == (self._token_generation,)
+                ):
+                    page_lock.release()
+                    entry.pages.move_to_end(safe_page)
+                    return cached, self._page_needs_warm(cached)
+                prepared_by_user, asset_signature, missing_real_avatar = await prepare_assets()
+            except BaseException:
+                page_lock.release()
+                raise
+
+        try:
+            cached = entry.pages.get(safe_page)
+            if (
+                cached is not None
+                and cached.data_signature == page_signature
+                and cached.asset_signature == asset_signature
+            ):
+                if allow_download and not cached.download_attempted:
+                    cached = _CachedRankPage(
+                        image_bytes=cached.image_bytes,
+                        rows=page_rows,
+                        data_signature=page_signature,
+                        asset_signature=asset_signature,
+                        download_attempted=True,
+                        generated_at=cached.generated_at,
+                    )
+                    self._store_cached_page(entry, safe_page, cached)
+                return cached, missing_real_avatar and not allow_download
+
+            render_rows = [
+                RankRenderRow(
+                    position=row.position,
+                    user_id=row.user_id,
+                    display_name=row.display_name,
+                    chips=row.chips,
+                    bonus_chips=row.bonus_chips,
+                    weekly_delta=row.weekly_delta,
+                    avatar_png=prepared_by_user.get(row.user_id),
+                )
+                for row in page_rows
+            ]
+            async with self._render_semaphore:
+                image_bytes = await asyncio.to_thread(
+                    render_rank_image,
+                    render_rows,
+                    normal_icon_png=self._token_icons.get("normal"),
+                    bonus_icon_png=self._token_icons.get("bonus"),
+                    debt_icon_png=self._token_icons.get("debt"),
+                )
+            page = _CachedRankPage(
+                image_bytes=image_bytes,
+                rows=page_rows,
+                data_signature=page_signature,
+                asset_signature=asset_signature,
+                download_attempted=allow_download or not missing_real_avatar,
+                generated_at=time.monotonic(),
+            )
+            self._store_cached_page(entry, safe_page, page)
+            return page, missing_real_avatar and not allow_download
+        finally:
+            page_lock.release()
+
+    def _request_page_warm(
+        self,
+        guild_id: int,
+        entry: _GuildRankEntry,
+        *page_indices: int,
+    ) -> None:
+        gid = int(guild_id)
+        page_count = rank_page_count(len(entry.ranked_rows))
+        requested = self._warm_page_requests.setdefault(gid, OrderedDict())
+        needs_warm = False
+        for page_index in page_indices:
+            page = int(page_index)
+            if page < 0 or page >= page_count:
+                continue
+            requested[page] = None
+            requested.move_to_end(page)
+            if self._page_needs_warm(entry.pages.get(page)):
+                needs_warm = True
+        while len(requested) > MAX_WARM_PAGE_REQUESTS:
+            requested.popitem(last=False)
+        if needs_warm and self._started:
+            self._asset_warm_needed.add(gid)
+            self._schedule_refresh(gid, delay=0.05)
 
     def _build_ranked_rows(self, guild: discord.Guild) -> list[ChipRankRow]:
         snapshot_getter = getattr(self.db, "get_chip_rank_snapshot", None)
@@ -422,6 +643,11 @@ class ChipRankCache:
             evicted_gid, _entry = self._entries.popitem(last=False)
             self._dirty.discard(evicted_gid)
             self._asset_warm_needed.discard(evicted_gid)
+            self._warm_page_requests.pop(evicted_gid, None)
+            for key in [key for key in self._page_locks if key[0] == evicted_gid]:
+                lock = self._page_locks.get(key)
+                if lock is None or not lock.locked():
+                    self._page_locks.pop(key, None)
 
     def _data_signature(self, week_key: str, rows: tuple[ChipRankRow, ...]) -> tuple[object, ...]:
         return (
@@ -440,7 +666,14 @@ class ChipRankCache:
             ),
         )
 
-    def _make_response(self, entry: _GuildRankEntry, requester: discord.Member | None) -> ChipRankResponse:
+    def _make_response(
+        self,
+        entry: _GuildRankEntry,
+        page: _CachedRankPage,
+        requester: discord.Member | None,
+        *,
+        page_index: int,
+    ) -> ChipRankResponse:
         if requester is None:
             requester_line = ""
         else:
@@ -458,9 +691,13 @@ class ChipRankCache:
                 requester_line += f" • {weekly_summary}"
 
         return ChipRankResponse(
-            image_bytes=entry.image_bytes,
-            top_rows=entry.top_rows,
+            image_bytes=page.image_bytes,
+            top_rows=page.rows,
             requester_line=requester_line,
+            page_index=page_index,
+            page_count=rank_page_count(len(entry.ranked_rows)),
+            top_number=rank_page_top(page_index, len(entry.ranked_rows)),
+            total_rows=len(entry.ranked_rows),
         )
 
     def _schedule_refresh(self, guild_id: int, *, delay: float) -> None:

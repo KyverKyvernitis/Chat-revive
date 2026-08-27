@@ -95,7 +95,33 @@ class GamesChipProfileRendererTests(unittest.TestCase):
             [metric.kind for metric in build_profile_metrics(complete)],
             ["chips", "rank", "bonus", "weekly"],
         )
+        self.assertEqual(build_profile_metrics(complete)[-1].label, "SEMANAL")
         self.assertEqual(len(build_profile_badges(complete)), 4)
+
+    def test_complete_profile_name_is_not_cut_when_it_fits(self) -> None:
+        font = RENDERER._load_font(40, bold=False)
+        fallback_fonts = RENDERER._load_name_fallback_fonts(40)
+        draw = RENDERER.ImageDraw.Draw(Image.new("RGB", (960, 120)))
+        name = "C.❂.R.E ₍^. .^₎Ⳋ"
+
+        safe = RENDERER.sanitize_profile_name(name, font, fallback_fonts=fallback_fonts)
+        fitted = RENDERER._fit_mixed_text(draw, safe, font, fallback_fonts, 660)
+
+        self.assertTrue(fallback_fonts)
+        self.assertEqual(safe, name)
+        self.assertEqual(fitted, name)
+        self.assertFalse(RENDERER._font_supports_character(font, "Ⳋ"))
+        self.assertTrue(RENDERER._font_supports_character(fallback_fonts[0], "Ⳋ"))
+        self.assertTrue(
+            any(
+                run == "Ⳋ" and run_font is fallback_fonts[0]
+                for run, run_font in RENDERER._mixed_text_runs(
+                    name,
+                    font,
+                    fallback_fonts,
+                )
+            )
+        )
 
     def test_render_is_valid_with_no_banner_long_unicode_name_and_int64_values(self) -> None:
         data = ChipProfileData(
@@ -117,6 +143,7 @@ class GamesChipProfileRendererTests(unittest.TestCase):
         source = (ROOT / "cogs" / "games" / "chip_profile_renderer.py").read_text(encoding="utf-8")
         self.assertIn("name_font = _load_font(40, bold=False)", source)
         self.assertIn("fill=(247, 248, 251, 255)", source)
+        self.assertGreater(RENDERER.NAME_BASELINE_Y, 207)
 
 
 if __name__ == "__main__":

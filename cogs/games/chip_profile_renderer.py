@@ -4,7 +4,9 @@ import colorsys
 import math
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 from io import BytesIO
+from pathlib import Path
 from typing import Sequence
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
@@ -17,6 +19,10 @@ CANVAS_HEIGHT = 460
 BANNER_HEIGHT = 268
 AVATAR_SIZE = 196
 TOKEN_SIZE = 34
+NAME_BASELINE_Y = 221
+_NAME_FALLBACK_FONT_PATH = (
+    Path(__file__).resolve().parent / "assets" / "fonts" / "NotoSansCoptic-Regular.ttf"
+)
 LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 MEDIANCUT = getattr(
     getattr(Image, "Quantize", Image),
@@ -75,9 +81,31 @@ def _glyph_signature(font: ImageFont.ImageFont, value: str) -> tuple[tuple[int, 
         return None
 
 
-def sanitize_profile_name(value: object, font: ImageFont.ImageFont, *, fallback: str = "Usuário") -> str:
-    """Mantém o nome global legível sem deixar controles ou glifos quebrados."""
+def _font_supports_character(font: ImageFont.ImageFont, char: str) -> bool:
+    if char.isascii() and char.isprintable():
+        return True
+    signature = _glyph_signature(font, char)
     missing = _glyph_signature(font, "\U0010ffff")
+    return signature is not None and (missing is None or signature != missing)
+
+
+@lru_cache(maxsize=16)
+def _load_name_fallback_fonts(size: int) -> tuple[ImageFont.ImageFont, ...]:
+    """Fontes pequenas e locais usadas apenas nos glifos ausentes da fonte principal."""
+    try:
+        return (ImageFont.truetype(str(_NAME_FALLBACK_FONT_PATH), size=max(8, int(size))),)
+    except (OSError, ValueError):
+        return ()
+
+
+def sanitize_profile_name(
+    value: object,
+    font: ImageFont.ImageFont,
+    *,
+    fallback: str = "Usuário",
+    fallback_fonts: Sequence[ImageFont.ImageFont] = (),
+) -> str:
+    """Mantém o nome global legível sem deixar controles ou glifos quebrados."""
     cleaned: list[str] = []
     for char in unicodedata.normalize("NFC", str(value or "")):
         codepoint = ord(char)
@@ -88,7 +116,9 @@ def sanitize_profile_name(value: object, font: ImageFont.ImageFont, *, fallback:
         if char.isascii() and char.isprintable():
             cleaned.append(char)
             continue
-        if missing is not None and _glyph_signature(font, char) == missing:
+        if not _font_supports_character(font, char) and not any(
+            _font_supports_character(candidate, char) for candidate in fallback_fonts
+        ):
             continue
         cleaned.append(char)
     return " ".join("".join(cleaned).split()).strip() or fallback
@@ -108,6 +138,84 @@ def _fit_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, m
         else:
             high = middle - 1
     return value[:low].rstrip() + suffix
+
+
+def _font_for_character(
+    char: str,
+    primary_font: ImageFont.ImageFont,
+    fallback_fonts: Sequence[ImageFont.ImageFont],
+) -> ImageFont.ImageFont:
+    if _font_supports_character(primary_font, char):
+        return primary_font
+    for font in fallback_fonts:
+        if _font_supports_character(font, char):
+            return font
+    return primary_font
+
+
+def _mixed_text_runs(
+    text: str,
+    primary_font: ImageFont.ImageFont,
+    fallback_fonts: Sequence[ImageFont.ImageFont],
+) -> tuple[tuple[str, ImageFont.ImageFont], ...]:
+    runs: list[tuple[str, ImageFont.ImageFont]] = []
+    for char in str(text or ""):
+        font = _font_for_character(char, primary_font, fallback_fonts)
+        if runs and runs[-1][1] is font:
+            previous, previous_font = runs[-1]
+            runs[-1] = (previous + char, previous_font)
+        else:
+            runs.append((char, font))
+    return tuple(runs)
+
+
+def _mixed_textlength(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    primary_font: ImageFont.ImageFont,
+    fallback_fonts: Sequence[ImageFont.ImageFont],
+) -> float:
+    return sum(
+        float(draw.textlength(run, font=font))
+        for run, font in _mixed_text_runs(text, primary_font, fallback_fonts)
+    )
+
+
+def _fit_mixed_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    primary_font: ImageFont.ImageFont,
+    fallback_fonts: Sequence[ImageFont.ImageFont],
+    max_width: int,
+) -> str:
+    value = str(text or "Usuário")
+    if _mixed_textlength(draw, value, primary_font, fallback_fonts) <= max_width:
+        return value
+    suffix = "…"
+    low, high = 0, len(value)
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = value[:middle].rstrip() + suffix
+        if _mixed_textlength(draw, candidate, primary_font, fallback_fonts) <= max_width:
+            low = middle
+        else:
+            high = middle - 1
+    return value[:low].rstrip() + suffix
+
+
+def _draw_mixed_text(
+    draw: ImageDraw.ImageDraw,
+    position: tuple[float, float],
+    text: str,
+    primary_font: ImageFont.ImageFont,
+    fallback_fonts: Sequence[ImageFont.ImageFont],
+    *,
+    fill: tuple[int, int, int, int],
+) -> None:
+    cursor_x, baseline_y = position
+    for run, font in _mixed_text_runs(text, primary_font, fallback_fonts):
+        draw.text((cursor_x, baseline_y), run, font=font, fill=fill, anchor="ls")
+        cursor_x += float(draw.textlength(run, font=font))
 
 
 def _initials(display_name: str) -> str:
@@ -270,7 +378,7 @@ def build_profile_metrics(data: ChipProfileData) -> tuple[ProfileMetric, ...]:
     if int(data.weekly_delta) != 0:
         weekly_icon = "normal" if int(data.weekly_delta) > 0 else "debt"
         metrics.append(
-            ProfileMetric("weekly", "SEMANA", format_weekly_delta(data.weekly_delta), weekly_icon)
+            ProfileMetric("weekly", "SEMANAL", format_weekly_delta(data.weekly_delta), weekly_icon)
         )
     return tuple(metrics)
 
@@ -420,11 +528,27 @@ def render_chip_profile(
         canvas.alpha_composite(avatar, (avatar_x, avatar_y))
 
     name_font = _load_font(40, bold=False)
-    safe_name = sanitize_profile_name(data.display_name, name_font)
-    fitted_name = _fit_text(draw, safe_name, name_font, CANVAS_WIDTH - 300)
-    name_box = draw.textbbox((0, 0), fitted_name, font=name_font)
-    name_y = 207 - (name_box[3] - name_box[1]) - name_box[1]
-    draw.text((276, name_y), fitted_name, font=name_font, fill=(247, 248, 251, 255))
+    name_fallback_fonts = _load_name_fallback_fonts(40)
+    safe_name = sanitize_profile_name(
+        data.display_name,
+        name_font,
+        fallback_fonts=name_fallback_fonts,
+    )
+    fitted_name = _fit_mixed_text(
+        draw,
+        safe_name,
+        name_font,
+        name_fallback_fonts,
+        CANVAS_WIDTH - 300,
+    )
+    _draw_mixed_text(
+        draw,
+        (276, NAME_BASELINE_Y),
+        fitted_name,
+        name_font,
+        name_fallback_fonts,
+        fill=(247, 248, 251, 255),
+    )
 
     accent = tuple(int(max(0, min(255, value))) for value in assets.accent_rgb)
     metrics = build_profile_metrics(data)

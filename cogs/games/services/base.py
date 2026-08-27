@@ -2752,10 +2752,17 @@ class GincanaBase:
 
     @staticmethod
     def _chip_profile_global_name(member: discord.Member) -> str:
-        """Nome do perfil global: nunca apelido da guild, tag ou @usuário."""
-        global_name = " ".join(str(getattr(member, "global_name", "") or "").split())
-        username = " ".join(str(getattr(member, "name", "") or "Usuário").split()) or "Usuário"
-        return global_name or username
+        """Nome visível completo, sem transformar o usuário em @tag."""
+        candidates = (
+            getattr(member, "display_name", None),
+            getattr(member, "global_name", None),
+            getattr(member, "name", None),
+        )
+        for candidate in candidates:
+            normalized = " ".join(str(candidate or "").split()).strip()
+            if normalized:
+                return normalized.lstrip("@").strip() or "Usuário"
+        return "Usuário"
 
     def _build_chip_profile_data(self, member: discord.Member) -> ChipProfileData:
         guild_id = int(member.guild.id)
@@ -2793,30 +2800,14 @@ class GincanaBase:
             recharge_available=recharge_available,
         )
 
-    @staticmethod
-    def _make_chip_profile_view(description: str) -> discord.ui.LayoutView:
-        view = discord.ui.LayoutView(timeout=None)
-        view.add_item(
-            discord.ui.Container(
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(
-                        f"attachment://{PROFILE_FILENAME}",
-                        description=str(description or "Perfil de fichas")[:256],
-                    )
-                )
-            )
-        )
-        return view
-
     async def _send_chip_profile(self, sender, member: discord.Member, **send_kwargs):
-        """Envia o mesmo perfil visual pelos comandos com prefixo e por texto livre."""
+        """Envia o PNG diretamente, sem contêiner de Components V2."""
         try:
             data = self._build_chip_profile_data(member)
             response = await self._chip_profile_cache.get_profile(member, data)
             image = discord.File(io.BytesIO(response.image_bytes), filename=PROFILE_FILENAME)
             return await sender(
                 file=image,
-                view=self._make_chip_profile_view(response.accessible_description),
                 **send_kwargs,
             )
         except Exception as exc:

@@ -755,15 +755,72 @@ class GincanaRoletaMixin:
                     "issued": 0,
                     "next_commit": 1,
                     "completed": set(),
+                    # Entradas já debitadas de rodadas futuras. Elas continuam no
+                    # saldo real para permitir spam, mas precisam ser somadas de
+                    # volta ao montar o card de uma rodada anterior.
+                    "reservations": {},
                 }
                 self._game_round_order_states[key] = state
             return state
 
-        def _issue_game_round_sequence(self, guild_id: int, user_id: int) -> int:
+        def _issue_game_round_sequence(
+            self,
+            guild_id: int,
+            user_id: int,
+            *,
+            entry_spend: dict | None = None,
+        ) -> int:
             state = self._game_round_order_state(guild_id, user_id)
             sequence = int(state.get("issued", 0) or 0) + 1
             state["issued"] = sequence
+            raw_spend = entry_spend or {}
+            reservations: dict[int, dict[str, int]] = state["reservations"]
+            reservations[sequence] = {
+                "chips": max(0, int(raw_spend.get("chips", 0) or 0)),
+                "bonus": max(0, int(raw_spend.get("bonus", 0) or 0)),
+            }
             return sequence
+
+        def _game_round_display_balances(
+            self,
+            guild_id: int,
+            user_id: int,
+            sequence: int | None,
+            *,
+            current_normal: int | None = None,
+            current_bonus: int | None = None,
+        ) -> tuple[int, int]:
+            if current_normal is None or current_bonus is None:
+                current_normal, current_bonus = self._current_game_chip_balances(guild_id, user_id)
+            normal = int(current_normal)
+            bonus = int(current_bonus)
+            if sequence is None:
+                return normal, bonus
+
+            # O saldo físico já contém os débitos das rodadas que foram
+            # reservadas depois desta. Para o card representar a linha do tempo
+            # da rodada atual, desfazemos apenas esses débitos futuros na
+            # apresentação. Payouts continuam sendo commitados em ordem, então
+            # nunca há prêmio futuro para compensar aqui.
+            state = self._game_round_order_state(guild_id, user_id)
+            reservations: dict[int, dict[str, int]] = state.get("reservations", {})
+            for reserved_sequence, spend in reservations.items():
+                if int(reserved_sequence) <= int(sequence):
+                    continue
+                normal += max(0, int(spend.get("chips", 0) or 0))
+                bonus += max(0, int(spend.get("bonus", 0) or 0))
+            return normal, bonus
+
+        def _format_game_balance_values(self, normal: int, bonus: int) -> str:
+            normal_value = int(normal)
+            bonus_value = max(0, int(bonus))
+            if normal_value < 0:
+                text = f"**{normal_value}** {self._CHIP_LOSS_EMOJI}"
+            else:
+                text = f"**{normal_value}** {self._CHIP_EMOJI}"
+            if bonus_value > 0:
+                text += f" • **{bonus_value}** {self._CHIP_BONUS_EMOJI}"
+            return text
 
         async def _wait_for_game_round_commit_turn(self, guild_id: int, user_id: int, sequence: int):
             state = self._game_round_order_state(guild_id, user_id)
@@ -778,10 +835,20 @@ class GincanaRoletaMixin:
             condition: asyncio.Condition = state["condition"]
             async with condition:
                 completed: set[int] = state["completed"]
-                completed.add(int(sequence))
+                reservations: dict[int, dict[str, int]] = state["reservations"]
+                completed_sequence = int(sequence)
                 next_commit = int(state.get("next_commit", 1) or 1)
+
+                # A rotina pode ser chamada no caminho normal e novamente pelo
+                # finally de recuperação. Chamadas repetidas de uma sequência já
+                # avançada precisam ser no-op para não acumular IDs na memória.
+                if completed_sequence < next_commit:
+                    return
+
+                completed.add(completed_sequence)
                 while next_commit in completed:
                     completed.remove(next_commit)
+                    reservations.pop(next_commit, None)
                     next_commit += 1
                 state["next_commit"] = next_commit
                 condition.notify_all()
@@ -1781,6 +1848,13 @@ class GincanaRoletaMixin:
                         summary_lines.insert(0, chip_note)
 
                     final_normal, final_bonus = self._current_game_chip_balances(guild.id, actor.id)
+                    display_normal, display_bonus = self._game_round_display_balances(
+                        guild.id,
+                        actor.id,
+                        round_sequence,
+                        current_normal=final_normal,
+                        current_bonus=final_bonus,
+                    )
                     normal_result_delta = (final_normal - commit_start_normal) - entry_normal
                     bonus_result_delta = (final_bonus - commit_start_bonus) - entry_bonus
                     full_entry_loss = bool(
@@ -1801,7 +1875,7 @@ class GincanaRoletaMixin:
                         title,
                         "\n".join(line for line in summary_lines if line),
                         board,
-                        balance_text=self._format_compact_chip_balance(guild.id, actor.id),
+                        balance_text=self._format_game_balance_values(display_normal, display_bonus),
                         success=success,
                         near=near,
                         footer_text=roleta_footer,
@@ -1826,11 +1900,21 @@ class GincanaRoletaMixin:
                     fallback_lines = [chip_note] if chip_note else []
                     fallback_lines.append("O resultado foi consolidado, mas parte dos detalhes não pôde ser exibida")
                     fallback_normal, fallback_bonus = self._current_game_chip_balances(guild.id, actor.id)
+                    fallback_display_normal, fallback_display_bonus = self._game_round_display_balances(
+                        guild.id,
+                        actor.id,
+                        round_sequence,
+                        current_normal=fallback_normal,
+                        current_bonus=fallback_bonus,
+                    )
                     result_view = self._make_roleta_result_view(
                         fallback_title,
                         "\n".join(fallback_lines),
                         board,
-                        balance_text=self._format_compact_chip_balance(guild.id, actor.id),
+                        balance_text=self._format_game_balance_values(
+                            fallback_display_normal,
+                            fallback_display_bonus,
+                        ),
                         success=forced_kind in {"jackpot", "jackpot_mega"},
                         footer_text=roleta_footer,
                         paid_entry=paid_entry,
@@ -1981,17 +2065,25 @@ class GincanaRoletaMixin:
                 if chip_note:
                     summary_lines.insert(0, chip_note)
 
+                final_normal, final_bonus = self._current_game_chip_balances(guild.id, actor.id)
+                display_normal, display_bonus = self._game_round_display_balances(
+                    guild.id,
+                    actor.id,
+                    round_sequence,
+                    current_normal=final_normal,
+                    current_bonus=final_bonus,
+                )
                 result_view = self._make_carta_result_view(
                     title,
                     "\n".join(line for line in summary_lines if line),
                     board,
-                    balance_text=self._format_compact_chip_balance(guild.id, actor.id),
+                    balance_text=self._format_game_balance_values(display_normal, display_bonus),
                     success=success,
                     premium=premium,
                     footer_text=carta_footer,
                     paid_entry=paid_entry,
                     gross_payout=gross_payout,
-                    result_delta=(self._current_game_chip_total(guild.id, actor.id) - commit_start_total) - paid_entry,
+                    result_delta=((final_normal + final_bonus) - commit_start_total) - paid_entry,
                 )
                 first_game_unlocked = await self._unlock_achievement(guild.id, actor.id, "first_game")
                 roulette_achievements = await self._record_roulette_achievement_result(
@@ -2076,7 +2168,11 @@ class GincanaRoletaMixin:
                                 if needs_negative_confirm:
                                     chip_note = None
                                 if paid:
-                                    round_sequence = self._issue_game_round_sequence(guild.id, message.author.id)
+                                    round_sequence = self._issue_game_round_sequence(
+                                        guild.id,
+                                        message.author.id,
+                                        entry_spend=entry_spend,
+                                    )
                                 else:
                                     payment_error = chip_note or "Você não tem saldo suficiente"
 
@@ -2228,7 +2324,11 @@ class GincanaRoletaMixin:
                                 if needs_negative_confirm:
                                     chip_note = None
                                 if paid:
-                                    round_sequence = self._issue_game_round_sequence(guild.id, message.author.id)
+                                    round_sequence = self._issue_game_round_sequence(
+                                        guild.id,
+                                        message.author.id,
+                                        entry_spend=entry_spend,
+                                    )
                                 else:
                                     payment_error = chip_note or "Você não tem saldo suficiente"
 

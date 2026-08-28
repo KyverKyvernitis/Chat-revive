@@ -94,7 +94,7 @@ class GamesChipProfileRendererTests(unittest.TestCase):
         self.assertEqual(build_profile_badges(basic), ())
         self.assertEqual(
             [metric.kind for metric in build_profile_metrics(complete)],
-            ["chips", "rank", "bonus", "weekly"],
+            ["chips", "bonus", "rank", "weekly"],
         )
         self.assertEqual(build_profile_metrics(complete)[-1].label, "SEMANAL")
         self.assertEqual(
@@ -125,6 +125,24 @@ class GamesChipProfileRendererTests(unittest.TestCase):
         self.assertEqual(badges, ("Conquistas • 2 de 6",))
         self.assertNotIn("_daily disponível", badges)
         self.assertNotIn("_recarga disponível", badges)
+
+    def test_optional_metrics_reflow_without_leaving_empty_columns(self) -> None:
+        bonus_only = ChipProfileData("Nome global", 190, 12, 0, 1)
+        weekly_only = ChipProfileData("Nome global", 190, 0, 7, 1)
+
+        self.assertEqual(
+            [metric.kind for metric in build_profile_metrics(bonus_only)],
+            ["chips", "bonus", "rank"],
+        )
+        self.assertEqual(
+            [metric.kind for metric in build_profile_metrics(weekly_only)],
+            ["chips", "rank", "weekly"],
+        )
+
+    def test_badges_use_two_visible_rows_with_safe_bottom_margin(self) -> None:
+        self.assertEqual(RENDERER.BADGE_FONT_SIZE, 16)
+        self.assertEqual(len(RENDERER.BADGE_ROWS), 2)
+        self.assertLessEqual(RENDERER.BADGE_ROWS[-1][1], RENDERER.CANVAS_HEIGHT - 1)
 
     def test_complete_profile_name_is_not_cut_when_it_fits(self) -> None:
         font = RENDERER._load_font(40, bold=False)

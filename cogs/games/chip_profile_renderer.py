@@ -20,6 +20,8 @@ BANNER_HEIGHT = 268
 AVATAR_SIZE = 196
 TOKEN_SIZE = 34
 NAME_BASELINE_Y = 221
+BADGE_FONT_SIZE = 16
+BADGE_ROWS = ((394, 424), (429, 459))
 _NAME_FALLBACK_FONT_PATH = (
     Path(__file__).resolve().parent / "assets" / "fonts" / "NotoSansCoptic-Regular.ttf"
 )
@@ -368,14 +370,16 @@ def build_profile_metrics(data: ChipProfileData) -> tuple[ProfileMetric, ...]:
     normal_icon = "debt" if int(data.chips) < 0 else "normal"
     metrics: list[ProfileMetric] = [
         ProfileMetric("chips", "FICHAS", format_number(data.chips), normal_icon),
+    ]
+    if int(data.bonus_chips) > 0:
+        metrics.append(ProfileMetric("bonus", "BÔNUS", format_number(data.bonus_chips), "bonus"))
+    metrics.append(
         ProfileMetric(
             "rank",
             "RANK",
             f"#{int(data.rank_position)}" if data.rank_position is not None else "—",
-        ),
-    ]
-    if int(data.bonus_chips) > 0:
-        metrics.append(ProfileMetric("bonus", "BÔNUS", format_number(data.bonus_chips), "bonus"))
+        )
+    )
     if int(data.weekly_delta) != 0:
         weekly_icon = "normal" if int(data.weekly_delta) > 0 else "debt"
         metrics.append(
@@ -469,34 +473,49 @@ def _draw_badges(
 ) -> None:
     if not badges:
         return
-    font = _load_font(14, bold=True)
-    y1, y2 = 399, 425
-    x = 278
-    max_x = CANVAS_WIDTH - 36
+    font = _load_font(BADGE_FONT_SIZE, bold=True)
+    left = 278
+    max_x = CANVAS_WIDTH - 32
+    horizontal_padding = 16
+    gap = 8
+    row_index = 0
+    x = left
     for badge in badges:
         safe = sanitize_profile_name(badge, font, fallback="")
         if not safe:
             continue
-        width = math.ceil(draw.textlength(safe, font=font)) + 28
+
+        max_badge_width = max_x - left
+        safe = _fit_text(
+            draw,
+            safe,
+            font,
+            max_badge_width - (horizontal_padding * 2),
+        )
+        width = math.ceil(draw.textlength(safe, font=font)) + (horizontal_padding * 2)
         if x + width > max_x:
-            if x > 278 and y1 < 429:
-                x = 278
-                y1, y2 = 429, 455
-            safe = _fit_text(draw, safe, font, max_x - x - 28)
-            width = math.ceil(draw.textlength(safe, font=font)) + 28
-            if x + width > max_x:
+            row_index += 1
+            if row_index >= len(BADGE_ROWS):
                 break
+            x = left
+
+        y1, y2 = BADGE_ROWS[row_index]
         draw.rounded_rectangle(
             (x, y1, x + width, y2),
             radius=16,
-            fill=(*accent, 25),
-            outline=(*accent, 95),
+            fill=(*accent, 54),
+            outline=(*accent, 165),
             width=1,
         )
         box = draw.textbbox((0, 0), safe, font=font)
         text_y = y1 + ((y2 - y1) - (box[3] - box[1])) / 2 - box[1]
-        draw.text((x + 14, text_y), safe, font=font, fill=(205, 213, 222, 255))
-        x += width + 10
+        draw.text(
+            (x + horizontal_padding, text_y),
+            safe,
+            font=font,
+            fill=(242, 245, 249, 255),
+        )
+        x += width + gap
 
 
 def render_chip_profile(

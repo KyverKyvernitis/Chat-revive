@@ -1777,10 +1777,8 @@ class GincanaRoletaMixin:
                         won=race_won,
                         entry_spend=entry_spend,
                         payout=race_payout,
-                        opponent_ids=(),
                         # Resultados parciais pagam normalmente, mas não acionam efeitos de raça.
                         valid=result_kind != "partial",
-                        allow_hunt=False,
                         glitch_progress=result_kind in {"jackpot", "jackpot_mega", "loss"},
                     )
                     if race_notes:
@@ -2001,10 +1999,8 @@ class GincanaRoletaMixin:
                     won=race_won,
                     entry_spend=entry_spend,
                     payout=race_payout,
-                    opponent_ids=(),
                     # Resultados parciais pagam normalmente, mas não acionam efeitos de raça.
                     valid=result_kind != "partial",
-                    allow_hunt=False,
                     glitch_progress=True,
                 )
                 if race_notes:

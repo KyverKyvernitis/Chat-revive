@@ -275,16 +275,14 @@ class _RacePanelView(discord.ui.LayoutView):
         self.guild_id = int(guild_id)
         self.user_id = int(user_id)
         self.message: discord.Message | None = None
+        self._toggle_in_progress = False
         self._build_layout()
 
-    def _body_lines(self) -> list[str]:
+    def _ability_lines(self) -> list[str]:
         race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
         info = self.cog._get_race_info_by_key(race_key) or {}
         emoji = str(info.get("emoji") or "🍀")
-        race_name = str(info.get("name") or "Sem raça")
-        active = self.cog._is_user_race_active(self.guild_id, self.user_id)
-        state_text = "Ativa" if active else "Desativada"
-        lines = [f"# {emoji} {race_name}", f"**Estado:** {state_text}", "", "## Habilidades"]
+        lines = ["## Habilidades"]
         for effect in self.cog._get_race_effects(race_key):
             effect_emoji = str(effect.get("emoji") or emoji).strip()
             lines.extend([
@@ -292,12 +290,22 @@ class _RacePanelView(discord.ui.LayoutView):
                 f"{effect_emoji} **{effect.get('title')}**",
                 str(effect.get("desc") or ""),
             ])
-        lines.extend(["", f"**Trocar raça:** {RACE_REROLL_COST} {self.cog._CHIP_EMOJI}"])
         return lines
 
     def _build_layout(self):
         self.clear_items()
-        reroll = discord.ui.Button(label="Trocar raça", emoji="🎲", style=discord.ButtonStyle.secondary)
+        race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
+        info = self.cog._get_race_info_by_key(race_key) or {}
+        emoji = str(info.get("emoji") or "🍀")
+        race_name = str(info.get("name") or "Sem raça")
+
+        show_races = discord.ui.Button(label="Ver raças", style=discord.ButtonStyle.secondary)
+        show_races.callback = self._show_races
+        reroll = discord.ui.Button(
+            label=f"Reroll {RACE_REROLL_COST}",
+            emoji=self.cog._CHIP_EMOJI,
+            style=discord.ButtonStyle.secondary,
+        )
         reroll.callback = self._reroll
         row_children = [reroll]
         if self.cog._is_user_race_active(self.guild_id, self.user_id):
@@ -310,7 +318,11 @@ class _RacePanelView(discord.ui.LayoutView):
         row = discord.ui.ActionRow(*row_children)
         self.add_item(
             discord.ui.Container(
-                discord.ui.TextDisplay("\n".join(self._body_lines())),
+                discord.ui.TextDisplay(f"# {emoji} {race_name}"),
+                discord.ui.ActionRow(show_races),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("\n".join(self._ability_lines())),
+                discord.ui.Separator(),
                 row,
                 accent_color=discord.Color.green(),
             )
@@ -322,53 +334,159 @@ class _RacePanelView(discord.ui.LayoutView):
             return False
         return True
 
+    async def _show_races(self, interaction: discord.Interaction):
+        if not await self._ensure_owner(interaction):
+            return
+        await interaction.response.send_message(
+            view=self.cog._make_race_catalog_view(self.guild_id, self.user_id),
+            ephemeral=True,
+        )
+
     async def _reroll(self, interaction: discord.Interaction):
         if not await self._ensure_owner(interaction):
             return
-        await self.cog._maybe_execute_due_chip_season_reset(self.guild_id)
-        current = self.cog._get_user_race_key(self.guild_id, self.user_id)
-        normal_chips = int(self.cog.db.get_user_chips(self.guild_id, self.user_id, default=CHIPS_INITIAL) or 0)
-        if normal_chips < RACE_REROLL_COST:
+        reroll_key = (self.guild_id, self.user_id)
+        if reroll_key in self.cog._race_rerolls_in_progress:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice(
-                    "🍀 Saldo insuficiente",
-                    [f"Trocar de raça custa **{RACE_REROLL_COST}** {self.cog._CHIP_EMOJI}"],
-                    ok=False,
-                ),
+                view=self.cog._make_v2_notice("🍀 Reroll em andamento", ["Aguarde a nova raça ser definida"], ok=False),
                 ephemeral=True,
             )
             return
-        await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True, reason="Troca de raça")
-        await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
-        spinner_texts = ("Sorteando sua nova raça", "Sorteando sua nova raça..", "Sorteando sua nova raça...", "Definindo sua nova raça...")
-        await interaction.response.edit_message(view=self.cog._make_race_spinner_view(spinner_texts[0]))
-        target_message = interaction.message
-        for text_line in spinner_texts[1:]:
-            await asyncio.sleep(0.35)
-            try:
-                await target_message.edit(view=self.cog._make_race_spinner_view(text_line))
-            except Exception:
-                pass
-        await asyncio.sleep(0.35)
-        self._build_layout()
-        self.message = target_message
-        self.cog._remember_race_panel_message(self.guild_id, self.user_id, target_message)
+
+        self.cog._race_rerolls_in_progress.add(reroll_key)
         try:
-            await target_message.edit(view=self)
-        except Exception:
-            pass
+            await interaction.response.defer()
+            async with self.cog._race_panel_lock(self.guild_id, self.user_id):
+                try:
+                    await self.cog._maybe_execute_due_chip_season_reset(self.guild_id)
+                    changed, _race_key, _balance = await self.cog._reroll_user_race(
+                        self.guild_id,
+                        self.user_id,
+                        cost=RACE_REROLL_COST,
+                    )
+                except Exception:
+                    log.exception(
+                        "games: falha no reroll de raça guild=%s user=%s",
+                        self.guild_id,
+                        self.user_id,
+                    )
+                    await interaction.followup.send(
+                        view=self.cog._make_v2_notice(
+                            "🍀 Reroll não concluído",
+                            ["Sua raça e suas fichas não foram alteradas"],
+                            ok=False,
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+
+                if not changed:
+                    await interaction.followup.send(
+                        view=self.cog._make_v2_notice(
+                            "🍀 Saldo insuficiente",
+                            [f"O reroll custa **{RACE_REROLL_COST}** {self.cog._CHIP_EMOJI} em fichas normais"],
+                            ok=False,
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+
+                spinner_texts = (
+                    "Sorteando sua nova raça",
+                    "Sorteando sua nova raça..",
+                    "Sorteando sua nova raça...",
+                    "Definindo sua nova raça...",
+                )
+                target_message = interaction.message
+                if target_message is not None:
+                    try:
+                        await target_message.edit(view=self.cog._make_race_spinner_view(spinner_texts[0]))
+                    except Exception:
+                        pass
+                for text_line in spinner_texts[1:]:
+                    await asyncio.sleep(0.35)
+                    if target_message is None:
+                        continue
+                    try:
+                        await target_message.edit(view=self.cog._make_race_spinner_view(text_line))
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.35)
+
+                self._build_layout()
+                self.message = target_message
+                if target_message is not None:
+                    self.cog._remember_race_panel_message(self.guild_id, self.user_id, target_message)
+                    try:
+                        await target_message.edit(view=self)
+                        return
+                    except Exception:
+                        pass
+
+                await interaction.followup.send(
+                    view=self.cog._make_v2_notice(
+                        "🍀 Reroll concluído",
+                        ["Sua nova raça foi definida; use o comando novamente para abrir o painel"],
+                        ok=True,
+                    ),
+                    ephemeral=True,
+                )
+        finally:
+            self.cog._race_rerolls_in_progress.discard(reroll_key)
 
     async def _toggle_race(self, interaction: discord.Interaction):
         if not await self._ensure_owner(interaction):
             return
-        race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
-        if not race_key:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", ["Você ainda não tem uma raça definida"], ok=False), ephemeral=True)
+        if self._toggle_in_progress:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice("🍀 Raça", ["Aguarde a atualização atual terminar"], ok=False),
+                ephemeral=True,
+            )
             return
-        now_active = self.cog._is_user_race_active(self.guild_id, self.user_id)
-        await self.cog._set_user_race_active(self.guild_id, self.user_id, not now_active)
-        self._build_layout()
-        await interaction.response.edit_message(view=self)
+        self._toggle_in_progress = True
+        try:
+            await interaction.response.defer()
+            async with self.cog._race_panel_lock(self.guild_id, self.user_id):
+                race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
+                if not race_key:
+                    await interaction.followup.send(
+                        view=self.cog._make_v2_notice("🍀 Raça", ["Você ainda não tem uma raça definida"], ok=False),
+                        ephemeral=True,
+                    )
+                    return
+                now_active = self.cog._is_user_race_active(self.guild_id, self.user_id)
+                new_active = not now_active
+                try:
+                    await self.cog._set_user_race_active(self.guild_id, self.user_id, new_active)
+                except Exception:
+                    log.exception(
+                        "games: falha ao alternar raça guild=%s user=%s",
+                        self.guild_id,
+                        self.user_id,
+                    )
+                    await interaction.followup.send(
+                        view=self.cog._make_v2_notice("🍀 Raça", ["Não foi possível atualizar sua raça agora"], ok=False),
+                        ephemeral=True,
+                    )
+                    return
+                self._build_layout()
+                if interaction.message is not None:
+                    try:
+                        await interaction.message.edit(view=self)
+                        return
+                    except Exception:
+                        pass
+                state_text = "ativada" if new_active else "desativada"
+                await interaction.followup.send(
+                    view=self.cog._make_v2_notice(
+                        "🍀 Raça atualizada",
+                        [f"Sua raça foi {state_text}; use o comando novamente para abrir o painel"],
+                        ok=True,
+                    ),
+                    ephemeral=True,
+                )
+        finally:
+            self._toggle_in_progress = False
 
     async def on_timeout(self):
         self.stop()
@@ -397,20 +515,47 @@ class GamesCog(dcommands.Cog, GamesCore):
             return f"{hours}h {minutes:02d}min"
         return f"{minutes}min"
 
-    def _make_race_reveal_view(self, guild_id: int, user_id: int, race_key: str) -> discord.ui.LayoutView:
-        info = self._get_race_info_by_key(race_key) or {}
-        emoji = str(info.get("emoji") or "🍀")
-        race_name = str(info.get("name") or "Sem raça")
-        lines = [f"# {emoji} Nova raça: {race_name}", "Sua raça foi definida", "", "## Habilidades"]
-        for effect in self._get_race_effects(race_key):
-            effect_emoji = str(effect.get("emoji") or emoji).strip()
-            lines.extend([
-                "",
-                f"{effect_emoji} **{effect.get('title')}**",
-                str(effect.get("desc") or ""),
-            ])
+    def _make_race_catalog_view(self, guild_id: int, user_id: int) -> discord.ui.LayoutView:
+        current = self._get_user_race_key(guild_id, user_id)
+        sections: list[str] = []
+        for race_key, info in self._race_catalog().items():
+            emoji = str(info.get("emoji") or "🍀").strip()
+            name = str(info.get("name") or race_key).strip()
+            current_marker = " · atual" if race_key == current else ""
+            lines = [f"## {emoji} {name}{current_marker}"]
+            for effect in self._get_race_effects(race_key):
+                effect_emoji = str(effect.get("emoji") or emoji).strip()
+                lines.extend([
+                    f"{effect_emoji} **{effect.get('title')}**",
+                    str(effect.get("desc") or ""),
+                ])
+            sections.append("\n".join(lines))
+
+        chunks: list[str] = []
+        current_chunk = ""
+        for section in sections:
+            candidate = f"{current_chunk}\n\n{section}" if current_chunk else section
+            if current_chunk and len(candidate) > 3600:
+                chunks.append(current_chunk)
+                current_chunk = section
+            else:
+                current_chunk = candidate
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        children: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("# 🧬 Raças"),
+            discord.ui.Separator(),
+        ]
+        children.extend(discord.ui.TextDisplay(chunk) for chunk in chunks)
+        children.extend([
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(
+                f"-# O reroll custa {RACE_REROLL_COST} {self._CHIP_EMOJI} e sempre sorteia outra raça"
+            ),
+        ])
         view = discord.ui.LayoutView(timeout=None)
-        view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.green()))
+        view.add_item(discord.ui.Container(*children, accent_color=discord.Color.green()))
         return view
 
     def _make_race_spinner_view(self, text_line: str) -> discord.ui.LayoutView:
@@ -525,30 +670,53 @@ class GamesCog(dcommands.Cog, GamesCore):
             return False
         if message.guild is None:
             return True
-        await self._maybe_execute_due_chip_season_reset(message.guild.id)
-        race_key = self._get_user_race_key(message.guild.id, message.author.id)
-        if not race_key:
-            race_key = await self._roll_user_race(message.guild.id, message.author.id)
-            reveal = self._make_race_reveal_view(message.guild.id, message.author.id, race_key)
-            spinner = await message.channel.send(view=self._make_race_spinner_view("Sorteando sua raça"))
-            for text_line in ("Sorteando sua raça..", "Sorteando sua raça...", "Definindo sua raça..."):
-                await asyncio.sleep(0.35)
+        guild_id = int(message.guild.id)
+        user_id = int(message.author.id)
+        async with self._race_panel_lock(guild_id, user_id):
+            await self._maybe_execute_due_chip_season_reset(guild_id)
+            await self._delete_previous_race_panel_message(guild_id, user_id, channel=message.channel)
+            race_key = self._get_user_race_key(guild_id, user_id)
+            if not race_key:
+                spinner = await message.channel.send(view=self._make_race_spinner_view("Sorteando sua raça"))
                 try:
-                    await spinner.edit(view=self._make_race_spinner_view(text_line))
+                    async with self._race_progress_lock(guild_id, user_id):
+                        race_key = self._get_user_race_key(guild_id, user_id)
+                        if not race_key:
+                            race_key = await self._roll_user_race(guild_id, user_id)
                 except Exception:
-                    pass
-            await asyncio.sleep(0.35)
-            try:
-                await spinner.edit(view=reveal)
-            except Exception:
-                await message.channel.send(view=reveal)
+                    log.exception("games: falha ao definir primeira raça guild=%s user=%s", guild_id, user_id)
+                    try:
+                        await spinner.edit(
+                            view=self._make_v2_notice(
+                                "🍀 Raça não definida",
+                                ["Não foi possível concluir o sorteio agora"],
+                                ok=False,
+                            )
+                        )
+                    except Exception:
+                        pass
+                    return True
+
+                for text_line in ("Sorteando sua raça..", "Sorteando sua raça...", "Definindo sua raça..."):
+                    await asyncio.sleep(0.35)
+                    try:
+                        await spinner.edit(view=self._make_race_spinner_view(text_line))
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.35)
+                view = _RacePanelView(self, guild_id=guild_id, user_id=user_id)
+                panel_message = spinner
+                try:
+                    await spinner.edit(view=view)
+                except Exception:
+                    panel_message = await message.channel.send(view=view)
+            else:
+                view = _RacePanelView(self, guild_id=guild_id, user_id=user_id)
+                panel_message = await message.channel.send(view=view)
+
+            view.message = panel_message
+            self._remember_race_panel_message(guild_id, user_id, panel_message)
             return True
-        await self._delete_previous_race_panel_message(message.guild.id, message.author.id, channel=message.channel)
-        view = _RacePanelView(self, guild_id=message.guild.id, user_id=message.author.id)
-        sent = await message.channel.send(view=view)
-        view.message = sent
-        self._remember_race_panel_message(message.guild.id, message.author.id, sent)
-        return True
 
     async def _dispatch_prefix_trigger(
         self,

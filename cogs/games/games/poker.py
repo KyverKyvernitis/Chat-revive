@@ -679,16 +679,13 @@ class GincanaPokerMixin:
         }
         public_race_notices: list[str] = []
         for player_id in game.players:
-            opponent_id = game.other_player(player_id)
             notes = await self._apply_new_race_result(
                 game.guild_id,
                 player_id,
                 won=won_map[player_id],
                 entry_spend=game.entry_spend.get(player_id) or {"chips": game.buy_in, "bonus": 0},
                 payout=int(payout_map[player_id]),
-                opponent_ids=[opponent_id],
                 valid=True,
-                allow_hunt=True,
             )
             await self._route_lobby_race_notices(
                 game.race_interactions.get(player_id),

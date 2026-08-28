@@ -622,7 +622,7 @@
       "key": "race",
       "category": "games",
       "group": "Perfil",
-      "description": "Abre a seleção de raça.",
+      "description": "Mostra e gerencia sua raça",
       "usage": "race",
       "search_terms": [
         "raca",

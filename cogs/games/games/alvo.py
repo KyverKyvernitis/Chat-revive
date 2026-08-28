@@ -944,7 +944,6 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             for user_id, amount in bonus_rewards.items():
                 if amount > 0:
                     await self._change_user_bonus_chips(guild.id, user_id, amount, reason="Bônus do alvo")
-        participant_ids = [member.id for member in participants]
         owner_id = int(session.get('owner_id') or 0)
         public_race_notices: list[str] = []
         entry_spend_map = session.get('entry_spend') or {}
@@ -960,9 +959,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 won=int(rewards.get(member.id, 0) or 0) > 0,
                 entry_spend=entry_spend_map.get(member.id) or {'chips': ALVO_STAKE, 'bonus': 0},
                 payout=payout,
-                opponent_ids=[user_id for user_id in participant_ids if user_id != member.id],
                 valid=True,
-                allow_hunt=True,
             )
             await self._route_lobby_race_notices(
                 (session.get('race_interactions') or {}).get(member.id),

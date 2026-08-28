@@ -66,6 +66,7 @@ class SettingsDB:
     async def init(self):
         await self._ensure_indexes()
         await self._cleanup_removed_tts_panel_history()
+        await self._cleanup_removed_game_races()
         await self.load_cache()
 
     async def _cleanup_removed_tts_panel_history(self):
@@ -81,6 +82,37 @@ class SettingsDB:
         except Exception as e:
             # A limpeza de compatibilidade não deve impedir o bot de iniciar.
             print(f"[db] Falha ao remover histórico legado dos painéis TTS: {e}")
+
+    async def _cleanup_removed_game_races(self):
+        """Aposenta raças removidas sem alterar saldo, estatísticas ou histórico."""
+        race_fields = (
+            "race_key",
+            "race_active",
+            "race_free_roleta_spins",
+            "race_free_carta_spins",
+            "race_sortudo_blessing_charges",
+            "race_sortudo_blessing_started_at",
+            "race_robbery_window_started_at",
+            "race_robbery_uses",
+            "race_mendigar_window_started_at",
+            "race_mendigar_uses",
+            "race_state",
+        )
+        try:
+            result = await self.coll.update_many(
+                {
+                    "user_id": {"$exists": True},
+                    "race_key": "vampiro",
+                },
+                {"$unset": {field: "" for field in race_fields}},
+            )
+            modified = int(getattr(result, "modified_count", 0) or 0)
+            if modified:
+                print(f"[db] Raça Vampiro aposentada de {modified} perfil(is).")
+        except Exception as e:
+            # O catálogo também rejeita a raça removida, então uma falha nesta
+            # limpeza não reativa seus efeitos nem impede o bot de iniciar.
+            print(f"[db] Falha ao limpar a raça Vampiro removida: {e}")
 
     async def _ensure_indexes(self):
         try:
@@ -913,17 +945,34 @@ class SettingsDB:
     def _get_user_doc(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         return dict(self.user_cache.get((guild_id, user_id), {"type": "user", "guild_id": guild_id, "user_id": user_id}))
 
-    async def _save_user_doc(self, guild_id: int, user_id: int, doc: Dict[str, Any]):
+    async def _save_user_doc(
+        self,
+        guild_id: int,
+        user_id: int,
+        doc: Dict[str, Any],
+        *,
+        unset_fields: tuple[str, ...] = (),
+    ):
         key = (guild_id, user_id)
         previous_signature = self._chip_rank_doc_signature(self.user_cache.get(key))
         doc["type"] = "user"
         doc["guild_id"] = guild_id
         doc["user_id"] = user_id
+        clean_unsets = tuple(
+            dict.fromkeys(
+                str(field).strip()
+                for field in unset_fields
+                if str(field).strip() and str(field).strip() not in doc
+            )
+        )
         self.user_cache[key] = doc
         self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
+        update = {"$set": doc}
+        if clean_unsets:
+            update["$unset"] = {field: "" for field in clean_unsets}
         await self.coll.update_one(
             {"type": "user", "guild_id": guild_id, "user_id": user_id},
-            {"$set": doc},
+            update,
             upsert=True,
         )
         if previous_signature != self._chip_rank_doc_signature(doc):

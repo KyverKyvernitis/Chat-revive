@@ -251,6 +251,17 @@ class GincanaBase:
     _CHIP_BONUS_EMOJI = "<:laranja:1487076933819830443>"
     _EFFECT_EMOJI = "<:star:1487936913431072780>"
     _MAX_CHIP_DEBT = 100
+    _RACE_RUNTIME_FIELDS = (
+        "race_free_roleta_spins",
+        "race_free_carta_spins",
+        "race_sortudo_blessing_charges",
+        "race_sortudo_blessing_started_at",
+        "race_robbery_window_started_at",
+        "race_robbery_uses",
+        "race_mendigar_window_started_at",
+        "race_mendigar_uses",
+        "race_state",
+    )
     _ACHIEVEMENT_THUMBNAIL_FILENAME = "achievement-unlocked.gif"
     _ACHIEVEMENT_THUMBNAIL_PATH = (
         Path(__file__).resolve().parents[1]
@@ -282,6 +293,8 @@ class GincanaBase:
         self._truco_guild_sessions: dict[int, set[str]] = {}
         self._gincana_message_edit_locks: dict[int, asyncio.Lock] = {}
         self._race_progress_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._race_panel_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._race_rerolls_in_progress: set[tuple[int, int]] = set()
         self._achievement_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._achievement_notice_groups: dict[tuple[int, int, int], AchievementNoticeBurst] = {}
         self._achievement_notice_cleanup_task: asyncio.Task | None = None
@@ -890,9 +903,14 @@ class GincanaBase:
             doc.pop("race_key", None)
             doc.pop("race_active", None)
             doc.pop("game_achievements", None)
-            for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses", "race_state"):
+            for field in self._RACE_RUNTIME_FIELDS:
                 doc.pop(field, None)
-            await self.db._save_user_doc(guild_id, user_id, doc)
+            await self.db._save_user_doc(
+                guild_id,
+                user_id,
+                doc,
+                unset_fields=("race_key", "race_active", *self._RACE_RUNTIME_FIELDS),
+            )
             await self.db.clear_user_game_achievements(guild_id, user_id)
             self._forget_achievement_notice_groups(guild_id, user_id)
             return int(amount)
@@ -916,9 +934,14 @@ class GincanaBase:
             doc.pop("race_key", None)
             doc.pop("race_active", None)
             doc.pop("game_achievements", None)
-            for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses", "race_state"):
+            for field in self._RACE_RUNTIME_FIELDS:
                 doc.pop(field, None)
-            await self.db._save_user_doc(guild_id, user_id, doc)
+            await self.db._save_user_doc(
+                guild_id,
+                user_id,
+                doc,
+                unset_fields=("race_key", "race_active", *self._RACE_RUNTIME_FIELDS),
+            )
             await self.db.clear_user_game_achievements(guild_id, user_id)
             self._forget_achievement_notice_groups(guild_id, user_id)
             return int(doc["chips"])
@@ -2057,14 +2080,6 @@ class GincanaBase:
                     {"key": "redencao", "emoji": "🃏", "title": "Redenção", "desc": f"Ao perder na Roleta ou em Cartas, você tem **{self._format_percent_text(0.5)} de chance** de recuperar metade do custo"},
                 ],
             },
-            "vampiro": {
-                "name": "Vampiro",
-                "emoji": "🧛",
-                "effects": [
-                    {"key": "hunt", "emoji": "🩸", "title": "Hunt", "desc": "Durante a noite, suas vitórias contra outros jogadores rendem Sangue\nA primeira vale **2 cargas**; as próximas valem **1**\nVocê pode guardar até **3**"},
-                    {"key": "harvest", "emoji": "🍷", "title": "Harvest", "desc": f"Junte **3 cargas de Sangue** para receber **35** {self._CHIP_BONUS_EMOJI}\nPode acontecer até **2 vezes por noite**"},
-                ],
-            },
             "fenix": {
                 "name": "Fênix",
                 "emoji": "🐦‍🔥",
@@ -2116,14 +2131,10 @@ class GincanaBase:
     ) -> str:
         race_key = self._get_user_race_key(guild_id, user_id)
         effect = str(effect_key or "").strip().lower()
-        if effect == "hunt":
-            count = min(3, max(1, int(emoji_count or 1)))
-            return "🩸" * count
         if effect == "sunrise":
             count = min(2, max(1, int(emoji_count or 1)))
             return "🔥" * count
         overrides = {
-            "harvest": "🍷",
             "rebirth": "❤️‍🔥",
             "second_dawn": "🐦‍🔥",
             "desync": "<a:eyeglitch:1531116300645175436>",
@@ -2168,8 +2179,6 @@ class GincanaBase:
             "premio_extra": f"seu Daily rendeu fichas bônus extras",
             "as": "você recuperou metade da entrada",
             "redencao": "você recuperou metade do custo",
-            "hunt": "Sangue acumulado",
-            "harvest": f"você recebeu **35** {self._CHIP_BONUS_EMOJI}",
             "sunrise": "Brasa armazenada",
             "rebirth": "as Brasas viraram fichas bônus",
             "second_dawn": f"você recebeu **30** {self._CHIP_BONUS_EMOJI}",
@@ -2270,33 +2279,44 @@ class GincanaBase:
     def _format_user_race(self, guild_id: int, user_id: int) -> str:
         return self._get_race_name(self._get_user_race_key(guild_id, user_id))
 
+    def _reset_race_runtime_doc(self, doc: dict, race_key: str) -> None:
+        key = str(race_key or "").strip().lower()
+        for field in self._RACE_RUNTIME_FIELDS:
+            doc.pop(field, None)
+        if key == "sortudo":
+            doc["race_sortudo_blessing_charges"] = 1
+            doc["race_sortudo_blessing_started_at"] = float(time.time())
+
+    def _pick_race_key(self, current: str = "", *, exclude_current: bool = False) -> str:
+        choices = list(self._race_catalog().keys())
+        current_key = str(current or "").strip().lower()
+        if exclude_current and current_key in choices and len(choices) > 1:
+            choices.remove(current_key)
+        if not choices:
+            raise RuntimeError("Nenhuma raça disponível para sorteio")
+        return random.choice(choices)
+
     async def _set_user_race_key(self, guild_id: int, user_id: int, race_key: str | None, *, reset_state: bool = False):
         doc = self.db._get_user_doc(guild_id, user_id)
         key = str(race_key or "").strip().lower()
+        unset_fields: list[str] = []
         if key and key in self._race_catalog():
             doc["race_key"] = key
             doc["race_active"] = True
         else:
             doc.pop("race_key", None)
             doc.pop("race_active", None)
+            unset_fields.extend(("race_key", "race_active"))
         if reset_state:
             self._race_private_notices.pop((int(guild_id), int(user_id)), None)
-            for field in (
-                "race_free_roleta_spins",
-                "race_free_carta_spins",
-                "race_sortudo_blessing_charges",
-                "race_sortudo_blessing_started_at",
-                "race_robbery_window_started_at",
-                "race_robbery_uses",
-                "race_mendigar_window_started_at",
-                "race_mendigar_uses",
-                "race_state",
-            ):
-                doc.pop(field, None)
-            if key == "sortudo":
-                doc["race_sortudo_blessing_charges"] = 1
-                doc["race_sortudo_blessing_started_at"] = float(time.time())
-        await self.db._save_user_doc(guild_id, user_id, doc)
+            self._reset_race_runtime_doc(doc, key)
+            unset_fields.extend(self._RACE_RUNTIME_FIELDS)
+        await self.db._save_user_doc(
+            guild_id,
+            user_id,
+            doc,
+            unset_fields=tuple(unset_fields),
+        )
 
     async def _set_user_race_active(self, guild_id: int, user_id: int, active: bool):
         doc = self.db._get_user_doc(guild_id, user_id)
@@ -2310,13 +2330,62 @@ class GincanaBase:
         await self._set_user_race_key(guild_id, user_id, None, reset_state=True)
 
     async def _roll_user_race(self, guild_id: int, user_id: int, *, exclude_current: bool = False) -> str:
-        choices = list(self._race_catalog().keys())
         current = self._get_user_race_key(guild_id, user_id)
-        if exclude_current and current in choices and len(choices) > 1:
-            choices.remove(current)
-        chosen = random.choice(choices)
+        chosen = self._pick_race_key(current, exclude_current=exclude_current)
         await self._set_user_race_key(guild_id, user_id, chosen, reset_state=True)
         return chosen
+
+    async def _reroll_user_race(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        cost: int = RACE_REROLL_COST,
+    ) -> tuple[bool, str, int]:
+        """Cobra fichas normais e troca a raça no mesmo documento persistido."""
+        guild_id = int(guild_id)
+        user_id = int(user_id)
+        reroll_cost = max(0, int(cost))
+        async with self._race_progress_lock(guild_id, user_id):
+            async with self._chip_economy_lock(guild_id, user_id):
+                normal_chips = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
+                if normal_chips < reroll_cost:
+                    return False, "", normal_chips
+
+                current = self._get_user_race_key(guild_id, user_id)
+                chosen = self._pick_race_key(current, exclude_current=bool(current))
+                previous_doc = self.db._get_user_doc(guild_id, user_id)
+                doc = dict(previous_doc)
+                doc["chips"] = normal_chips - reroll_cost
+                doc["has_chip_activity"] = True
+                doc["race_key"] = chosen
+                doc["race_active"] = True
+                self._reset_race_runtime_doc(doc, chosen)
+                self._race_private_notices.pop((guild_id, user_id), None)
+                try:
+                    await self.db._save_user_doc(
+                        guild_id,
+                        user_id,
+                        doc,
+                        unset_fields=self._RACE_RUNTIME_FIELDS,
+                    )
+                except Exception:
+                    cache = getattr(self.db, "user_cache", None)
+                    if isinstance(cache, dict):
+                        cache[(guild_id, user_id)] = previous_doc
+                    raise
+
+            try:
+                await self.db.append_chip_history(
+                    guild_id,
+                    user_id,
+                    delta=-reroll_cost,
+                    kind="chips",
+                    reason="Reroll de raça",
+                )
+            except Exception:
+                pass
+            return True, chosen, normal_chips - reroll_cost
 
     def _race_is(self, guild_id: int, user_id: int, race_key: str) -> bool:
         return self._get_user_race_key(guild_id, user_id) == str(race_key or "").strip().lower() and self._is_user_race_active(guild_id, user_id)
@@ -2327,6 +2396,14 @@ class GincanaBase:
         if lock is None:
             lock = asyncio.Lock()
             self._race_progress_locks[key] = lock
+        return lock
+
+    def _race_panel_lock(self, guild_id: int, user_id: int) -> asyncio.Lock:
+        key = (int(guild_id), int(user_id))
+        lock = self._race_panel_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._race_panel_locks[key] = lock
         return lock
 
     @staticmethod
@@ -2380,21 +2457,11 @@ class GincanaBase:
 
     def _race_lobby_status_line(self, guild_id: int, user_id: int) -> str:
         race_key = self._get_user_race_key(guild_id, user_id)
-        if race_key not in {"vampiro", "fenix", "glitch"} or not self._is_user_race_active(guild_id, user_id):
+        if race_key not in {"fenix", "glitch"} or not self._is_user_race_active(guild_id, user_id):
             return ""
         doc = self.db._get_user_doc(guild_id, user_id)
         state = dict((doc.get("race_state") or {}).get(race_key) or {})
         period, period_key = self._race_period_info()
-        if race_key == "vampiro":
-            if period != "night":
-                return "🩸 **Hunt:** indisponível durante o dia"
-            if str(state.get("night_key") or "") != period_key:
-                blood = 0
-                harvests = 0
-            else:
-                blood = min(3, max(0, int(state.get("blood", 0) or 0)))
-                harvests = min(2, max(0, int(state.get("harvests", 0) or 0)))
-            return f"🩸 **Hunt:** {blood}/3 Sangues • Harvest {harvests}/2"
         if race_key == "fenix":
             if period != "day":
                 return "🐦‍🔥 **Habilidades:** indisponíveis durante a noite"
@@ -2565,15 +2632,13 @@ class GincanaBase:
         won: bool | None,
         entry_spend: dict | None,
         payout: int = 0,
-        opponent_ids=(),
         valid: bool = True,
-        allow_hunt: bool = True,
         glitch_progress: bool = True,
     ) -> list[str]:
         """Aplica progressão das raças novas sem interferir na resolução do jogo."""
         try:
             race_key = self._get_user_race_key(guild_id, user_id)
-            if race_key not in {"vampiro", "fenix", "glitch"} or not self._is_user_race_active(guild_id, user_id):
+            if race_key not in {"fenix", "glitch"} or not self._is_user_race_active(guild_id, user_id):
                 return []
             if not valid:
                 return []
@@ -2588,8 +2653,6 @@ class GincanaBase:
                 period, period_key = stored_period, stored_period_key
             else:
                 period, period_key = current_period, current_period_key
-            timestamp = float(now.timestamp())
-            opponents = sorted({int(value) for value in (opponent_ids or ()) if int(value) > 0 and int(value) != int(user_id)})
 
             async with self._race_progress_lock(guild_id, user_id):
                 doc = self.db._get_user_doc(guild_id, user_id)
@@ -2601,41 +2664,7 @@ class GincanaBase:
                 normal_reason = ""
                 bonus_reason = ""
 
-                if race_key == "vampiro":
-                    if won is not True or period != "night" or not allow_hunt or not opponents:
-                        return []
-                    if str(state.get("night_key") or "") != period_key:
-                        state = {"night_key": period_key, "blood": 0, "wins": 0, "harvests": 0, "opponents": {}}
-                    harvests = max(0, int(state.get("harvests", 0) or 0))
-                    if harvests >= 2:
-                        return []
-                    opponent_log = dict(state.get("opponents") or {})
-                    eligible_opponents = [opponent_id for opponent_id in opponents if timestamp - float(opponent_log.get(str(opponent_id), 0) or 0.0) >= 4 * 60 * 60]
-                    if not eligible_opponents:
-                        return []
-                    for opponent_id in eligible_opponents:
-                        opponent_log[str(opponent_id)] = timestamp
-                    wins = max(0, int(state.get("wins", 0) or 0))
-                    gain = 2 if wins == 0 else 1
-                    blood = min(3, max(0, int(state.get("blood", 0) or 0)) + gain)
-                    state.update({"night_key": period_key, "blood": blood, "wins": wins + 1, "opponents": opponent_log})
-                    notes.append(
-                        self._race_effect_message(
-                            guild_id,
-                            user_id,
-                            "hunt",
-                            f"+{gain} Sangue{'s' if gain != 1 else ''} ({blood}/3)",
-                            emoji_count=blood,
-                        )
-                    )
-                    if blood >= 3:
-                        state["blood"] = 0
-                        state["harvests"] = harvests + 1
-                        bonus_delta = 35
-                        bonus_reason = "Harvest do Vampiro"
-                        notes.append(self._race_effect_message(guild_id, user_id, "harvest", f"+35 {self._CHIP_BONUS_EMOJI} ({state['harvests']}/2 nesta noite)"))
-
-                elif race_key == "fenix":
+                if race_key == "fenix":
                     if period != "day" or entry_total <= 0 or won is None:
                         return []
                     if str(state.get("day_key") or "") != period_key:

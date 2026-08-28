@@ -863,7 +863,6 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 else:
                     lines.append(f"Ninguém sobreviveu para receber a entrada de **{eliminated_entry_total} {self._CHIP_LOSS_EMOJI}**")
 
-            eligible_ids = [member.id for member in eligible]
             for member in eligible:
                 round_won = None if chosen is None else member.id != chosen.id
                 notes = await self._apply_new_race_result(
@@ -872,9 +871,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                     won=round_won,
                     entry_spend=self._buckshot_entry_spend(session, member.id, stake),
                     payout=int(race_payouts.get(member.id, 0) or 0),
-                    opponent_ids=[user_id for user_id in eligible_ids if user_id != member.id],
                     valid=True,
-                    allow_hunt=True,
                 )
                 await self._route_lobby_race_notices(
                     (session.get('race_interactions') or {}).get(member.id),

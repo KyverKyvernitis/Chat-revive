@@ -1590,7 +1590,6 @@ class GincanaCorridaMixin:
                 await self._change_user_bonus_chips(guild.id, user_id, amount, reason=bonus_reason)
 
         entry_spend_map = session.get("entry_spend") or {}
-        participant_ids = [member.id for member in final_order]
         owner_id = int(session.get("owner_id") or 0)
         public_race_notices: list[str] = []
         for member in final_order:
@@ -1600,9 +1599,7 @@ class GincanaCorridaMixin:
                 won=member.id in winner_ids,
                 entry_spend=entry_spend_map.get(member.id) or {"chips": CORRIDA_STAKE, "bonus": 0},
                 payout=int(rewards.get(member.id, 0) or 0) + int(bonus_rewards.get(member.id, 0) or 0),
-                opponent_ids=[user_id for user_id in participant_ids if user_id != member.id],
                 valid=True,
-                allow_hunt=True,
             )
             await self._route_lobby_race_notices(
                 (session.get("race_interactions") or {}).get(member.id),
@@ -1847,4 +1844,3 @@ class GincanaCorridaMixin:
         session["message"] = panel_message
         await self._react_with_emoji(message, "🐎", keep=True)
         return True
-

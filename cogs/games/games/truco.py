@@ -990,9 +990,7 @@ class GincanaTrucoMixin:
                         won=did_win,
                         entry_spend=entry_spend,
                         payout=(game.pot + self._truco_bonus_reward_value(game)) if did_win else 0,
-                        opponent_ids=[loser_user_id if did_win else winner_id],
                         valid=True,
-                        allow_hunt=True,
                     )
                     await self._route_lobby_race_notices(
                         game.race_interactions.get(user_id),

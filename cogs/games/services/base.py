@@ -568,16 +568,6 @@ class GincanaBase:
             )
             return False
 
-        if self._gincana_input_mode(guild.id) != "commands":
-            lines = ["Este servidor usa triggers"]
-            if trigger_hint:
-                lines.append(f"Use `{trigger_hint}` sem prefixo")
-            await ctx.reply(
-                view=self._make_v2_notice("Modo por triggers", lines, ok=False),
-                mention_author=False,
-            )
-            return False
-
         if not self._gincana_channel_matches(guild, ctx.channel):
             channel = self._get_gincana_channel(guild)
             channel_text = getattr(channel, "mention", "o canal configurado")

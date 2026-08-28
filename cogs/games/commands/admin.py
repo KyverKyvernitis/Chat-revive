@@ -187,16 +187,16 @@ class _EconomyModeModal(discord.ui.Modal, title="Forma de uso"):
         self.mode_group.add_option(
             label="Triggers",
             value="triggers",
-            description="Use palavras como roleta, daily e race",
+            description=f"Use roleta/daily ou {prefix}roleta/{prefix}daily",
             default=current == "triggers",
         )
         self.mode_group.add_option(
             label="Comandos",
             value="commands",
-            description=f"Use comandos como {prefix}roleta, {prefix}daily e {prefix}race",
+            description=f"Use somente comandos como {prefix}roleta e {prefix}daily",
             default=current == "commands",
         )
-        self.add_item(_label("Forma de uso", self.mode_group, "Apenas uma forma fica ativa por vez"))
+        self.add_item(_label("Forma de uso", self.mode_group, "Comandos permanecem disponíveis nos dois modos"))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._economy_validate_interaction(interaction, opener_id=self.opener_id):
@@ -217,7 +217,11 @@ class _EconomyModeModal(discord.ui.Modal, title="Forma de uso"):
             )
             return
         await self.cog.db.set_gincana_input_mode(guild.id, mode)
-        notice = "Agora o servidor usa comandos" if mode == "commands" else "Agora o servidor usa triggers"
+        notice = (
+            "Agora o servidor usa apenas comandos"
+            if mode == "commands"
+            else "Triggers ativados; comandos continuam disponíveis"
+        )
         await interaction.response.edit_message(
             view=self.cog._make_economy_panel_view(guild, self.opener_id, notice=notice)
         )
@@ -342,11 +346,13 @@ class _EconomyPanelView(discord.ui.LayoutView):
             if channel is not None
             else "Todos os canais"
         )
-        mode_text = "Comandos" if mode == "commands" else "Triggers"
+        mode_text = "Somente comandos" if mode == "commands" else "Triggers + comandos"
         if mode == "commands":
             mode_example = f"Use `{prefix}roleta`, `{prefix}daily` e `{prefix}race`"
         else:
-            mode_example = "Use palavras como `roleta`, `daily` e `race`"
+            mode_example = (
+                f"Use `roleta`, `daily` e `race`, ou `{prefix}roleta`, `{prefix}daily` e `{prefix}race`"
+            )
 
         config_items: list[discord.ui.Item] = [
             discord.ui.TextDisplay("# ⚙️ Economia\nGerencie jogos, fichas e raças neste servidor"),

@@ -1925,7 +1925,11 @@ class GincanaBase:
                 task = asyncio.create_task(self._show_negative_message_gate(key, generation))
                 state["task"] = task
 
-        await self._delete_negative_gate_message(message)
+        # Preserve the trigger that owns the pending negative-balance confirmation.
+        # Only duplicate triggers from the same spam burst are discarded so the
+        # final confirmation stays associated with the command that caused it.
+        if not owner:
+            await self._delete_negative_gate_message(message)
         if old_confirmation is not None:
             await self._delete_negative_gate_message(old_confirmation)
         if not owner:

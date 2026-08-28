@@ -72,7 +72,7 @@ class GamesNegativeBalanceGateTests(unittest.TestCase):
         self.assertIn("_negative_debt_message_gates", confirm)
         self.assertIn('state["generation"]', confirm)
         self.assertIn("old_task.cancel()", confirm)
-        self.assertIn("_delete_negative_gate_message(message)", confirm)
+        self.assertIn("if not owner:\n            await self._delete_negative_gate_message(message)", confirm)
         self.assertIn("_delete_negative_gate_message(old_confirmation)", confirm)
         self.assertIn("await asyncio.sleep(0.45)", show)
         self.assertIn("_set_negative_balance_authorized", show)

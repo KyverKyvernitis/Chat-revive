@@ -1116,6 +1116,15 @@ class GincanaTrucoMixin:
         if not ok:
             await message.channel.send(embed=self._make_embed("🃏 Truco", note or "Você não tem saldo suficiente para entrar nesse jogo", ok=False))
             return True
+        if self._needs_negative_confirmation(guild.id, challenger.id, TRUCO_ENTRY):
+            confirmed = await self._confirm_negative_from_message(
+                message,
+                guild.id,
+                challenger.id,
+                TRUCO_ENTRY,
+            )
+            if not confirmed:
+                return True
 
         game = self._truco_make_game(
             guild.id,
@@ -1507,6 +1516,15 @@ class GincanaTrucoMixin:
             if not ok:
                 await interaction.response.send_message(note or "Você não pode subir o jogo agora", ephemeral=True)
                 return
+            if delta > 0 and self._needs_negative_confirmation(game.guild_id, requester_id, delta):
+                confirmed = await self._confirm_negative_ephemeral(
+                    interaction,
+                    game.guild_id,
+                    requester_id,
+                    delta,
+                )
+                if not confirmed:
+                    return
             guild = self.bot.get_guild(game.guild_id)
             game.status = "awaiting_raise_response"
             game.pending_raise_by = interaction.user.id
@@ -1544,6 +1562,16 @@ class GincanaTrucoMixin:
                 if not ok:
                     await interaction.response.send_message(note or "Um dos jogadores não consegue bancar o aumento agora", ephemeral=True)
                     return
+            responder_delta = int(deltas.get(interaction.user.id, 0) or 0)
+            if responder_delta > 0 and self._needs_negative_confirmation(game.guild_id, interaction.user.id, responder_delta):
+                confirmed = await self._confirm_negative_ephemeral(
+                    interaction,
+                    game.guild_id,
+                    interaction.user.id,
+                    responder_delta,
+                )
+                if not confirmed:
+                    return
             consumed: list[tuple[int, int, int]] = []
             for user_id, delta in deltas.items():
                 if delta <= 0:
@@ -1553,7 +1581,10 @@ class GincanaTrucoMixin:
                 if not paid:
                     if consumed:
                         await self._truco_refund_consumed_entries(game.guild_id, consumed)
-                    await interaction.response.send_message("Não foi possível cobrar o aumento\nNada foi alterado", ephemeral=True)
+                    if interaction.response.is_done():
+                        await interaction.followup.send("Não foi possível cobrar o aumento\nNada foi alterado", ephemeral=True)
+                    else:
+                        await interaction.response.send_message("Não foi possível cobrar o aumento\nNada foi alterado", ephemeral=True)
                     return
                 consumed.append((user_id, normal_part, bonus_part))
             for user_id, normal_part, bonus_part in consumed:

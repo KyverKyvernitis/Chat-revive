@@ -1469,6 +1469,7 @@ async def _settingsdb_maybe_reset_user_chips(self, guild_id: int, user_id: int, 
     if last_reset <= 0:
         doc = self._get_user_doc(guild_id, user_id)
         doc["chips"] = max(0, int(amount))
+        doc["negative_balance_authorized"] = False
         doc["last_chip_reset_at"] = float(now)
         await self._save_user_doc(guild_id, user_id, doc)
         return True, int(amount), 0.0
@@ -1477,6 +1478,7 @@ async def _settingsdb_maybe_reset_user_chips(self, guild_id: int, user_id: int, 
         return False, self.get_user_chips(guild_id, user_id, default=100), remaining
     doc = self._get_user_doc(guild_id, user_id)
     doc["chips"] = max(0, int(amount))
+    doc["negative_balance_authorized"] = False
     doc["last_chip_reset_at"] = float(now)
     await self._save_user_doc(guild_id, user_id, doc)
     return True, int(amount), 0.0
@@ -1716,9 +1718,22 @@ def _settingsdb_get_user_chips(self, guild_id: int, user_id: int, *, default: in
     except Exception:
         return int(default)
 
-async def _settingsdb_set_user_chips(self, guild_id: int, user_id: int, chips: int):
+def _settingsdb_get_negative_balance_authorized(self, guild_id: int, user_id: int) -> bool:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    return bool(doc.get("negative_balance_authorized", False))
+
+async def _settingsdb_set_negative_balance_authorized(self, guild_id: int, user_id: int, value: bool):
     doc = self._get_user_doc(guild_id, user_id)
-    doc["chips"] = int(chips)
+    doc["negative_balance_authorized"] = bool(value)
+    await self._save_user_doc(guild_id, user_id, doc)
+
+async def _settingsdb_set_user_chips(self, guild_id: int, user_id: int, chips: int):
+    old_chips = self.get_user_chips(guild_id, user_id)
+    new_chips = int(chips)
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["chips"] = new_chips
+    if old_chips < 0 <= new_chips:
+        doc["negative_balance_authorized"] = False
     await self._save_user_doc(guild_id, user_id, doc)
 
 async def _settingsdb_add_user_chips(self, guild_id: int, user_id: int, amount: int) -> int:
@@ -1731,6 +1746,8 @@ async def _settingsdb_add_user_chips(self, guild_id: int, user_id: int, amount: 
         doc = self._get_user_doc(guild_id, user_id)
         doc["chips"] = int(new_chips)
         doc["bonus_chips"] = int(bonus)
+        if current < 0 <= new_chips:
+            doc["negative_balance_authorized"] = False
         await self._save_user_doc(guild_id, user_id, doc)
         return int(new_chips)
     spend = -delta
@@ -1773,8 +1790,11 @@ async def claim_daily_bonus(self, guild_id: int, user_id: int, *, base_amount: i
     doc["daily_last_claim_key"] = today
     doc["daily_streak"] = new_streak
     current = self.get_user_chips(guild_id, user_id, default=100)
-    doc["chips"] = int(current + bonus)
+    new_chips = int(current + bonus)
+    doc["chips"] = new_chips
     doc["bonus_chips"] = max(0, int(doc.get("bonus_chips", 0) or 0)) + 10
+    if current < 0 <= new_chips:
+        doc["negative_balance_authorized"] = False
     await self._save_user_doc(guild_id, user_id, doc)
     return True, int(doc["chips"]), bonus, new_streak
 
@@ -1796,6 +1816,8 @@ def _settingsdb_get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) ->
 SettingsDB.get_user_bonus_chips = _settingsdb_get_user_bonus_chips
 SettingsDB.set_user_bonus_chips = _settingsdb_set_user_bonus_chips
 SettingsDB.add_user_bonus_chips = _settingsdb_add_user_bonus_chips
+SettingsDB.get_negative_balance_authorized = _settingsdb_get_negative_balance_authorized
+SettingsDB.set_negative_balance_authorized = _settingsdb_set_negative_balance_authorized
 SettingsDB.get_user_chips = _settingsdb_get_user_chips
 SettingsDB.set_user_chips = _settingsdb_set_user_chips
 SettingsDB.add_user_chips = _settingsdb_add_user_chips
@@ -1982,6 +2004,7 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
             "daily_streak": 0,
             "last_chip_reset_at": 0.0,
             "chip_recharge_manual_initialized": False,
+            "negative_balance_authorized": False,
             "last_robbery_at": 0.0,
             "last_mendigar_at": 0.0,
             "last_esmola_at": 0.0,
@@ -2018,6 +2041,7 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         updated["daily_streak"] = 0
         updated["last_chip_reset_at"] = 0.0
         updated["chip_recharge_manual_initialized"] = False
+        updated["negative_balance_authorized"] = False
         updated["last_robbery_at"] = 0.0
         updated["last_mendigar_at"] = 0.0
         updated["last_esmola_at"] = 0.0

@@ -54,87 +54,6 @@ ROLETA_ANIMATION_LAST_STOP_SECONDS = 4.80
 ROLETA_RESULT_REPEAT_WINDOW_SECONDS = 60.0
 
 
-class _GameDebtConfirmView(discord.ui.LayoutView):
-    def __init__(self, cog, *, owner_id: int, title: str, note: str, timeout: float = 20.0):
-        super().__init__(timeout=timeout)
-        self.cog = cog
-        self.owner_id = int(owner_id)
-        self.title = str(title)
-        self.note = str(note)
-        self.confirmed = False
-        self.message: discord.Message | None = None
-        self._finished = False
-        self.confirm_button = discord.ui.Button(label="Continuar", style=discord.ButtonStyle.danger)
-        self.cancel_button = discord.ui.Button(label="Cancelar", style=discord.ButtonStyle.secondary)
-        self.confirm_button.callback = self._confirm
-        self.cancel_button.callback = self._cancel
-        self._rebuild()
-
-    def _rebuild(self, status: str | None = None):
-        for item in list(self.children):
-            self.remove_item(item)
-        children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"# {self.title}"),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay(status or self.note),
-        ]
-        if not self._finished:
-            children.extend([
-                discord.ui.Separator(),
-                discord.ui.ActionRow(self.confirm_button, self.cancel_button),
-            ])
-        self.add_item(discord.ui.Container(*children, accent_color=discord.Color.red()))
-
-    async def _reject_other_user(self, interaction: discord.Interaction):
-        notice = self.cog._make_game_notice_view(
-            "⚠️ Confirmação indisponível",
-            "Essa confirmação não é para você",
-            ok=False,
-        )
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send(view=notice, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-            else:
-                await interaction.response.send_message(view=notice, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-        except Exception:
-            pass
-
-    async def _finish(self, interaction: discord.Interaction, *, confirmed: bool):
-        if int(interaction.user.id) != self.owner_id:
-            await self._reject_other_user(interaction)
-            return
-        self.confirmed = bool(confirmed)
-        self._finished = True
-        self.confirm_button.disabled = True
-        self.cancel_button.disabled = True
-        self._rebuild("Entrada confirmada" if confirmed else "Entrada cancelada")
-        try:
-            await interaction.response.edit_message(view=self)
-        except Exception:
-            try:
-                await interaction.edit_original_response(view=self)
-            except Exception:
-                pass
-        self.stop()
-
-    async def _confirm(self, interaction: discord.Interaction):
-        await self._finish(interaction, confirmed=True)
-
-    async def _cancel(self, interaction: discord.Interaction):
-        await self._finish(interaction, confirmed=False)
-
-    async def on_timeout(self):
-        self._finished = True
-        self.confirm_button.disabled = True
-        self.cancel_button.disabled = True
-        self._rebuild("A confirmação expirou")
-        try:
-            if self.message is not None:
-                await self.message.edit(view=self)
-        except Exception:
-            pass
-
-
 class GincanaRoletaMixin:
         def _random_roleta_digit(self, exclude: set[object] | None = None) -> int:
             exclude = exclude or set()
@@ -752,9 +671,12 @@ class GincanaRoletaMixin:
             if state is None:
                 state = {
                     "condition": asyncio.Condition(),
+                    "delivery_condition": asyncio.Condition(),
                     "issued": 0,
                     "next_commit": 1,
+                    "next_delivery": 1,
                     "completed": set(),
+                    "delivered": set(),
                     # Entradas já debitadas de rodadas futuras. Elas continuam no
                     # saldo real para permitir spam, mas precisam ser somadas de
                     # volta ao montar o card de uma rodada anterior.
@@ -851,6 +773,30 @@ class GincanaRoletaMixin:
                     reservations.pop(next_commit, None)
                     next_commit += 1
                 state["next_commit"] = next_commit
+                condition.notify_all()
+
+        async def _wait_for_game_round_delivery_turn(self, guild_id: int, user_id: int, sequence: int):
+            state = self._game_round_order_state(guild_id, user_id)
+            condition: asyncio.Condition = state["delivery_condition"]
+            async with condition:
+                await condition.wait_for(lambda: int(state.get("next_delivery", 1) or 1) >= int(sequence))
+
+        async def _complete_game_round_delivery_sequence(self, guild_id: int, user_id: int, sequence: int | None):
+            if sequence is None:
+                return
+            state = self._game_round_order_state(guild_id, user_id)
+            condition: asyncio.Condition = state["delivery_condition"]
+            async with condition:
+                delivered: set[int] = state["delivered"]
+                completed_sequence = int(sequence)
+                next_delivery = int(state.get("next_delivery", 1) or 1)
+                if completed_sequence < next_delivery:
+                    return
+                delivered.add(completed_sequence)
+                while next_delivery in delivered:
+                    delivered.remove(next_delivery)
+                    next_delivery += 1
+                state["next_delivery"] = next_delivery
                 condition.notify_all()
 
         def _game_animation_state(self, guild_id: int) -> dict[str, object]:
@@ -1120,22 +1066,20 @@ class GincanaRoletaMixin:
             *,
             title: str,
         ) -> bool:
-            note = self._negative_transition_note(guild_id, user_id, amount)
-            if not note:
-                return True
-            view = _GameDebtConfirmView(self, owner_id=user_id, title=title, note=note)
-            sent = None
-            try:
-                sent = await message.channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
-                view.message = sent
-                await view.wait()
-                return bool(view.confirmed)
-            finally:
-                if sent is not None:
-                    try:
-                        await sent.delete()
-                    except Exception:
-                        pass
+            order_state = self._game_round_order_state(guild_id, user_id)
+            wait_until = int(order_state.get("issued", 0) or 0) + 1
+
+            async def _wait_prior_results():
+                await self._wait_for_game_round_delivery_turn(guild_id, user_id, wait_until)
+
+            return await self._confirm_negative_from_message(
+                message,
+                guild_id,
+                user_id,
+                amount,
+                title=title,
+                before_show=_wait_prior_results,
+            )
 
         async def _animate_roleta_spin(
             self,
@@ -1932,14 +1876,17 @@ class GincanaRoletaMixin:
                 )
             await self._complete_game_round_sequence(guild.id, actor.id, round_sequence)
             achievement_keys = (["first_game"] if first_game_unlocked else []) + roulette_achievements
-            await self._deliver_game_result(
-                source_message,
-                spin_message,
-                view=result_view,
-                guild_id=guild.id,
-                achievement_user_id=actor.id,
-                achievement_keys=achievement_keys,
-            )
+            try:
+                await self._deliver_game_result(
+                    source_message,
+                    spin_message,
+                    view=result_view,
+                    guild_id=guild.id,
+                    achievement_user_id=actor.id,
+                    achievement_keys=achievement_keys,
+                )
+            finally:
+                await self._complete_game_round_delivery_sequence(guild.id, actor.id, round_sequence)
             return True
 
         async def _execute_carta_round(
@@ -2094,14 +2041,17 @@ class GincanaRoletaMixin:
                 )
             await self._complete_game_round_sequence(guild.id, actor.id, round_sequence)
             achievement_keys = (["first_game"] if first_game_unlocked else []) + roulette_achievements
-            await self._deliver_game_result(
-                source_message,
-                spin_message,
-                view=result_view,
-                guild_id=guild.id,
-                achievement_user_id=actor.id,
-                achievement_keys=achievement_keys,
-            )
+            try:
+                await self._deliver_game_result(
+                    source_message,
+                    spin_message,
+                    view=result_view,
+                    guild_id=guild.id,
+                    achievement_user_id=actor.id,
+                    achievement_keys=achievement_keys,
+                )
+            finally:
+                await self._complete_game_round_delivery_sequence(guild.id, actor.id, round_sequence)
             return True
         async def _run_carta_trigger_locked(self, message: discord.Message) -> bool:
             guild = message.guild
@@ -2256,6 +2206,7 @@ class GincanaRoletaMixin:
             finally:
                 await self._release_game_animation_session(guild.id, session_id)
                 await self._complete_game_round_sequence(guild.id, message.author.id, round_sequence)
+                await self._complete_game_round_delivery_sequence(guild.id, message.author.id, round_sequence)
 
         async def _run_roleta_trigger_locked(self, message: discord.Message) -> bool:
             guild = message.guild
@@ -2414,6 +2365,7 @@ class GincanaRoletaMixin:
             finally:
                 await self._release_game_animation_session(guild.id, session_id)
                 await self._complete_game_round_sequence(guild.id, message.author.id, round_sequence)
+                await self._complete_game_round_delivery_sequence(guild.id, message.author.id, round_sequence)
 
         async def _handle_carta_trigger(self, message: discord.Message) -> bool:
             guild = message.guild

@@ -270,12 +270,13 @@ class GincanaPokerMixin:
     async def _persist_poker_player_stack(self, guild_id: int, user_id: int, *, normal: int, bonus: int, reason: str = "Poker"):
         new_normal = int(normal)
         new_bonus = int(bonus)
-        current_normal = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
-        current_bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
-        delta_normal = new_normal - current_normal
-        delta_bonus = new_bonus - current_bonus
-        await self.db.set_user_chips(guild_id, user_id, new_normal)
-        await self.db.set_user_bonus_chips(guild_id, user_id, new_bonus)
+        async with self._chip_economy_lock(guild_id, user_id):
+            current_normal = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
+            current_bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
+            delta_normal = new_normal - current_normal
+            delta_bonus = new_bonus - current_bonus
+            await self.db.set_user_chips(guild_id, user_id, new_normal)
+            await self.db.set_user_bonus_chips(guild_id, user_id, new_bonus)
         await self._mark_chip_activity(guild_id, user_id)
         if delta_normal != 0:
             try:
@@ -288,16 +289,6 @@ class GincanaPokerMixin:
             except Exception:
                 pass
 
-    def _poker_entry_block_note(self, guild_id: int, user_id: int, buy_in: int) -> str | None:
-        chips = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
-        bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
-        total = chips + bonus
-        if total < int(buy_in):
-            return (
-                f"O poker precisa de {self._chip_amount(buy_in)} disponíveis sem aumentar dívida\n"
-                f"Seu saldo atual é {self._format_compact_chip_balance(guild_id, user_id)}"
-            )
-        return None
     def _create_poker_deck(self) -> list[Card]:
         suits = ["♠", "♥", "♦", "♣"]
         rank_labels = {11: "J", 12: "Q", 13: "K", 14: "A"}
@@ -536,9 +527,9 @@ class GincanaPokerMixin:
             normal = int(game.stack_normal.get(player_id, 0) or 0)
             bonus = int(game.stack_bonus.get(player_id, 0) or 0)
             if game.phase == "invite":
-                stack_normal, stack_bonus, _total = self._poker_project_stack_after_buy_in(game.guild_id, player_id, game.buy_in)
-                normal = stack_normal + game.buy_in
-                bonus = stack_bonus
+                spend = self._normalize_entry_spend(game.entry_spend.get(player_id))
+                normal += int(spend.get("chips", 0) or 0)
+                bonus += int(spend.get("bonus", 0) or 0)
             await self._persist_poker_player_stack(game.guild_id, player_id, normal=normal, bonus=bonus, reason="Devolução do poker")
         await self._disable_poker_views(game)
         if game.status_message is not None:
@@ -930,7 +921,7 @@ class GincanaPokerMixin:
         guild = self.bot.get_guild(game.guild_id)
         member = guild.get_member(player_id) if guild else None
         name = member.display_name if member else "Jogador"
-        if to_call > self._poker_total_stack(game, player_id):
+        if to_call > 0 and to_call > max(0, self._poker_total_stack(game, player_id)):
             await interaction.response.send_message("Você não tem fichas suficientes para pagar", ephemeral=True)
             return
         if to_call > 0:
@@ -1036,20 +1027,6 @@ class GincanaPokerMixin:
         if opponent.id == message.author.id:
             return True
 
-        host_block_note = self._poker_entry_block_note(guild.id, message.author.id, POKER_BUY_IN)
-        opp_block_note = self._poker_entry_block_note(guild.id, opponent.id, POKER_BUY_IN)
-        if host_block_note:
-            try:
-                await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_block_note, ok=False))
-            except Exception:
-                pass
-            return True
-        if opp_block_note:
-            try:
-                await message.channel.send(embed=self._make_poker_status_embed("🃏 Rival sem fichas", f"{opponent.mention}: {opp_block_note}", ok=False))
-            except Exception:
-                pass
-            return True
         host_ok, _host_balance, host_note = await self._ensure_action_chips(guild.id, message.author.id, POKER_BUY_IN)
         opp_ok, _opp_balance, opp_note = await self._ensure_action_chips(guild.id, opponent.id, POKER_BUY_IN)
         if not host_ok:
@@ -1068,14 +1045,21 @@ class GincanaPokerMixin:
             confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, POKER_BUY_IN, title="🃏 Confirmar entrada")
             if not confirmed:
                 return True
+            host_note = None
         if self._needs_negative_confirmation(guild.id, opponent.id, POKER_BUY_IN):
-            confirmed = await self._confirm_negative_via_message(message.channel, user_id=opponent.id, title="🃏 Confirmar entrada", note=self._negative_transition_note(guild.id, opponent.id, POKER_BUY_IN) or "")
+            confirmed = await self._confirm_negative_via_message(
+                message.channel,
+                user_id=opponent.id,
+                guild_id=guild.id,
+                amount=POKER_BUY_IN,
+            )
             if not confirmed:
                 try:
                     await message.channel.send(embed=self._make_poker_status_embed("🃏 Convite cancelado", f"{opponent.mention} não confirmou a entrada no poker", ok=False))
                 except Exception:
                     pass
                 return True
+            opp_note = None
 
         game = PokerGame(
             guild_id=guild.id,

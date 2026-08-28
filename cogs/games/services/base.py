@@ -51,67 +51,55 @@ RANK_NEXT_EMOJI = "<a:k0_SetaD:1542282957966802986>"
 RANK_PAGINATION_TIMEOUT_SECONDS = 10 * 60
 
 
-class _NegativeDebtConfirmView(discord.ui.View):
-    def __init__(self, *, owner_id: int, timeout: float = 20.0):
+class _NegativeDebtConfirmView(discord.ui.LayoutView):
+    def __init__(self, *, owner_id: int, projected_chips: int, timeout: float = 20.0):
         super().__init__(timeout=timeout)
         self.owner_id = int(owner_id)
+        self.projected_chips = int(projected_chips)
         self.confirmed = False
-        self.message = None
+        self.message: discord.Message | None = None
+        self.confirm_button = discord.ui.Button(label="Continuar", style=discord.ButtonStyle.danger)
+        self.confirm_button.callback = self._confirm
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(
+                    f"# <:emoji_65:1485043671077228786> Saldo negativo\n\n"
+                    f"Este jogo deixará seu saldo em {self.projected_chips}\n"
+                    f"-# Continue para permitir saldo negativo até recuperá-lo, ou use _recarga para adicionar "
+                    f"+{CHIPS_DEFAULT} <:laranja:1487076933819830443> à sua conta"
+                ),
+                discord.ui.Separator(),
+                discord.ui.ActionRow(self.confirm_button),
+                accent_color=discord.Color.red(),
+            )
+        )
 
-    @discord.ui.button(label="Continuar", style=discord.ButtonStyle.danger)
-    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _confirm(self, interaction: discord.Interaction):
         if int(interaction.user.id) != self.owner_id:
-            await interaction.response.send_message("Essa confirmação não é para você", ephemeral=True)
-            return
-        self.confirmed = True
-        for child in self.children:
-            child.disabled = True
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
-        try:
-            if self.message is not None:
-                await self.message.edit(view=self)
-        except Exception:
             try:
-                await interaction.edit_original_response(view=self)
+                await interaction.response.send_message("Essa confirmação não é para você", ephemeral=True)
             except Exception:
                 pass
-        self.stop()
-
-    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if int(interaction.user.id) != self.owner_id:
-            await interaction.response.send_message("Essa confirmação não é para você", ephemeral=True)
             return
-        self.confirmed = False
-        for child in self.children:
-            child.disabled = True
+        self.confirmed = True
+        self.confirm_button.disabled = True
         try:
-            await interaction.response.defer()
-        except Exception:
-            pass
-        try:
-            if self.message is not None:
-                await self.message.edit(content="Entrada cancelada", view=None)
-            else:
-                await interaction.edit_original_response(content="Entrada cancelada", view=None)
+            await interaction.response.edit_message(view=self)
         except Exception:
             try:
-                await interaction.edit_original_response(content="Entrada cancelada", view=None)
+                await interaction.response.defer()
             except Exception:
                 pass
         self.stop()
 
     async def on_timeout(self):
+        self.confirm_button.disabled = True
         try:
-            for child in self.children:
-                child.disabled = True
             if self.message is not None:
-                await self.message.edit(view=None)
+                await self.message.edit(view=self)
         except Exception:
             pass
+        self.stop()
 
 
 class _ChipRankPageButton(discord.ui.Button):
@@ -298,6 +286,9 @@ class GincanaBase:
         self._achievement_notice_groups: dict[tuple[int, int, int], AchievementNoticeBurst] = {}
         self._achievement_notice_cleanup_task: asyncio.Task | None = None
         self._race_private_notices: dict[tuple[int, int], list[str]] = {}
+        self._negative_debt_message_gates: dict[tuple[int, int], dict] = {}
+        self._negative_debt_gate_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._chip_economy_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._chip_rank_cache = ChipRankCache(bot, db)
         self._chip_profile_cache = ChipProfileCache(bot, self._chip_rank_cache)
 
@@ -671,9 +662,10 @@ class GincanaBase:
 
     async def _change_user_bonus_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True, reason: str | None = None) -> int:
         requested_delta = int(amount)
-        old_bonus = self._get_user_bonus_chips(guild_id, user_id)
-        new_bonus = await self.db.add_user_bonus_chips(guild_id, user_id, requested_delta)
-        actual_delta = int(new_bonus) - int(old_bonus)
+        async with self._chip_economy_lock(guild_id, user_id):
+            old_bonus = self._get_user_bonus_chips(guild_id, user_id)
+            new_bonus = await self.db.add_user_bonus_chips(guild_id, user_id, requested_delta)
+            actual_delta = int(new_bonus) - int(old_bonus)
         if actual_delta != 0:
             if mark_activity:
                 await self._mark_chip_activity(guild_id, user_id)
@@ -685,12 +677,13 @@ class GincanaBase:
 
     async def _change_user_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True, reason: str | None = None) -> int:
         requested_delta = int(amount)
-        old_balance = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
-        old_bonus = self._get_user_bonus_chips(guild_id, user_id)
-        new_balance = await self.db.add_user_chips(guild_id, user_id, requested_delta)
-        new_bonus = self._get_user_bonus_chips(guild_id, user_id)
-        normal_delta = int(new_balance) - old_balance
-        bonus_delta = int(new_bonus) - old_bonus
+        async with self._chip_economy_lock(guild_id, user_id):
+            old_balance = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
+            old_bonus = self._get_user_bonus_chips(guild_id, user_id)
+            new_balance = await self.db.add_user_chips(guild_id, user_id, requested_delta)
+            new_bonus = self._get_user_bonus_chips(guild_id, user_id)
+            normal_delta = int(new_balance) - old_balance
+            bonus_delta = int(new_bonus) - old_bonus
         if normal_delta != 0 or bonus_delta != 0:
             if mark_activity:
                 await self._mark_chip_activity(guild_id, user_id)
@@ -901,6 +894,7 @@ class GincanaBase:
             doc["has_chip_activity"] = True
             doc["last_chip_reset_at"] = 0.0
             doc["chip_recharge_manual_initialized"] = False
+            doc["negative_balance_authorized"] = False
             doc["chip_week_key"] = ""
             doc["chip_week_delta"] = 0
             doc.pop("race_key", None)
@@ -920,6 +914,7 @@ class GincanaBase:
             doc["bonus_chips"] = 0
             doc["last_chip_reset_at"] = 0.0
             doc["chip_recharge_manual_initialized"] = False
+            doc["negative_balance_authorized"] = False
             doc["daily_last_claim_key"] = ""
             doc["daily_streak"] = 0
             doc["weekly_points_week"] = ""
@@ -1694,90 +1689,257 @@ class GincanaBase:
             "projected_bonus": int(projected_bonus),
         }
 
+    def _negative_balance_authorized(self, guild_id: int, user_id: int) -> bool:
+        getter = getattr(self.db, "get_negative_balance_authorized", None)
+        if callable(getter):
+            try:
+                return bool(getter(int(guild_id), int(user_id)))
+            except Exception:
+                pass
+        doc = getattr(self.db, "user_cache", {}).get((int(guild_id), int(user_id)), {}) or {}
+        return bool(doc.get("negative_balance_authorized", False))
+
+    async def _set_negative_balance_authorized(self, guild_id: int, user_id: int, value: bool) -> None:
+        setter = getattr(self.db, "set_negative_balance_authorized", None)
+        if callable(setter):
+            await setter(int(guild_id), int(user_id), bool(value))
+            return
+        doc = self.db._get_user_doc(int(guild_id), int(user_id))
+        doc["negative_balance_authorized"] = bool(value)
+        await self.db._save_user_doc(int(guild_id), int(user_id), doc)
+
     def _negative_transition_note(self, guild_id: int, user_id: int, amount: int) -> str | None:
+        if self._negative_balance_authorized(guild_id, user_id):
+            return None
         state = self._negative_cost_projection(guild_id, user_id, amount)
         chips = int(state["chips"])
-        bonus = int(state["bonus"])
         projected_chips = int(state["projected_chips"])
-        if projected_chips >= 0:
+        if projected_chips >= 0 or projected_chips >= chips:
             return None
-        first_negative = chips >= 0 and projected_chips < 0
-        debt_increases = chips < 0 and projected_chips < chips
-        if first_negative:
-            return (
-                f"Se continuar, você vai ser negativado\n"
-                f"Você vai ficar com **{projected_chips}** {self._CHIP_LOSS_EMOJI}"
-            )
-        if debt_increases:
-            if bonus <= 0:
-                return (
-                    f"Você já está negativado e não tem fichas bônus\n"
-                    f"Se continuar, sua dívida vai para **{projected_chips}** {self._CHIP_LOSS_EMOJI}"
-                )
-            return (
-                f"As fichas bônus não cobrem toda essa aposta\n"
-                f"Sua dívida vai para **{projected_chips}** {self._CHIP_LOSS_EMOJI}"
-            )
-        return None
+        return f"Este jogo deixará seu saldo em **{projected_chips}** {self._CHIP_LOSS_EMOJI}"
 
     def _needs_negative_confirmation(self, guild_id: int, user_id: int, amount: int) -> bool:
+        if self._negative_balance_authorized(guild_id, user_id):
+            return False
         state = self._negative_cost_projection(guild_id, user_id, amount)
         chips = int(state["chips"])
-        bonus = int(state["bonus"])
         projected_chips = int(state["projected_chips"])
-        projected_bonus = int(state["projected_bonus"])
-        if projected_bonus > 0:
+        if projected_chips < -self._MAX_CHIP_DEBT:
             return False
-        first_negative = chips >= 0 and projected_chips < 0
-        debt_increases = chips < 0 and projected_chips < chips
-        return bonus <= 0 and (first_negative or debt_increases)
+        return projected_chips < 0 and projected_chips < chips
 
-    async def _confirm_negative_via_message(self, channel: discord.abc.Messageable, *, user_id: int, title: str, note: str) -> bool:
-        view = _NegativeDebtConfirmView(owner_id=user_id)
-        embed = self._make_embed(title, note, ok=False)
+    def _chip_economy_lock(self, guild_id: int, user_id: int) -> asyncio.Lock:
+        key = (int(guild_id), int(user_id))
+        lock = self._chip_economy_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._chip_economy_locks[key] = lock
+        return lock
+
+    def _negative_debt_gate_lock(self, guild_id: int, user_id: int) -> asyncio.Lock:
+        key = (int(guild_id), int(user_id))
+        lock = self._negative_debt_gate_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._negative_debt_gate_locks[key] = lock
+        return lock
+
+    @staticmethod
+    async def _delete_negative_gate_message(message: discord.Message | None) -> None:
+        if message is None:
+            return
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    async def _show_negative_message_gate(self, key: tuple[int, int], generation: int) -> None:
+        try:
+            await asyncio.sleep(0.45)
+            lock = self._negative_debt_gate_lock(*key)
+            async with lock:
+                state = self._negative_debt_message_gates.get(key)
+                if state is None or int(state.get("generation", -1)) != int(generation):
+                    return
+                before_show = state.get("before_show")
+            if callable(before_show):
+                await before_show()
+            async with lock:
+                state = self._negative_debt_message_gates.get(key)
+                if state is None or int(state.get("generation", -1)) != int(generation):
+                    return
+                amount = int(state["amount"])
+                if not self._needs_negative_confirmation(key[0], key[1], amount):
+                    future = state.get("future")
+                    self._negative_debt_message_gates.pop(key, None)
+                    if future is not None and not future.done():
+                        future.set_result(True)
+                    return
+                projected = int(self._negative_cost_projection(key[0], key[1], amount)["projected_chips"])
+                view = _NegativeDebtConfirmView(owner_id=key[1], projected_chips=projected)
+                state["view"] = view
+                channel = state["channel"]
+            sent = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+            view.message = sent
+            async with lock:
+                state = self._negative_debt_message_gates.get(key)
+                if state is None or int(state.get("generation", -1)) != int(generation):
+                    await self._delete_negative_gate_message(sent)
+                    return
+                state["confirmation_message"] = sent
+            await view.wait()
+            confirmed = bool(view.confirmed)
+            if confirmed and self._needs_negative_confirmation(key[0], key[1], amount):
+                await self._set_negative_balance_authorized(key[0], key[1], True)
+            async with lock:
+                state = self._negative_debt_message_gates.get(key)
+                if state is None or int(state.get("generation", -1)) != int(generation):
+                    await self._delete_negative_gate_message(sent)
+                    return
+                future = state.get("future")
+                self._negative_debt_message_gates.pop(key, None)
+                if future is not None and not future.done():
+                    future.set_result(confirmed)
+            await self._delete_negative_gate_message(sent)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            lock = self._negative_debt_gate_lock(*key)
+            async with lock:
+                state = self._negative_debt_message_gates.get(key)
+                if state is not None and int(state.get("generation", -1)) == int(generation):
+                    future = state.get("future")
+                    self._negative_debt_message_gates.pop(key, None)
+                    if future is not None and not future.done():
+                        future.set_result(False)
+
+    async def _confirm_negative_via_message(
+        self,
+        channel: discord.abc.Messageable,
+        *,
+        user_id: int,
+        guild_id: int,
+        amount: int,
+        title: str = "",
+        note: str = "",
+    ) -> bool:
+        if not self._needs_negative_confirmation(guild_id, user_id, amount):
+            return True
+        projected = int(self._negative_cost_projection(guild_id, user_id, amount)["projected_chips"])
+        view = _NegativeDebtConfirmView(owner_id=user_id, projected_chips=projected)
         sent = None
         try:
-            sent = await channel.send(embed=embed, view=view)
+            sent = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
             view.message = sent
             await view.wait()
-            return bool(view.confirmed)
+            confirmed = bool(view.confirmed)
+            if confirmed and self._needs_negative_confirmation(guild_id, user_id, amount):
+                await self._set_negative_balance_authorized(guild_id, user_id, True)
+            return confirmed
         finally:
-            if sent is not None:
-                try:
-                    await sent.delete()
-                except Exception:
-                    pass
+            await self._delete_negative_gate_message(sent)
 
-    async def _confirm_negative_ephemeral(self, interaction: discord.Interaction, guild_id: int, user_id: int, amount: int, *, title: str = "⚠️ Confirmar entrada") -> bool:
-        note = self._negative_transition_note(guild_id, user_id, amount)
-        if not note:
+    async def _confirm_negative_ephemeral(self, interaction: discord.Interaction, guild_id: int, user_id: int, amount: int, *, title: str = "") -> bool:
+        if not self._needs_negative_confirmation(guild_id, user_id, amount):
             return True
-        view = _NegativeDebtConfirmView(owner_id=user_id)
-        embed = self._make_embed(title, note, ok=False)
+        projected = int(self._negative_cost_projection(guild_id, user_id, amount)["projected_chips"])
+        view = _NegativeDebtConfirmView(owner_id=user_id, projected_chips=projected)
         sent = None
         try:
             if interaction.response.is_done():
-                sent = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
+                sent = await interaction.followup.send(view=view, ephemeral=True, wait=True)
             else:
-                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+                await interaction.response.send_message(view=view, ephemeral=True)
                 try:
                     sent = await interaction.original_response()
                 except Exception:
                     sent = None
             view.message = sent
             await view.wait()
-            return bool(view.confirmed)
+            confirmed = bool(view.confirmed)
+            if confirmed and self._needs_negative_confirmation(guild_id, user_id, amount):
+                await self._set_negative_balance_authorized(guild_id, user_id, True)
+            return confirmed
         except Exception:
             channel = getattr(interaction, "channel", None)
             if channel is None:
                 return False
-            return await self._confirm_negative_via_message(channel, user_id=user_id, title=title, note=note)
+            return await self._confirm_negative_via_message(
+                channel,
+                user_id=user_id,
+                guild_id=guild_id,
+                amount=amount,
+            )
 
-    async def _confirm_negative_from_message(self, message: discord.Message, guild_id: int, user_id: int, amount: int, *, title: str = "⚠️ Confirmar entrada") -> bool:
-        note = self._negative_transition_note(guild_id, user_id, amount)
-        if not note:
+    async def _confirm_negative_from_message(
+        self,
+        message: discord.Message,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+        *,
+        title: str = "",
+        before_show=None,
+    ) -> bool:
+        if not self._needs_negative_confirmation(guild_id, user_id, amount):
             return True
-        return await self._confirm_negative_via_message(message.channel, user_id=user_id, title=title, note=note)
+        key = (int(guild_id), int(user_id))
+        lock = self._negative_debt_gate_lock(*key)
+        owner = False
+        future = None
+        old_confirmation = None
+        async with lock:
+            if not self._needs_negative_confirmation(guild_id, user_id, amount):
+                return True
+            state = self._negative_debt_message_gates.get(key)
+            if state is None:
+                owner = True
+                future = asyncio.get_running_loop().create_future()
+                state = {
+                    "future": future,
+                    "channel": message.channel,
+                    "amount": int(amount),
+                    "generation": 1,
+                    "confirmation_message": None,
+                    "task": None,
+                    "before_show": before_show,
+                }
+                self._negative_debt_message_gates[key] = state
+            else:
+                future = state.get("future")
+                active_view = state.get("view")
+                if active_view is not None and bool(getattr(active_view, "confirmed", False)):
+                    generation = int(state.get("generation", 1))
+                else:
+                    state["generation"] = int(state.get("generation", 0)) + 1
+                    old_confirmation = state.get("confirmation_message")
+                    state["confirmation_message"] = None
+                    old_task = state.get("task")
+                    if old_task is not None and not old_task.done():
+                        old_task.cancel()
+                    generation = int(state["generation"])
+                    task = asyncio.create_task(self._show_negative_message_gate(key, generation))
+                    state["task"] = task
+            if owner:
+                generation = int(state["generation"])
+                task = asyncio.create_task(self._show_negative_message_gate(key, generation))
+                state["task"] = task
+
+        await self._delete_negative_gate_message(message)
+        if old_confirmation is not None:
+            await self._delete_negative_gate_message(old_confirmation)
+        if not owner:
+            return False
+        try:
+            return bool(await future)
+        finally:
+            async with lock:
+                state = self._negative_debt_message_gates.get(key)
+                if state is not None and state.get("future") is future and future.done():
+                    task = state.get("task")
+                    if task is not None and not task.done():
+                        task.cancel()
+                    self._negative_debt_message_gates.pop(key, None)
 
     def _insufficient_chips_text(self, guild_id: int, user_id: int, amount: int) -> str:
         state = self._negative_cost_projection(guild_id, user_id, amount)
@@ -2554,7 +2716,11 @@ class GincanaBase:
                 state_root[race_key] = state
                 doc["race_state"] = state_root
                 if normal_delta:
-                    doc["chips"] = int(doc.get("chips", CHIPS_INITIAL) or 0) + normal_delta
+                    old_normal_chips = int(doc.get("chips", CHIPS_INITIAL) or 0)
+                    new_normal_chips = old_normal_chips + normal_delta
+                    doc["chips"] = new_normal_chips
+                    if old_normal_chips < 0 <= new_normal_chips:
+                        doc["negative_balance_authorized"] = False
                 if bonus_delta:
                     doc["bonus_chips"] = max(0, int(doc.get("bonus_chips", 0) or 0)) + bonus_delta
                 if normal_delta or bonus_delta:
@@ -3176,19 +3342,54 @@ class GincanaBase:
 
     async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int, *, reason: str | None = None) -> tuple[bool, int, str | None]:
         spend = max(0, int(amount))
-        projected_chips, projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, spend)
-        current_before = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
-        note = self._negative_transition_note(guild_id, user_id, spend)
-        if projected_chips < -self._MAX_CHIP_DEBT:
-            return False, current_before, self._insufficient_chips_text(guild_id, user_id, spend)
-        current_bonus = self._get_user_bonus_chips(guild_id, user_id)
-        use_bonus = min(current_bonus, spend)
-        remaining = spend - use_bonus
-        if use_bonus > 0:
-            await self._change_user_bonus_chips(guild_id, user_id, -use_bonus, mark_activity=True, reason=reason)
-        if remaining > 0:
-            await self._change_user_chips(guild_id, user_id, -remaining, mark_activity=True, reason=reason)
-        return True, projected_chips, note
+        history_normal = 0
+        history_bonus = 0
+        async with self._chip_economy_lock(guild_id, user_id):
+            current_before = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
+            current_bonus = self._get_user_bonus_chips(guild_id, user_id)
+            use_bonus = min(current_bonus, spend)
+            remaining = spend - use_bonus
+            projected_chips = current_before - remaining
+            projected_bonus = current_bonus - use_bonus
+            note = self._negative_transition_note(guild_id, user_id, spend)
+
+            if self._needs_negative_confirmation(guild_id, user_id, spend):
+                return False, current_before, note or "Confirme o saldo negativo antes de continuar"
+            if projected_chips < -self._MAX_CHIP_DEBT:
+                return False, current_before, self._insufficient_chips_text(guild_id, user_id, spend)
+
+            # Reserva econômica em um único documento. Isso evita que spam de
+            # jogos diferentes intercale o débito de bônus e o débito normal.
+            doc = self.db._get_user_doc(guild_id, user_id)
+            doc["chips"] = int(projected_chips)
+            doc["bonus_chips"] = int(projected_bonus)
+            doc["has_chip_activity"] = True
+            await self.db._save_user_doc(guild_id, user_id, doc)
+            history_normal = int(remaining)
+            history_bonus = int(use_bonus)
+
+        # Histórico não participa da seção crítica: o saldo já foi reservado e
+        # novas rodadas podem entrar enquanto estes registros são persistidos.
+        try:
+            if history_normal > 0:
+                await self.db.append_chip_history(
+                    guild_id,
+                    user_id,
+                    delta=-history_normal,
+                    kind="chips",
+                    reason=reason,
+                )
+            if history_bonus > 0:
+                await self.db.append_chip_history(
+                    guild_id,
+                    user_id,
+                    delta=-history_bonus,
+                    kind="bonus",
+                    reason=reason,
+                )
+        except Exception:
+            pass
+        return True, int(projected_chips), note
 
     async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
         projected_chips, _projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, amount)

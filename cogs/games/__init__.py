@@ -268,6 +268,103 @@ class _MendigarRequestView(discord.ui.LayoutView):
             pass
 
 
+class _RaceRerollConfirmView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        panel: "_RacePanelView",
+        *,
+        confirmation_token: int,
+        normal_balance: int,
+        timeout: float = 45.0,
+    ):
+        super().__init__(timeout=float(timeout))
+        self.panel = panel
+        self.cog = panel.cog
+        self.guild_id = int(panel.guild_id)
+        self.user_id = int(panel.user_id)
+        self.confirmation_token = int(confirmation_token)
+        self.message: discord.Message | None = None
+
+        continue_button = discord.ui.Button(
+            label="Continuar",
+            style=discord.ButtonStyle.success,
+        )
+        continue_button.callback = self._continue
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(
+                    "\n".join(
+                        [
+                            "# 🎲 Confirmar reroll",
+                            f"Preço: **{RACE_REROLL_COST}** {self.cog._CHIP_EMOJI}",
+                            f"Saldo normal atual: **{int(normal_balance)}** {self.cog._CHIP_EMOJI}",
+                            "-# Fichas bônus não são usadas e o saldo será conferido novamente ao continuar",
+                        ]
+                    )
+                ),
+                discord.ui.Separator(),
+                discord.ui.ActionRow(continue_button),
+                accent_color=discord.Color.orange(),
+            )
+        )
+
+    async def _continue(self, interaction: discord.Interaction):
+        if (
+            interaction.guild is None
+            or int(interaction.guild.id) != self.guild_id
+            or int(interaction.user.id) != self.user_id
+        ):
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "🍀 Reroll",
+                    ["Essa confirmação pertence a outra pessoa"],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+        if not self.cog._race_reroll_confirmation_is_current(
+            self.guild_id,
+            self.user_id,
+            self.confirmation_token,
+        ):
+            self.stop()
+            await interaction.response.edit_message(
+                view=self.cog._make_v2_notice(
+                    "🍀 Confirmação expirada",
+                    ["Abra uma nova confirmação no botão Reroll"],
+                    ok=False,
+                )
+            )
+            return
+
+        self.stop()
+        await self.panel._execute_confirmed_reroll(
+            interaction,
+            confirmation_token=self.confirmation_token,
+        )
+
+    async def on_timeout(self):
+        self.stop()
+        self.cog._invalidate_race_reroll_confirmation(
+            self.guild_id,
+            self.user_id,
+            token=self.confirmation_token,
+        )
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(
+                view=self.cog._make_v2_notice(
+                    "🍀 Confirmação expirada",
+                    ["Abra uma nova confirmação no botão Reroll"],
+                    ok=False,
+                )
+            )
+        except Exception:
+            pass
+
+
 class _RacePanelView(discord.ui.LayoutView):
     def __init__(self, cog: "GamesCog", *, guild_id: int, user_id: int):
         super().__init__(timeout=600.0)
@@ -302,7 +399,7 @@ class _RacePanelView(discord.ui.LayoutView):
         show_races = discord.ui.Button(label="Ver raças", style=discord.ButtonStyle.secondary)
         show_races.callback = self._show_races
         reroll = discord.ui.Button(
-            label=f"Reroll {RACE_REROLL_COST}",
+            label="Reroll",
             emoji=self.cog._CHIP_EMOJI,
             style=discord.ButtonStyle.secondary,
         )
@@ -353,13 +450,211 @@ class _RacePanelView(discord.ui.LayoutView):
             )
             return
 
-        self.cog._race_rerolls_in_progress.add(reroll_key)
+        confirmation_token = self.cog._new_race_reroll_confirmation(
+            self.guild_id,
+            self.user_id,
+        )
+        if interaction.message is not None:
+            self.message = interaction.message
         try:
-            await interaction.response.defer()
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            await self.cog._maybe_execute_due_chip_season_reset(self.guild_id)
+            normal_balance = int(
+                self.cog.db.get_user_chips(
+                    self.guild_id,
+                    self.user_id,
+                    default=CHIPS_INITIAL,
+                )
+                or 0
+            )
+        except Exception:
+            self.cog._invalidate_race_reroll_confirmation(
+                self.guild_id,
+                self.user_id,
+                token=confirmation_token,
+            )
+            log.exception(
+                "games: falha ao preparar confirmação de reroll guild=%s user=%s",
+                self.guild_id,
+                self.user_id,
+            )
+            await self._edit_reroll_confirmation_result(
+                interaction,
+                self.cog._make_v2_notice(
+                    "🍀 Reroll indisponível",
+                    ["Não foi possível conferir seu saldo agora"],
+                    ok=False,
+                ),
+            )
+            return
+
+        if not self.cog._race_reroll_confirmation_is_current(
+            self.guild_id,
+            self.user_id,
+            confirmation_token,
+        ):
+            await interaction.followup.send(
+                view=self.cog._make_v2_notice(
+                    "🍀 Confirmação substituída",
+                    ["Use a confirmação mais recente que você abriu"],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+        if normal_balance < RACE_REROLL_COST:
+            self.cog._invalidate_race_reroll_confirmation(
+                self.guild_id,
+                self.user_id,
+                token=confirmation_token,
+            )
+            await interaction.followup.send(
+                view=self.cog._make_v2_notice(
+                    "🍀 Saldo insuficiente",
+                    [
+                        f"O reroll custa **{RACE_REROLL_COST}** {self.cog._CHIP_EMOJI} em fichas normais",
+                        f"Seu saldo normal é **{normal_balance}** {self.cog._CHIP_EMOJI}",
+                    ],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        confirmation = _RaceRerollConfirmView(
+            self,
+            confirmation_token=confirmation_token,
+            normal_balance=normal_balance,
+        )
+        try:
+            confirmation.message = await interaction.followup.send(
+                view=confirmation,
+                ephemeral=True,
+                wait=True,
+            )
+        except Exception:
+            self.cog._invalidate_race_reroll_confirmation(
+                self.guild_id,
+                self.user_id,
+                token=confirmation_token,
+            )
+            log.exception(
+                "games: falha ao enviar confirmação de reroll guild=%s user=%s",
+                self.guild_id,
+                self.user_id,
+            )
+            await self._edit_reroll_confirmation_result(
+                interaction,
+                self.cog._make_v2_notice(
+                    "🍀 Reroll indisponível",
+                    ["Não foi possível abrir a confirmação agora"],
+                    ok=False,
+                ),
+            )
+
+    async def _edit_reroll_confirmation_result(
+        self,
+        interaction: discord.Interaction,
+        view: discord.ui.LayoutView,
+    ) -> None:
+        try:
+            await interaction.edit_original_response(view=view)
+            return
+        except Exception:
+            pass
+        try:
+            await interaction.followup.send(view=view, ephemeral=True)
+        except Exception:
+            pass
+
+    async def _restore_race_panel(self, target_message: discord.Message | None) -> None:
+        self._build_layout()
+        self.message = target_message
+        if target_message is None:
+            return
+        self.cog._remember_race_panel_message(self.guild_id, self.user_id, target_message)
+        try:
+            await target_message.edit(view=self)
+        except Exception:
+            pass
+
+    async def _execute_confirmed_reroll(
+        self,
+        interaction: discord.Interaction,
+        *,
+        confirmation_token: int,
+    ) -> None:
+        if (
+            interaction.guild is None
+            or int(interaction.guild.id) != self.guild_id
+            or int(interaction.user.id) != self.user_id
+        ):
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "🍀 Reroll",
+                    ["Essa confirmação pertence a outra pessoa"],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+        if not self.cog._race_reroll_confirmation_is_current(
+            self.guild_id,
+            self.user_id,
+            confirmation_token,
+        ):
+            await interaction.response.edit_message(
+                view=self.cog._make_v2_notice(
+                    "🍀 Confirmação expirada",
+                    ["Abra uma nova confirmação no botão Reroll"],
+                    ok=False,
+                )
+            )
+            return
+
+        reroll_key = (self.guild_id, self.user_id)
+        if reroll_key in self.cog._race_rerolls_in_progress:
+            await interaction.response.edit_message(
+                view=self.cog._make_v2_notice(
+                    "🍀 Reroll em andamento",
+                    ["Aguarde a nova raça ser definida"],
+                    ok=False,
+                )
+            )
+            return
+
+        self.cog._race_rerolls_in_progress.add(reroll_key)
+        self.cog._invalidate_race_reroll_confirmation(
+            self.guild_id,
+            self.user_id,
+            token=confirmation_token,
+        )
+        try:
+            await interaction.response.edit_message(
+                view=self.cog._make_v2_notice(
+                    "🎲 Confirmando reroll",
+                    ["Conferindo saldo e sorteando sua nova raça"],
+                    ok=True,
+                    accent_color=discord.Color.orange(),
+                )
+            )
+        except Exception:
+            self.cog._race_rerolls_in_progress.discard(reroll_key)
+            return
+
+        target_message = self.message
+        try:
             async with self.cog._race_panel_lock(self.guild_id, self.user_id):
+                if target_message is not None:
+                    try:
+                        await target_message.edit(
+                            view=self.cog._make_race_spinner_view("Sorteando sua nova raça")
+                        )
+                    except Exception:
+                        pass
                 try:
                     await self.cog._maybe_execute_due_chip_season_reset(self.guild_id)
-                    changed, _race_key, _balance = await self.cog._reroll_user_race(
+                    changed, race_key, normal_balance = await self.cog._reroll_user_race(
                         self.guild_id,
                         self.user_id,
                         cost=RACE_REROLL_COST,
@@ -370,66 +665,79 @@ class _RacePanelView(discord.ui.LayoutView):
                         self.guild_id,
                         self.user_id,
                     )
-                    await interaction.followup.send(
-                        view=self.cog._make_v2_notice(
+                    await self._restore_race_panel(target_message)
+                    await self._edit_reroll_confirmation_result(
+                        interaction,
+                        self.cog._make_v2_notice(
                             "🍀 Reroll não concluído",
                             ["Sua raça e suas fichas não foram alteradas"],
                             ok=False,
                         ),
-                        ephemeral=True,
                     )
                     return
 
                 if not changed:
-                    await interaction.followup.send(
-                        view=self.cog._make_v2_notice(
+                    await self._restore_race_panel(target_message)
+                    await self._edit_reroll_confirmation_result(
+                        interaction,
+                        self.cog._make_v2_notice(
                             "🍀 Saldo insuficiente",
-                            [f"O reroll custa **{RACE_REROLL_COST}** {self.cog._CHIP_EMOJI} em fichas normais"],
+                            [
+                                f"O reroll custa **{RACE_REROLL_COST}** {self.cog._CHIP_EMOJI} em fichas normais",
+                                f"Seu saldo normal agora é **{normal_balance}** {self.cog._CHIP_EMOJI}",
+                            ],
                             ok=False,
                         ),
-                        ephemeral=True,
                     )
                     return
 
-                spinner_texts = (
-                    "Sorteando sua nova raça",
+                for text_line in (
                     "Sorteando sua nova raça..",
                     "Sorteando sua nova raça...",
                     "Definindo sua nova raça...",
-                )
-                target_message = interaction.message
-                if target_message is not None:
-                    try:
-                        await target_message.edit(view=self.cog._make_race_spinner_view(spinner_texts[0]))
-                    except Exception:
-                        pass
-                for text_line in spinner_texts[1:]:
+                ):
                     await asyncio.sleep(0.35)
                     if target_message is None:
                         continue
                     try:
-                        await target_message.edit(view=self.cog._make_race_spinner_view(text_line))
+                        await target_message.edit(
+                            view=self.cog._make_race_spinner_view(text_line)
+                        )
                     except Exception:
                         pass
                 await asyncio.sleep(0.35)
 
                 self._build_layout()
                 self.message = target_message
+                panel_updated = False
                 if target_message is not None:
-                    self.cog._remember_race_panel_message(self.guild_id, self.user_id, target_message)
+                    self.cog._remember_race_panel_message(
+                        self.guild_id,
+                        self.user_id,
+                        target_message,
+                    )
                     try:
                         await target_message.edit(view=self)
-                        return
+                        panel_updated = True
                     except Exception:
                         pass
 
-                await interaction.followup.send(
-                    view=self.cog._make_v2_notice(
+                info = self.cog._get_race_info_by_key(race_key) or {}
+                race_emoji = str(info.get("emoji") or "🍀")
+                race_name = str(info.get("name") or "Nova raça")
+                result_lines = [
+                    f"Sua nova raça é {race_emoji} **{race_name}**",
+                    f"Saldo normal: **{normal_balance}** {self.cog._CHIP_EMOJI}",
+                ]
+                if not panel_updated:
+                    result_lines.append("Use o comando de raça novamente para abrir o painel")
+                await self._edit_reroll_confirmation_result(
+                    interaction,
+                    self.cog._make_v2_notice(
                         "🍀 Reroll concluído",
-                        ["Sua nova raça foi definida; use o comando novamente para abrir o painel"],
+                        result_lines,
                         ok=True,
                     ),
-                    ephemeral=True,
                 )
         finally:
             self.cog._race_rerolls_in_progress.discard(reroll_key)
@@ -490,6 +798,10 @@ class _RacePanelView(discord.ui.LayoutView):
 
     async def on_timeout(self):
         self.stop()
+        self.cog._invalidate_race_reroll_confirmation(
+            self.guild_id,
+            self.user_id,
+        )
         self.cog._forget_race_panel_message(self.guild_id, self.user_id, message_id=getattr(self.message, "id", None))
         if self.message is None:
             return
@@ -673,6 +985,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         guild_id = int(message.guild.id)
         user_id = int(message.author.id)
         async with self._race_panel_lock(guild_id, user_id):
+            self._invalidate_race_reroll_confirmation(guild_id, user_id)
             await self._maybe_execute_due_chip_season_reset(guild_id)
             await self._delete_previous_race_panel_message(guild_id, user_id, channel=message.channel)
             race_key = self._get_user_race_key(guild_id, user_id)

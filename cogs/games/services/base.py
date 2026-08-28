@@ -295,6 +295,7 @@ class GincanaBase:
         self._race_progress_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._race_panel_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._race_rerolls_in_progress: set[tuple[int, int]] = set()
+        self._race_reroll_confirmation_versions: dict[tuple[int, int], int] = {}
         self._achievement_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._achievement_notice_groups: dict[tuple[int, int, int], AchievementNoticeBurst] = {}
         self._achievement_notice_cleanup_task: asyncio.Task | None = None
@@ -2405,6 +2406,34 @@ class GincanaBase:
             lock = asyncio.Lock()
             self._race_panel_locks[key] = lock
         return lock
+
+    def _new_race_reroll_confirmation(self, guild_id: int, user_id: int) -> int:
+        key = (int(guild_id), int(user_id))
+        token = int(self._race_reroll_confirmation_versions.get(key, 0)) + 1
+        self._race_reroll_confirmation_versions[key] = token
+        return token
+
+    def _race_reroll_confirmation_is_current(
+        self,
+        guild_id: int,
+        user_id: int,
+        token: int,
+    ) -> bool:
+        key = (int(guild_id), int(user_id))
+        return int(self._race_reroll_confirmation_versions.get(key, 0)) == int(token)
+
+    def _invalidate_race_reroll_confirmation(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        token: int | None = None,
+    ) -> None:
+        key = (int(guild_id), int(user_id))
+        current = int(self._race_reroll_confirmation_versions.get(key, 0))
+        if token is not None and current != int(token):
+            return
+        self._race_reroll_confirmation_versions[key] = current + 1
 
     @staticmethod
     def _clean_race_notices(notes) -> list[str]:

@@ -39,7 +39,8 @@ class GamesRaceSystemTests(unittest.TestCase):
         panel = self._node_source(self.games_init, "_RacePanelView", ast.ClassDef)
         builder = self._node_source(panel, "_build_layout", ast.FunctionDef)
         self.assertIn('label="Ver raças"', builder)
-        self.assertIn('label=f"Reroll {RACE_REROLL_COST}"', builder)
+        self.assertIn('label="Reroll"', builder)
+        self.assertNotIn('label=f"Reroll {RACE_REROLL_COST}"', builder)
         self.assertIn("emoji=self.cog._CHIP_EMOJI", builder)
         self.assertNotIn("**Estado:**", panel)
         self.assertNotIn("**Trocar raça:**", panel)
@@ -56,6 +57,28 @@ class GamesRaceSystemTests(unittest.TestCase):
         self.assertIn('current_marker = " · atual"', catalog)
         self.assertIn("_make_race_catalog_view", show)
         self.assertIn("ephemeral=True", show)
+
+    def test_reroll_confirmation_is_private_components_v2_with_only_continue(self) -> None:
+        confirmation = self._node_source(
+            self.games_init,
+            "_RaceRerollConfirmView",
+            ast.ClassDef,
+        )
+        callback = self._node_source(self.games_init, "_reroll", ast.AsyncFunctionDef)
+        self.assertIn("discord.ui.LayoutView", confirmation)
+        self.assertIn("discord.ui.Container", confirmation)
+        self.assertIn("discord.ui.TextDisplay", confirmation)
+        self.assertIn("discord.ui.Separator", confirmation)
+        self.assertIn("discord.ui.ActionRow", confirmation)
+        self.assertEqual(confirmation.count("discord.ui.Button("), 1)
+        self.assertIn('label="Continuar"', confirmation)
+        self.assertNotIn('label="Cancelar"', confirmation)
+        self.assertIn("RACE_REROLL_COST", confirmation)
+        self.assertIn("self.cog._CHIP_EMOJI", confirmation)
+        self.assertIn("normal_balance < RACE_REROLL_COST", callback)
+        self.assertIn("_RaceRerollConfirmView", callback)
+        self.assertIn("ephemeral=True", callback)
+        self.assertIn("wait=True", callback)
 
     def test_vampire_is_removed_from_runtime_and_all_game_calls(self) -> None:
         runtime_sources = (self.base, self.games_init, *self.game_sources)
@@ -82,6 +105,11 @@ class GamesRaceSystemTests(unittest.TestCase):
     def test_reroll_uses_normal_chips_once_and_persists_race_with_balance(self) -> None:
         reroll = self._node_source(self.base, "_reroll_user_race", ast.AsyncFunctionDef)
         callback = self._node_source(self.games_init, "_reroll", ast.AsyncFunctionDef)
+        execute = self._node_source(
+            self.games_init,
+            "_execute_confirmed_reroll",
+            ast.AsyncFunctionDef,
+        )
         self.assertIn("_race_progress_lock", reroll)
         self.assertIn("_chip_economy_lock", reroll)
         self.assertIn('doc["chips"] = normal_chips - reroll_cost', reroll)
@@ -89,8 +117,56 @@ class GamesRaceSystemTests(unittest.TestCase):
         self.assertIn("unset_fields=self._RACE_RUNTIME_FIELDS", reroll)
         self.assertNotIn("_change_user_chips", reroll)
         self.assertIn('reason="Reroll de raça"', reroll)
-        self.assertIn("_race_rerolls_in_progress", callback)
-        self.assertIn("await interaction.response.defer()", callback)
+        self.assertNotIn("_reroll_user_race", callback)
+        self.assertIn("_race_rerolls_in_progress", execute)
+        self.assertIn("_reroll_user_race", execute)
+        self.assertIn("cost=RACE_REROLL_COST", execute)
+        self.assertIn("await interaction.response.defer(ephemeral=True, thinking=True)", callback)
+
+    def test_confirmation_tokens_block_old_or_duplicate_rerolls(self) -> None:
+        create = self._node_source(
+            self.base,
+            "_new_race_reroll_confirmation",
+            ast.FunctionDef,
+        )
+        current = self._node_source(
+            self.base,
+            "_race_reroll_confirmation_is_current",
+            ast.FunctionDef,
+        )
+        invalidate = self._node_source(
+            self.base,
+            "_invalidate_race_reroll_confirmation",
+            ast.FunctionDef,
+        )
+        confirmation = self._node_source(
+            self.games_init,
+            "_RaceRerollConfirmView",
+            ast.ClassDef,
+        )
+        execute = self._node_source(
+            self.games_init,
+            "_execute_confirmed_reroll",
+            ast.AsyncFunctionDef,
+        )
+        handler = self._node_source(
+            self.games_init,
+            "_handle_race_trigger",
+            ast.AsyncFunctionDef,
+        )
+        self.assertIn("+ 1", create)
+        self.assertIn("== int(token)", current)
+        self.assertIn("current != int(token)", invalidate)
+        self.assertIn("token=self.confirmation_token", confirmation)
+        self.assertLess(
+            execute.index("_race_rerolls_in_progress.add"),
+            execute.index("_invalidate_race_reroll_confirmation"),
+        )
+        self.assertLess(
+            execute.index("_invalidate_race_reroll_confirmation"),
+            execute.index('"🎲 Confirmando reroll"'),
+        )
+        self.assertIn("_invalidate_race_reroll_confirmation(guild_id, user_id)", handler)
 
     def test_first_roll_finishes_in_the_full_management_panel(self) -> None:
         handler = self._node_source(self.games_init, "_handle_race_trigger", ast.AsyncFunctionDef)

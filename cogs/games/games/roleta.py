@@ -43,7 +43,7 @@ ROLETA_DYNAMIC_JACKPOT_BASE = ROLETA_JACKPOT_CHIPS
 ROLETA_DYNAMIC_JACKPOT_MAX = 200
 ROLETA_DYNAMIC_JACKPOT_LOSS_INCREMENT = 1
 ROLETA_CYCLE_BONUS_CHIPS = 10
-ROLETA_APOSTADOR_EQUAL_NUMBERS_KEEP_CHANCE = 0.5
+ROLETA_APOSTADOR_PAIR_KEEP_CHANCE = 0.5
 CARTA_ANIMATION_FRAME_SECONDS = 0.42
 CARTA_ANIMATION_MIN_STOP_SECONDS = 2.05
 CARTA_ANIMATION_MAX_SECONDS = 4.0
@@ -394,13 +394,17 @@ class GincanaRoletaMixin:
             return self._current_roleta_dynamic_jackpot(guild_id)
 
         @staticmethod
-        def _halve_apostador_equal_outcome(outcome: dict[str, object]) -> dict[str, object]:
+        def _halve_apostador_pair_outcome(outcome: dict[str, object]) -> dict[str, object]:
             resolved = dict(outcome)
             target_middle = list(resolved.get("target_middle") or [])
-            has_equal_numbers = len(target_middle) == 3 and len(set(target_middle)) == 1
+            has_equal_number_pair = (
+                len(target_middle) == 3
+                and all(isinstance(value, int) for value in target_middle)
+                and len(set(target_middle)) == 2
+            )
             if (
-                has_equal_numbers
-                and random.random() >= ROLETA_APOSTADOR_EQUAL_NUMBERS_KEEP_CHANCE
+                has_equal_number_pair
+                and random.random() >= ROLETA_APOSTADOR_PAIR_KEEP_CHANCE
             ):
                 resolved["target_middle"] = random.sample(range(1, 10), k=3)
                 resolved["forced_kind"] = None
@@ -422,7 +426,7 @@ class GincanaRoletaMixin:
                         "forced_kind": None,
                         "forced_amount": None,
                     }
-                return self._halve_apostador_equal_outcome(outcome)
+                return self._halve_apostador_pair_outcome(outcome)
             success = random.randint(1, 10) == 1
             return {
                 "target_middle": self._roll_roleta_target_middle(success=success),

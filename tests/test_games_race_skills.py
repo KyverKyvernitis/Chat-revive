@@ -160,10 +160,10 @@ class RaceSkillTests(unittest.TestCase):
         self.assertIn("result_delta=normal_result_delta", card_round)
         self.assertIn("bonus_result_delta=bonus_result_delta", card_round)
 
-    def test_apostador_equal_triples_are_half_as_likely(self) -> None:
-        resolver_source = node_source(ROLETA, "_halve_apostador_equal_outcome", ast.FunctionDef)
+    def test_apostador_equal_number_pairs_are_half_as_likely(self) -> None:
+        resolver_source = node_source(ROLETA, "_halve_apostador_pair_outcome", ast.FunctionDef)
         namespace: dict[str, object] = {
-            "ROLETA_APOSTADOR_EQUAL_NUMBERS_KEEP_CHANCE": 0.5,
+            "ROLETA_APOSTADOR_PAIR_KEEP_CHANCE": 0.5,
         }
 
         class FakeRandom:
@@ -181,27 +181,31 @@ class RaceSkillTests(unittest.TestCase):
         fake_random = FakeRandom(0.49)
         namespace["random"] = fake_random
         exec(resolver_source, namespace)
-        resolver = namespace["_halve_apostador_equal_outcome"]
+        resolver = namespace["_halve_apostador_pair_outcome"]
 
-        jackpot = {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": 100}
-        self.assertEqual(resolver(jackpot), jackpot)
+        equal_pair = {"target_middle": [4, 5, 4], "forced_kind": None, "forced_amount": None}
+        self.assertEqual(resolver(equal_pair), equal_pair)
 
         fake_random.value = 0.5
-        rejected = resolver(jackpot)
+        rejected = resolver(equal_pair)
         self.assertEqual(rejected["target_middle"], [1, 2, 3])
         self.assertIsNone(rejected["forced_kind"])
         self.assertIsNone(rejected["forced_amount"])
 
-        calls_before_double = fake_random.random_calls
-        ordinary_double = {"target_middle": [4, 4, 2], "forced_kind": None, "forced_amount": None}
-        self.assertEqual(resolver(ordinary_double), ordinary_double)
-        self.assertEqual(fake_random.random_calls, calls_before_double)
+        calls_before_exclusions = fake_random.random_calls
+        jackpot = {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": 100}
+        joker_pair = {"target_middle": [4, "🃏", 4], "forced_kind": None, "forced_amount": None}
+        distinct = {"target_middle": [4, 5, 6], "forced_kind": None, "forced_amount": None}
+        self.assertEqual(resolver(jackpot), jackpot)
+        self.assertEqual(resolver(joker_pair), joker_pair)
+        self.assertEqual(resolver(distinct), distinct)
+        self.assertEqual(fake_random.random_calls, calls_before_exclusions)
 
         outcome = node_source(ROLETA, "_roleta_outcome_for_user", ast.FunctionDef)
-        self.assertIn("return self._halve_apostador_equal_outcome(outcome)", outcome)
+        self.assertIn("return self._halve_apostador_pair_outcome(outcome)", outcome)
 
         catalog = node_source(BASE, "_race_catalog", ast.FunctionDef)
-        for probability in ("0.075", "0.025", "0.125"):
+        for probability in ("0.15", "0.05", "0.25"):
             self.assertIn(f"_format_percent_text({probability})", catalog)
 
     def test_0to1_preserves_normal_bonus_and_mixed_source_types(self) -> None:

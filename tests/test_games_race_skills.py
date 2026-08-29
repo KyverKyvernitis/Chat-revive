@@ -160,53 +160,55 @@ class RaceSkillTests(unittest.TestCase):
         self.assertIn("result_delta=normal_result_delta", card_round)
         self.assertIn("bonus_result_delta=bonus_result_delta", card_round)
 
-    def test_apostador_equal_number_pairs_are_half_as_likely(self) -> None:
-        resolver_source = node_source(ROLETA, "_halve_apostador_pair_outcome", ast.FunctionDef)
+    def test_apostador_equal_number_pairs_refund_17_without_rate_filter(self) -> None:
+        evaluator_source = node_source(ROLETA, "_evaluate_roleta_middle", ast.FunctionDef)
         namespace: dict[str, object] = {
-            "ROLETA_APOSTADOR_PAIR_KEEP_CHANCE": 0.5,
+            "ROLETA_COST": 15,
+            "ROLETA_APOSTADOR_COST": 25,
+            "ROLETA_APOSTADOR_PAIR_REFUND": 17,
+            "ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS": 200,
+            "ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS": 100,
+            "ROLETA_JACKPOT_CHIPS": 100,
+            "ROLETA_JOKERS": ("🃏",),
         }
+        exec(evaluator_source, namespace)
+        evaluator = namespace["_evaluate_roleta_middle"]
 
-        class FakeRandom:
-            def __init__(self, value: float) -> None:
-                self.value = value
-                self.random_calls = 0
+        class Dummy:
+            def _race_is(self, guild_id: int, user_id: int, race: str) -> bool:
+                return user_id == 2 and race == "apostador"
 
-            def random(self) -> float:
-                self.random_calls += 1
-                return self.value
+            def _roleta_cost_for_user(self, guild_id: int, user_id: int) -> int:
+                return 25 if user_id == 2 else 15
 
-            def sample(self, population, *, k: int):
-                return [1, 2, 3]
+        dummy = Dummy()
+        self.assertEqual(evaluator(dummy, [4, 5, 4], guild_id=1, user_id=2), ("partial", 17))
+        self.assertEqual(evaluator(dummy, [4, 5, 4], guild_id=1, user_id=3), ("partial", 7))
+        self.assertEqual(evaluator(dummy, [4, "🃏", 4], guild_id=1, user_id=2), ("joker_premium", 50))
+        self.assertEqual(evaluator(dummy, [4, 4, 4], guild_id=1, user_id=2), ("partial", 12))
+        self.assertEqual(evaluator(dummy, [6, 6, 6], guild_id=1, user_id=2), ("beast", 25))
 
-        fake_random = FakeRandom(0.49)
-        namespace["random"] = fake_random
-        exec(resolver_source, namespace)
-        resolver = namespace["_halve_apostador_pair_outcome"]
-
-        equal_pair = {"target_middle": [4, 5, 4], "forced_kind": None, "forced_amount": None}
-        self.assertEqual(resolver(equal_pair), equal_pair)
-
-        fake_random.value = 0.5
-        rejected = resolver(equal_pair)
-        self.assertEqual(rejected["target_middle"], [1, 2, 3])
-        self.assertIsNone(rejected["forced_kind"])
-        self.assertIsNone(rejected["forced_amount"])
-
-        calls_before_exclusions = fake_random.random_calls
-        jackpot = {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": 100}
-        joker_pair = {"target_middle": [4, "🃏", 4], "forced_kind": None, "forced_amount": None}
-        distinct = {"target_middle": [4, 5, 6], "forced_kind": None, "forced_amount": None}
-        self.assertEqual(resolver(jackpot), jackpot)
-        self.assertEqual(resolver(joker_pair), joker_pair)
-        self.assertEqual(resolver(distinct), distinct)
-        self.assertEqual(fake_random.random_calls, calls_before_exclusions)
-
-        outcome = node_source(ROLETA, "_roleta_outcome_for_user", ast.FunctionDef)
-        self.assertIn("return self._halve_apostador_pair_outcome(outcome)", outcome)
+        self.assertNotIn("ROLETA_APOSTADOR_PAIR_KEEP_CHANCE", ROLETA)
+        self.assertNotIn("_halve_apostador_pair_outcome", ROLETA)
 
         catalog = node_source(BASE, "_race_catalog", ast.FunctionDef)
         for probability in ("0.15", "0.05", "0.25"):
             self.assertIn(f"_format_percent_text({probability})", catalog)
+
+    def test_equal_pair_and_beast_result_copy_is_compact(self) -> None:
+        partial_copy = node_source(ROLETA, "_roleta_partial_result_copy", ast.FunctionDef)
+        roleta_round = node_source(ROLETA, "_execute_roleta_round", ast.AsyncFunctionDef)
+        self.assertIn("payout: int = 0", partial_copy)
+        self.assertIn("Dois números iguais ·", partial_copy)
+        self.assertIn("_skill_chip_value(payout, movement='gain')", partial_copy)
+        self.assertIn('title = "😈 Marca da Besta"', roleta_round)
+        self.assertIn('"**666** apareceu"', roleta_round)
+        self.assertIn("Entrada devolvida ·", roleta_round)
+        self.assertIn("_skill_chip_value(result_amount, movement='gain')", roleta_round)
+        self.assertNotIn('_race_effect_message(guild.id, actor.id, "666")', roleta_round)
+        catalog = node_source(BASE, "_race_catalog", ast.FunctionDef)
+        self.assertIn("**666** devolver toda a entrada", catalog)
+        self.assertNotIn("**666** e ganhar", catalog)
 
     def test_0to1_preserves_normal_bonus_and_mixed_source_types(self) -> None:
         splitter_source = node_source(BASE, "_race_skill_0to1_source_parts", ast.FunctionDef)

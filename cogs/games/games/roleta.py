@@ -43,7 +43,7 @@ ROLETA_DYNAMIC_JACKPOT_BASE = ROLETA_JACKPOT_CHIPS
 ROLETA_DYNAMIC_JACKPOT_MAX = 200
 ROLETA_DYNAMIC_JACKPOT_LOSS_INCREMENT = 1
 ROLETA_CYCLE_BONUS_CHIPS = 10
-ROLETA_APOSTADOR_PAIR_KEEP_CHANCE = 0.5
+ROLETA_APOSTADOR_PAIR_REFUND = 17
 CARTA_ANIMATION_FRAME_SECONDS = 0.42
 CARTA_ANIMATION_MIN_STOP_SECONDS = 2.05
 CARTA_ANIMATION_MAX_SECONDS = 4.0
@@ -77,7 +77,12 @@ class GincanaRoletaMixin:
             # deixá-lo descer naturalmente até a linha central.
             column.insert(0, self._random_roleta_digit() if next_top is None else next_top)
             del column[3:]
-        def _roleta_partial_result_copy(self, middle_digits: list[object]) -> tuple[str, str]:
+        def _roleta_partial_result_copy(
+            self,
+            middle_digits: list[object],
+            *,
+            payout: int = 0,
+        ) -> tuple[str, str]:
             values = list(middle_digits)
             if len(values) == 3 and len(set(values)) == 1:
                 return (
@@ -93,7 +98,11 @@ class GincanaRoletaMixin:
 
             return (
                 "🎰 Números iguais",
-                "Tem dois números iguais então vou te devolver um pouco da entrada",
+                (
+                    f"Dois números iguais · {self._skill_chip_value(payout, movement='gain')} devolvidas"
+                    if int(payout) > 0
+                    else "Dois números iguais devolveram parte da entrada"
+                ),
             )
 
         def _format_roleta_row(self, row: list[object], *, compact: bool = False) -> str:
@@ -393,40 +402,20 @@ class GincanaRoletaMixin:
                 return ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS
             return self._current_roleta_dynamic_jackpot(guild_id)
 
-        @staticmethod
-        def _halve_apostador_pair_outcome(outcome: dict[str, object]) -> dict[str, object]:
-            resolved = dict(outcome)
-            target_middle = list(resolved.get("target_middle") or [])
-            has_equal_number_pair = (
-                len(target_middle) == 3
-                and all(isinstance(value, int) for value in target_middle)
-                and len(set(target_middle)) == 2
-            )
-            if (
-                has_equal_number_pair
-                and random.random() >= ROLETA_APOSTADOR_PAIR_KEEP_CHANCE
-            ):
-                resolved["target_middle"] = random.sample(range(1, 10), k=3)
-                resolved["forced_kind"] = None
-                resolved["forced_amount"] = None
-            return resolved
-
         def _roleta_outcome_for_user(self, guild_id: int, user_id: int) -> dict[str, object]:
             if self._race_is(guild_id, user_id, "apostador"):
                 roll = random.random()
                 if roll < 0.05:
-                    outcome = {"target_middle": [7, 7, 7], "forced_kind": "jackpot_mega", "forced_amount": ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS}
-                elif roll < 0.20:
-                    outcome = {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS}
-                elif random.random() < 0.25:
-                    outcome = {"target_middle": [6, 6, 6], "forced_kind": "beast", "forced_amount": ROLETA_APOSTADOR_COST}
-                else:
-                    outcome = {
-                        "target_middle": self._roll_roleta_target_middle(success=False, excluded_special_triples={6, 9}),
-                        "forced_kind": None,
-                        "forced_amount": None,
-                    }
-                return self._halve_apostador_pair_outcome(outcome)
+                    return {"target_middle": [7, 7, 7], "forced_kind": "jackpot_mega", "forced_amount": ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS}
+                if roll < 0.20:
+                    return {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS}
+                if random.random() < 0.25:
+                    return {"target_middle": [6, 6, 6], "forced_kind": "beast", "forced_amount": ROLETA_APOSTADOR_COST}
+                return {
+                    "target_middle": self._roll_roleta_target_middle(success=False, excluded_special_triples={6, 9}),
+                    "forced_kind": None,
+                    "forced_amount": None,
+                }
             success = random.randint(1, 10) == 1
             return {
                 "target_middle": self._roll_roleta_target_middle(success=success),
@@ -632,7 +621,8 @@ class GincanaRoletaMixin:
 
         def _evaluate_roleta_middle(self, middle_digits: list[object], *, guild_id: int | None = None, user_id: int | None = None) -> tuple[str, int]:
             entry_cost = self._roleta_cost_for_user(int(guild_id or 0), int(user_id or 0)) if guild_id and user_id else ROLETA_COST
-            if guild_id and user_id and self._race_is(int(guild_id), int(user_id), "apostador"):
+            is_apostador = bool(guild_id and user_id and self._race_is(int(guild_id), int(user_id), "apostador"))
+            if is_apostador:
                 if middle_digits == [7, 7, 7]:
                     return "jackpot_mega", ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS
                 if middle_digits == [9, 9, 9]:
@@ -645,6 +635,13 @@ class GincanaRoletaMixin:
                 return "jackpot", ROLETA_JACKPOT_CHIPS
             if jokers and len(set(normals)) == 1 and len(normals) == 2:
                 return "joker_premium", 50
+            has_equal_number_pair = (
+                len(middle_digits) == 3
+                and all(isinstance(value, int) for value in middle_digits)
+                and len(set(middle_digits)) == 2
+            )
+            if is_apostador and has_equal_number_pair:
+                return "partial", ROLETA_APOSTADOR_PAIR_REFUND
             if max((middle_digits.count(v) for v in set(middle_digits)), default=0) >= 2:
                 return "partial", max(3, entry_cost // 2)
             return "loss", 0
@@ -1772,7 +1769,10 @@ class GincanaRoletaMixin:
                         await self._record_game_played(guild.id, actor.id, weekly_points=4)
                         await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                         await self._grant_weekly_points(guild.id, actor.id, 6)
-                        title, partial_description = self._roleta_partial_result_copy(middle_digits)
+                        title, partial_description = self._roleta_partial_result_copy(
+                            middle_digits,
+                            payout=result_amount,
+                        )
                         summary_lines.append(partial_description)
                     elif result_kind == "beast":
                         race_won = None
@@ -1780,10 +1780,11 @@ class GincanaRoletaMixin:
                         near = True
                         await self._record_game_played(guild.id, actor.id, weekly_points=3)
                         await self._change_user_chips(guild.id, actor.id, result_amount, reason="Marca da Besta")
-                        effect_note = self._race_effect_message(guild.id, actor.id, "666")
-                        if effect_note:
-                            summary_lines.append(effect_note)
-                        title = "🎰 Marca da Besta"
+                        summary_lines.extend([
+                            "**666** apareceu",
+                            f"Entrada devolvida · {self._skill_chip_value(result_amount, movement='gain')}",
+                        ])
+                        title = "😈 Marca da Besta"
                     else:
                         race_won = False
                         race_payout = 0

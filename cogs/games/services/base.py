@@ -556,6 +556,28 @@ class GincanaBase:
         view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(body)), accent_color=color))
         return view
 
+    def _skill_chip_value(
+        self,
+        amount: int,
+        *,
+        kind: str = "normal",
+        movement: str = "neutral",
+    ) -> str:
+        """Formata fichas das skills com a mesma semântica visual do extrato."""
+        value = abs(int(amount))
+        normalized_kind = str(kind or "normal").strip().lower()
+        normalized_movement = str(movement or "neutral").strip().lower()
+        if normalized_kind == "bonus":
+            emoji = self._CHIP_BONUS_EMOJI
+        elif normalized_movement == "gain":
+            emoji = self._CHIP_GAIN_EMOJI
+        elif normalized_movement == "loss":
+            emoji = self._CHIP_LOSS_EMOJI
+        else:
+            emoji = self._CHIP_EMOJI
+        sign = "+" if normalized_movement == "gain" else "-" if normalized_movement == "loss" else ""
+        return f"{emoji} **{sign}{value}**"
+
     def _gincana_input_mode(self, guild_id: int) -> str:
         getter = getattr(self.db, "get_gincana_input_mode", None)
         if not callable(getter):

@@ -839,13 +839,13 @@ class _RebornConfirmView(discord.ui.LayoutView):
         continue_button.callback = self._continue
         if self.mode == "normal_to_bonus":
             self.conversion = (
-                f"**{self.amount}** {cog._CHIP_EMOJI} → "
-                f"**{self.amount}** {cog._CHIP_BONUS_EMOJI}"
+                f"{cog._skill_chip_value(self.amount, movement='loss')} → "
+                f"{cog._skill_chip_value(self.amount, kind='bonus', movement='gain')}"
             )
         else:
             self.conversion = (
-                f"**{self.amount}** {cog._CHIP_BONUS_EMOJI} → "
-                f"**{self.amount}** {cog._CHIP_EMOJI}"
+                f"{cog._skill_chip_value(self.amount, kind='bonus', movement='loss')} → "
+                f"{cog._skill_chip_value(self.amount, movement='gain')}"
             )
         self.add_item(
             discord.ui.Container(
@@ -1273,12 +1273,12 @@ class GamesCog(dcommands.Cog, GamesCore):
             return
         if str(result.get("result")) == "coroa":
             lines = [
-                f"**Coroa** · **+50** {self._CHIP_BONUS_EMOJI} por **10s**",
+                f"**Coroa** · {self._skill_chip_value(50, kind='bonus', movement='gain')} por **10s**",
                 "-# Usadas primeiro ao entrar em um jogo",
             ]
         else:
             lines = [
-                f"**Cara** · próximo jackpot: **+20** {self._CHIP_BONUS_EMOJI}",
+                f"**Cara** · próximo jackpot: {self._skill_chip_value(20, kind='bonus', movement='gain')}",
                 f"-# Expira em **{self._race_skill_daily_wait_text()}**",
             ]
         await ctx.reply(
@@ -1307,15 +1307,19 @@ class GamesCog(dcommands.Cog, GamesCore):
         source_kind = str(result.get("source_kind") or "chips")
         if source_delta > 0 and source_kind == "bonus":
             lines = [
-                f"**{amount}** {self._CHIP_BONUS_EMOJI} → **{amount}** {self._CHIP_EMOJI}",
+                f"{self._skill_chip_value(amount, kind='bonus', movement='loss')} → "
+                f"{self._skill_chip_value(amount, movement='gain')}",
             ]
         else:
             lines = [
-                f"**−{amount} → +{amount}** {self._CHIP_EMOJI}",
+                f"{self._skill_chip_value(amount, movement='loss')} → "
+                f"{self._skill_chip_value(amount, movement='gain')}",
             ]
         linked_id = int(result.get("linked_user_id", 0) or 0)
         if linked_id > 0:
-            lines.append(f"-# <@{linked_id}> perdeu **{amount}** {self._CHIP_LOSS_EMOJI}")
+            lines.append(
+                f"-# <@{linked_id}> perdeu {self._skill_chip_value(amount, movement='loss')}"
+            )
         await ctx.reply(
             view=self._make_skill_notice(
                 "<a:eyeglitch:1531116300645175436> 0to1",
@@ -1406,14 +1410,15 @@ class GamesCog(dcommands.Cog, GamesCore):
             normal = int(result.get("normal", 0) or 0)
             bonus = int(result.get("bonus", 0) or 0)
             if normal > 0:
-                recovered_parts.append(f"**{normal}** {self._CHIP_EMOJI}")
+                recovered_parts.append(self._skill_chip_value(normal, movement="gain"))
             if bonus > 0:
-                recovered_parts.append(f"**{bonus}** {self._CHIP_BONUS_EMOJI}")
+                recovered_parts.append(self._skill_chip_value(bonus, kind="bonus", movement="gain"))
             recovered = " + ".join(recovered_parts) or f"**{amount} fichas**"
             lines = [
                 "A polícia pegou o meliante e trouxe teu dinheiro de volta",
                 f"Recuperado: {recovered}",
-                f"-# <@{thief_id}> perdeu mais **{int(result.get('penalty', 10) or 10)}** {self._CHIP_LOSS_EMOJI}",
+                f"-# Penalidade de <@{thief_id}>: "
+                f"{self._skill_chip_value(int(result.get('penalty', 10) or 10), movement='loss')}",
             ]
         else:
             lines = [
@@ -1469,9 +1474,9 @@ class GamesCog(dcommands.Cog, GamesCore):
         normal = int(result.get("normal", 0) or 0)
         parts = []
         if bonus > 0:
-            parts.append(f"**{bonus}** {self._CHIP_BONUS_EMOJI}")
+            parts.append(self._skill_chip_value(bonus, kind="bonus", movement="gain"))
         if normal > 0:
-            parts.append(f"**{normal}** {self._CHIP_EMOJI}")
+            parts.append(self._skill_chip_value(normal, movement="gain"))
         await ctx.reply(
             view=self._make_skill_notice(
                 "🥷🏿 Forcerob",

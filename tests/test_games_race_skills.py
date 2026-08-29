@@ -51,6 +51,10 @@ class RaceSkillTests(unittest.TestCase):
         self.assertNotIn('label="Cancelar"', view)
         self.assertIn('"## 🐦‍🔥 Reborn"', view)
         self.assertIn("command_hint", view)
+        self.assertIn("movement='loss'", view)
+        self.assertIn("movement='gain'", view)
+        self.assertIn("kind='bonus', movement='loss'", view)
+        self.assertIn("kind='bonus', movement='gain'", view)
 
     def test_skill_notices_use_compact_components_v2(self) -> None:
         notice = node_source(BASE, "_make_skill_notice", ast.FunctionDef)
@@ -59,6 +63,25 @@ class RaceSkillTests(unittest.TestCase):
         self.assertIn("discord.ui.TextDisplay", notice)
         self.assertIn('body = [f"## {title}"]', notice)
         self.assertIn('normalized_state == "neutral"', notice)
+
+    def test_skill_chip_values_match_the_extract_color_semantics(self) -> None:
+        formatter_source = node_source(BASE, "_skill_chip_value", ast.FunctionDef)
+        namespace: dict[str, object] = {}
+        exec(formatter_source, namespace)
+        formatter = namespace["_skill_chip_value"]
+
+        class Dummy:
+            _CHIP_EMOJI = "normal"
+            _CHIP_GAIN_EMOJI = "green"
+            _CHIP_LOSS_EMOJI = "red"
+            _CHIP_BONUS_EMOJI = "orange"
+
+        dummy = Dummy()
+        self.assertEqual(formatter(dummy, 5), "normal **5**")
+        self.assertEqual(formatter(dummy, 5, movement="gain"), "green **+5**")
+        self.assertEqual(formatter(dummy, 5, movement="loss"), "red **-5**")
+        self.assertEqual(formatter(dummy, 5, kind="bonus", movement="gain"), "orange **+5**")
+        self.assertEqual(formatter(dummy, 5, kind="bonus", movement="loss"), "orange **-5**")
 
     def test_skill_command_copy_is_short_and_non_redundant(self) -> None:
         coinflip = node_source(GAMES_INIT, "coinflip_command", ast.AsyncFunctionDef)
@@ -71,15 +94,22 @@ class RaceSkillTests(unittest.TestCase):
         for command in (coinflip, zero_to_one, reborn, changefate, forcerob, joker):
             self.assertIn("_make_skill_notice", command)
         self.assertIn("**Coroa** ·", coinflip)
+        self.assertIn("kind='bonus', movement='gain'", coinflip)
         self.assertIn("Nada para inverter no extrato", zero_to_one)
-        self.assertIn("**−{amount} → +{amount}**", zero_to_one)
+        self.assertIn("movement='loss'", zero_to_one)
+        self.assertIn("movement='gain'", zero_to_one)
+        self.assertIn("kind='bonus', movement='loss'", zero_to_one)
         self.assertNotIn("O lançamento original foi preservado", zero_to_one)
         self.assertNotIn("👁️⃤ 0to1", zero_to_one)
         self.assertIn("command_prefix=ctx.clean_prefix", reborn)
         self.assertIn("Seu próximo Buckshot ou Truco será **dourado**", changefate)
         self.assertIn("A polícia pegou o meliante e trouxe teu dinheiro de volta", changefate)
+        self.assertIn('normal, movement="gain"', changefate)
+        self.assertIn('bonus, kind="bonus", movement="gain"', changefate)
         self.assertNotIn("Midas foi preparado", changefate)
         self.assertIn('"🥷🏿 Forcerob"', forcerob)
+        self.assertIn('normal, movement="gain"', forcerob)
+        self.assertIn('bonus, kind="bonus", movement="gain"', forcerob)
         self.assertNotIn("Total levado", forcerob)
         self.assertIn("Dura **1min** · máximo **50**", joker)
 
@@ -112,9 +142,9 @@ class RaceSkillTests(unittest.TestCase):
             "Joker · reembolso",
         ):
             self.assertIn(reason, BASE)
-        self.assertIn("**Coinflip** · **+{coinflip_bonus}**", ROLETA)
+        self.assertIn("_skill_chip_value(coinflip_bonus, kind='bonus', movement='gain')", ROLETA)
         for game in (ROLETA, BUCKSHOT, TRUCO, POKER, ALVO, CORRIDA):
-            self.assertIn('f"**+{refund}** {self._CHIP_BONUS_EMOJI}"', game)
+            self.assertIn('_skill_chip_value(refund, kind="bonus", movement="gain")', game)
 
     def test_temporary_effects_clear_but_cooldowns_persist_on_reroll(self) -> None:
         runtime_fields = node_source(BASE, "GincanaBase", ast.ClassDef).split("_ACHIEVEMENT_THUMBNAIL_FILENAME", 1)[0]

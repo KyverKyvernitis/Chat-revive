@@ -1724,7 +1724,8 @@ class GincanaRoletaMixin:
                         if coinflip_bonus > 0:
                             gross_payout += coinflip_bonus
                             summary_lines.append(
-                                f"🪙 **Coinflip** · **+{coinflip_bonus}** {self._CHIP_BONUS_EMOJI} no jackpot"
+                                "🪙 **Coinflip** · "
+                                f"{self._skill_chip_value(coinflip_bonus, kind='bonus', movement='gain')} no jackpot"
                             )
                         effect_note = ""
                         if is_apostador:
@@ -1778,9 +1779,15 @@ class GincanaRoletaMixin:
                                     guild.id,
                                     actor.id,
                                     "joker",
-                                    f"**+{refund}** {self._CHIP_BONUS_EMOJI}",
+                                    self._skill_chip_value(refund, kind="bonus", movement="gain"),
                                 )
-                                summary_lines.append(effect_note or f"🃏 **Joker** · **+{refund}** {self._CHIP_BONUS_EMOJI}")
+                                summary_lines.append(
+                                    effect_note
+                                    or (
+                                        "🃏 **Joker** · "
+                                        f"{self._skill_chip_value(refund, kind='bonus', movement='gain')}"
+                                    )
+                                )
                             else:
                                 effect_note = self._race_effect_message(
                                     guild.id,
@@ -2012,9 +2019,15 @@ class GincanaRoletaMixin:
                                 guild.id,
                                 actor.id,
                                 "joker",
-                                f"**+{refund}** {self._CHIP_BONUS_EMOJI}",
+                                self._skill_chip_value(refund, kind="bonus", movement="gain"),
                             )
-                            summary_lines.append(effect_note or f"🃏 **Joker** · **+{refund}** {self._CHIP_BONUS_EMOJI}")
+                            summary_lines.append(
+                                effect_note
+                                or (
+                                    "🃏 **Joker** · "
+                                    f"{self._skill_chip_value(refund, kind='bonus', movement='gain')}"
+                                )
+                            )
                         else:
                             effect_note = self._race_effect_message(
                                 guild.id,

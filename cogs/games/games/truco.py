@@ -1030,7 +1030,7 @@ class GincanaTrucoMixin:
                                 user_id,
                                 "joker" if refund_mode == "joker" else "as",
                                 (
-                                    f"**+{refund}** {self._CHIP_BONUS_EMOJI}"
+                                    self._skill_chip_value(refund, kind="bonus", movement="gain")
                                     if refund_mode == "joker"
                                     else f"recuperou {self._chip_text(refund, kind='gain')} da entrada"
                                 ),

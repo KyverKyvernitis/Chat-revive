@@ -574,7 +574,7 @@
       "key": "recarga",
       "category": "games",
       "group": "Fichas",
-      "description": "Recupera um saldo muito baixo.",
+      "description": "Recebe bônus com até 15 fichas normais",
       "usage": "recarga",
       "search_terms": [
         "recarregar fichas"

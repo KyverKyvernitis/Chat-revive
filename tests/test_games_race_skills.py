@@ -83,6 +83,127 @@ class RaceSkillTests(unittest.TestCase):
         self.assertEqual(formatter(dummy, 5, kind="bonus", movement="gain"), "orange **+5**")
         self.assertEqual(formatter(dummy, 5, kind="bonus", movement="loss"), "orange **-5**")
 
+    def test_recharge_accepts_exactly_15_normal_chips_and_ignores_bonus(self) -> None:
+        state_source = node_source(BASE, "_chip_recharge_state", ast.FunctionDef)
+        namespace: dict[str, object] = {
+            "CHIPS_INITIAL": 100,
+            "CHIPS_RECHARGE_THRESHOLD": 15,
+            "CHIPS_RESET_SECONDS": 12 * 60 * 60,
+        }
+        exec(state_source, namespace)
+        recharge_state = namespace["_chip_recharge_state"]
+
+        class DummyDb:
+            user_cache = {(1, 2): {"chip_recharge_manual_initialized": False}}
+
+            def __init__(self, chips: int) -> None:
+                self.chips = chips
+
+            def get_user_chips(self, guild_id: int, user_id: int, *, default: int) -> int:
+                return self.chips
+
+            def get_user_chip_reset_at(self, guild_id: int, user_id: int) -> float:
+                return 0.0
+
+        class Dummy:
+            def __init__(self, chips: int, bonus: int) -> None:
+                self.db = DummyDb(chips)
+                self.bonus = bonus
+
+            def _get_user_bonus_chips(self, guild_id: int, user_id: int) -> int:
+                return self.bonus
+
+        exact_limit = recharge_state(Dummy(15, 999), 1, 2)
+        self.assertTrue(exact_limit["within_threshold"])
+        self.assertTrue(exact_limit["available"])
+        self.assertEqual(exact_limit["bonus"], 999)
+
+        above_limit = recharge_state(Dummy(16, 0), 1, 2)
+        self.assertFalse(above_limit["within_threshold"])
+        self.assertFalse(above_limit["available"])
+
+        recharge_use = node_source(BASE, "_try_use_chip_recharge", ast.AsyncFunctionDef)
+        self.assertIn("chips > CHIPS_RECHARGE_THRESHOLD", recharge_use)
+        self.assertNotIn("chips + bonus", recharge_use)
+
+    def test_daily_and_card_results_use_extract_emoji_semantics(self) -> None:
+        daily = node_source(BASE, "_make_daily_view", ast.FunctionDef)
+        self.assertIn("_skill_chip_value(int(bonus), movement='gain')", daily)
+        self.assertIn("_skill_chip_value(int(bonus_bonus), kind='bonus', movement='gain')", daily)
+        self.assertIn("_skill_chip_value(extra_streak_bonus, movement='gain')", daily)
+
+        namespace: dict[str, object] = {}
+        for name in (
+            "_format_game_result_value",
+            "_format_game_bonus_result_value",
+            "_format_game_result_breakdown",
+        ):
+            exec(node_source(ROLETA, name, ast.FunctionDef), namespace)
+
+        class Dummy:
+            _CHIP_GAIN_EMOJI = "green"
+            _CHIP_LOSS_EMOJI = "red"
+            _CHIP_EMOJI = "normal"
+            _CHIP_BONUS_EMOJI = "orange"
+
+        Dummy._format_game_result_value = namespace["_format_game_result_value"]
+        Dummy._format_game_bonus_result_value = namespace["_format_game_bonus_result_value"]
+        breakdown = namespace["_format_game_result_breakdown"]
+        self.assertEqual(breakdown(Dummy(), 10, -15), "**+10 green** • **-15 orange**")
+
+        card_view = node_source(ROLETA, "_make_carta_result_view", ast.FunctionDef)
+        card_round = node_source(ROLETA, "_execute_carta_round", ast.AsyncFunctionDef)
+        self.assertIn("bonus_result_delta", card_view)
+        self.assertIn("_format_game_result_breakdown", card_view)
+        self.assertNotIn("_format_game_result_value(effective_result)", card_view)
+        self.assertIn("commit_start_normal, commit_start_bonus", card_round)
+        self.assertIn("result_delta=normal_result_delta", card_round)
+        self.assertIn("bonus_result_delta=bonus_result_delta", card_round)
+
+    def test_apostador_equal_triples_are_half_as_likely(self) -> None:
+        resolver_source = node_source(ROLETA, "_halve_apostador_equal_outcome", ast.FunctionDef)
+        namespace: dict[str, object] = {
+            "ROLETA_APOSTADOR_EQUAL_NUMBERS_KEEP_CHANCE": 0.5,
+        }
+
+        class FakeRandom:
+            def __init__(self, value: float) -> None:
+                self.value = value
+                self.random_calls = 0
+
+            def random(self) -> float:
+                self.random_calls += 1
+                return self.value
+
+            def sample(self, population, *, k: int):
+                return [1, 2, 3]
+
+        fake_random = FakeRandom(0.49)
+        namespace["random"] = fake_random
+        exec(resolver_source, namespace)
+        resolver = namespace["_halve_apostador_equal_outcome"]
+
+        jackpot = {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": 100}
+        self.assertEqual(resolver(jackpot), jackpot)
+
+        fake_random.value = 0.5
+        rejected = resolver(jackpot)
+        self.assertEqual(rejected["target_middle"], [1, 2, 3])
+        self.assertIsNone(rejected["forced_kind"])
+        self.assertIsNone(rejected["forced_amount"])
+
+        calls_before_double = fake_random.random_calls
+        ordinary_double = {"target_middle": [4, 4, 2], "forced_kind": None, "forced_amount": None}
+        self.assertEqual(resolver(ordinary_double), ordinary_double)
+        self.assertEqual(fake_random.random_calls, calls_before_double)
+
+        outcome = node_source(ROLETA, "_roleta_outcome_for_user", ast.FunctionDef)
+        self.assertIn("return self._halve_apostador_equal_outcome(outcome)", outcome)
+
+        catalog = node_source(BASE, "_race_catalog", ast.FunctionDef)
+        for probability in ("0.075", "0.025", "0.125"):
+            self.assertIn(f"_format_percent_text({probability})", catalog)
+
     def test_0to1_preserves_normal_bonus_and_mixed_source_types(self) -> None:
         splitter_source = node_source(BASE, "_race_skill_0to1_source_parts", ast.FunctionDef)
         namespace: dict[str, object] = {}
@@ -177,6 +298,7 @@ class RaceSkillTests(unittest.TestCase):
         self.assertEqual(help_by_key["changefate"], "Recupera um roubo ou garante Midas")
         self.assertEqual(help_by_key["forcerob"], "Roubo garantido de até 20 fichas")
         self.assertEqual(help_by_key["joker"], "Protege a próxima derrota paga")
+        self.assertEqual(help_by_key["recarga"], "Recebe bônus com até 15 fichas normais")
 
         for reason in (
             "Coinflip · jackpot",

@@ -935,8 +935,8 @@ class GincanaBase:
 
         reward_lines = [
             "## Recompensas de hoje",
-            f"• **+{int(bonus)}** {self._CHIP_EMOJI} fichas",
-            f"• **+{int(bonus_bonus)}** {self._CHIP_BONUS_EMOJI} fichas bônus",
+            f"• {self._skill_chip_value(int(bonus), movement='gain')} fichas",
+            f"• {self._skill_chip_value(int(bonus_bonus), kind='bonus', movement='gain')} fichas bônus",
             (
                 "• 🎰 **+1 giro de roleta**"
                 if spin_granted
@@ -951,7 +951,7 @@ class GincanaBase:
         extra_streak_bonus = max(0, int(bonus) - 10)
         if extra_streak_bonus > 0:
             reward_lines.append(
-                f"-# A recompensa inclui +{extra_streak_bonus} {self._CHIP_EMOJI} pela ofensiva"
+                f"-# A recompensa inclui {self._skill_chip_value(extra_streak_bonus, movement='gain')} pela ofensiva"
             )
         if race_note:
             reward_lines.extend(["", str(race_note).strip()])
@@ -1732,13 +1732,13 @@ class GincanaBase:
             remaining = 0.0
         else:
             remaining = max(0.0, (float(last_reset) + float(CHIPS_RESET_SECONDS)) - now)
-        below_threshold = (chips + bonus) < CHIPS_RECHARGE_THRESHOLD
-        available = below_threshold and remaining <= 0.0
+        within_threshold = chips <= CHIPS_RECHARGE_THRESHOLD
+        available = within_threshold and remaining <= 0.0
         return {
             "chips": int(chips),
             "bonus": int(bonus),
             "remaining": float(remaining),
-            "below_threshold": bool(below_threshold),
+            "within_threshold": bool(within_threshold),
             "available": bool(available),
             "initialized": bool(initialized),
         }
@@ -1747,28 +1747,27 @@ class GincanaBase:
         state = self._chip_recharge_state(guild_id, user_id)
         chips = int(state["chips"])
         remaining = float(state["remaining"])
-        total = chips + int(state.get("bonus", 0) or 0)
-        if total >= CHIPS_RECHARGE_THRESHOLD:
+        if chips > CHIPS_RECHARGE_THRESHOLD:
             return (
-                f"Use **recarga** quando seu saldo total ficar abaixo de **{CHIPS_RECHARGE_THRESHOLD}**\n"
-                f"Ela entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus e tem cooldown de **{CHIPS_RESET_HOURS} horas**"
+                f"Use **recarga** com até **{CHIPS_RECHARGE_THRESHOLD} fichas normais** {self._CHIP_EMOJI}\n"
+                f"-# Bônus não contam · recebe {self._bonus_chip_amount(CHIPS_DEFAULT)} · cooldown de **{CHIPS_RESET_HOURS}h**"
             )
         if remaining > 0:
             return (
                 f"Disponível em **{self._format_chip_reset_remaining(remaining)}** com o trigger **recarga**\n"
-                f"Seu saldo total já está abaixo de **{CHIPS_RECHARGE_THRESHOLD}** e ela vai entregar {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus"
+                f"-# Você já tem até **{CHIPS_RECHARGE_THRESHOLD} fichas normais** · bônus não contam"
             )
         return (
-            f"Disponível agora em **recarga**\nSeu saldo total está abaixo de **{CHIPS_RECHARGE_THRESHOLD}** "
-            f"e ela entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus"
+            f"Disponível agora em **recarga**\n"
+            f"-# Até **{CHIPS_RECHARGE_THRESHOLD} fichas normais** · bônus não contam · recebe {self._bonus_chip_amount(CHIPS_DEFAULT)}"
         )
 
     def _chip_recharge_compact_text(self, guild_id: int, user_id: int) -> str:
         state = self._chip_recharge_state(guild_id, user_id)
+        chips = int(state["chips"])
         remaining = float(state["remaining"])
-        total = int(state["chips"]) + int(state.get("bonus", 0) or 0)
-        if total >= CHIPS_RECHARGE_THRESHOLD:
-            return f"Use **_recarga** quando ficar abaixo de **{CHIPS_RECHARGE_THRESHOLD}** • +{CHIPS_DEFAULT} bônus"
+        if chips > CHIPS_RECHARGE_THRESHOLD:
+            return f"Use **_recarga** com até **{CHIPS_RECHARGE_THRESHOLD} fichas normais** • +{CHIPS_DEFAULT} bônus"
         if remaining > 0:
             return f"Volta em **{self._format_chip_reset_remaining(remaining)}** • +{CHIPS_DEFAULT} bônus"
         return f"Use **_recarga** agora • +{CHIPS_DEFAULT} bônus"
@@ -1777,10 +1776,9 @@ class GincanaBase:
         state = self._chip_recharge_state(guild_id, user_id)
         chips = int(state["chips"])
         remaining = float(state["remaining"])
-        total = chips + int(state.get("bonus", 0) or 0)
-        if total >= CHIPS_RECHARGE_THRESHOLD:
+        if chips > CHIPS_RECHARGE_THRESHOLD:
             return False, chips, (
-                f"Use **_recarga** apenas abaixo de **{CHIPS_RECHARGE_THRESHOLD}**"
+                f"Use **_recarga** apenas com até **{CHIPS_RECHARGE_THRESHOLD} fichas normais**"
             )
         if remaining > 0:
             return False, chips, (
@@ -1808,14 +1806,10 @@ class GincanaBase:
         else:
             lines = ["# 🔋 Recarga indisponível", note]
             state = self._chip_recharge_state(guild_id, user_id)
-            total = int(state["chips"]) + int(state.get("bonus", 0) or 0)
-            if total >= CHIPS_RECHARGE_THRESHOLD:
-                lines.append(f"Saldo atual: {self._format_compact_chip_balance(guild_id, user_id)}")
-            else:
-                remaining = float(state["remaining"])
-                lines.append(f"Saldo atual: {self._format_compact_chip_balance(guild_id, user_id)}")
-                if remaining > 0:
-                    lines.append(f"Volta em: **{self._format_chip_reset_remaining(remaining)}**")
+            remaining = float(state["remaining"])
+            lines.append(f"Saldo atual: {self._format_compact_chip_balance(guild_id, user_id)}")
+            if bool(state.get("within_threshold")) and remaining > 0:
+                lines.append(f"Volta em: **{self._format_chip_reset_remaining(remaining)}**")
             color = discord.Color.red()
         view.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(lines)),
@@ -2107,21 +2101,18 @@ class GincanaBase:
 
     def _insufficient_chips_text(self, guild_id: int, user_id: int, amount: int) -> str:
         state = self._negative_cost_projection(guild_id, user_id, amount)
-        chips = int(state["chips"])
-        bonus = int(state["bonus"])
         projected_chips = int(state["projected_chips"])
         note = self._negative_transition_note(guild_id, user_id, amount)
         if projected_chips >= -self._MAX_CHIP_DEBT and note:
             return note
         state = self._chip_recharge_state(guild_id, user_id)
         remaining = float(state["remaining"])
-        total = chips + bonus
         if state["available"]:
             return (
                 f"Você precisa de {self._chip_amount(amount)}, mas seu saldo atual é {self._format_compact_chip_balance(guild_id, user_id)}\n"
-                f"Como ele está abaixo de **{CHIPS_RECHARGE_THRESHOLD}**, você já pode usar **recarga** para receber {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus"
+                f"Como você tem até **{CHIPS_RECHARGE_THRESHOLD} fichas normais**, já pode usar **recarga** para receber {self._bonus_chip_amount(CHIPS_DEFAULT)}"
             )
-        if total < CHIPS_RECHARGE_THRESHOLD:
+        if bool(state.get("within_threshold")):
             return (
                 f"Você precisa de {self._chip_amount(amount)}, mas seu saldo atual é {self._format_compact_chip_balance(guild_id, user_id)}\n"
                 f"Sua **recarga** volta em **{self._format_chip_reset_remaining(remaining)}** e entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus"
@@ -2234,9 +2225,9 @@ class GincanaBase:
                             "-# 1 uso por dia"
                         ),
                     },
-                    {"key": "jackpot", "emoji": "🎰", "title": "Jackpot 999", "desc": f"Na Roleta, você tem **{self._format_percent_text(0.15)} de chance** de acertar **999** e ganhar **100** {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "all_in", "emoji": "🎲", "title": "All-in 777", "desc": f"Há **{self._format_percent_text(0.05)} de chance** de acertar **777** e ganhar **200** {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "666", "emoji": "😈", "title": "Marca da Besta", "desc": f"Quando o jackpot não vem, há **{self._format_percent_text(0.25)} de chance** de cair **666** e ganhar **{ROLETA_APOSTADOR_COST}** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "jackpot", "emoji": "🎰", "title": "Jackpot 999", "desc": f"Na Roleta, você tem **{self._format_percent_text(0.075)} de chance** de acertar **999** e ganhar **100** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "all_in", "emoji": "🎲", "title": "All-in 777", "desc": f"Há **{self._format_percent_text(0.025)} de chance** de acertar **777** e ganhar **200** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "666", "emoji": "😈", "title": "Marca da Besta", "desc": f"Quando o jackpot não vem, há **{self._format_percent_text(0.125)} de chance** de cair **666** e ganhar **{ROLETA_APOSTADOR_COST}** {self._CHIP_GAIN_EMOJI}"},
                     {"key": "mesa_alta", "emoji": "💸", "title": "Mesa Alta", "desc": f"Você joga mais alto: cada giro da Roleta custa **25** {self._CHIP_LOSS_EMOJI}"},
                 ],
             },

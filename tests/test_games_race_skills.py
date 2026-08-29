@@ -161,6 +161,9 @@ class RaceSkillTests(unittest.TestCase):
         self.assertIn("cada valor vale uma vez", catalog)
         self.assertIn("Só de dia · cooldown de **6h**", catalog)
         self.assertRegex(catalog, r'"key": "0to1",\s+"emoji": "👁️⃤"')
+        self.assertIn('"key": "mao_negra", "emoji": "💲", "title": "Pilantra"', catalog)
+        self.assertNotIn("Mão Negra", catalog)
+        self.assertNotIn("🖐🏿", catalog)
         self.assertNotIn("movimentação negativa", catalog)
 
         help_by_key = {

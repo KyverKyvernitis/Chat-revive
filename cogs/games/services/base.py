@@ -2214,7 +2214,7 @@ class GincanaBase:
                             f"-# Usa {self._CHIP_BONUS_EMOJI} primeiro · 1 uso por dia"
                         ),
                     },
-                    {"key": "mao_negra", "emoji": "🖐🏿", "title": "Mão Negra", "desc": "Você pode roubar **2 vezes** a cada **4h**"},
+                    {"key": "mao_negra", "emoji": "💲", "title": "Pilantra", "desc": "Você pode roubar **2 vezes** a cada **4h**"},
                     {"key": "labia", "emoji": "🗣️", "title": "Lábia", "desc": "Você pode pedir esmola **2 vezes** a cada **3h**"},
                     {"key": "sangue_frio", "emoji": "🧊", "title": "Sangue Frio", "desc": f"Quando um roubo dá errado, você perde apenas **5** {self._CHIP_LOSS_EMOJI}"},
                     {"key": "mao_grande", "emoji": "💰", "title": "Cariocagem", "desc": f"Quando o roubo dá certo, você pode levar até **40** {self._CHIP_EMOJI}"},

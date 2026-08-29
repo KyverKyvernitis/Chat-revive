@@ -14,6 +14,9 @@ ROLETA = (ROOT / "cogs" / "games" / "games" / "roleta.py").read_text(encoding="u
 BUCKSHOT = (ROOT / "cogs" / "games" / "games" / "buckshot.py").read_text(encoding="utf-8")
 TRUCO = (ROOT / "cogs" / "games" / "games" / "truco.py").read_text(encoding="utf-8")
 POKER = (ROOT / "cogs" / "games" / "games" / "poker.py").read_text(encoding="utf-8")
+ALVO = (ROOT / "cogs" / "games" / "games" / "alvo.py").read_text(encoding="utf-8")
+CORRIDA = (ROOT / "cogs" / "games" / "games" / "corrida.py").read_text(encoding="utf-8")
+HELP = json.loads((ROOT / "shared" / "help_catalog.json").read_text(encoding="utf-8"))
 
 
 def node_source(source: str, name: str, node_type: type[ast.AST]) -> str:
@@ -28,9 +31,8 @@ def node_source(source: str, name: str, node_type: type[ast.AST]) -> str:
 class RaceSkillTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        for source in (GAMES_INIT, BASE, DB, ROLETA, BUCKSHOT, TRUCO, POKER):
+        for source in (GAMES_INIT, BASE, DB, ROLETA, BUCKSHOT, TRUCO, POKER, ALVO, CORRIDA):
             ast.parse(source)
-        json.loads((ROOT / "shared" / "help_catalog.json").read_text(encoding="utf-8"))
 
     def test_only_final_command_names_are_registered(self) -> None:
         for command in ("coinflip", "0to1", "reborn", "changefate", "forcerob", "joker"):
@@ -47,6 +49,72 @@ class RaceSkillTests(unittest.TestCase):
         self.assertEqual(view.count("discord.ui.Button("), 1)
         self.assertIn('label="Continuar"', view)
         self.assertNotIn('label="Cancelar"', view)
+        self.assertIn('"## 🐦‍🔥 Reborn"', view)
+        self.assertIn("command_hint", view)
+
+    def test_skill_notices_use_compact_components_v2(self) -> None:
+        notice = node_source(BASE, "_make_skill_notice", ast.FunctionDef)
+        self.assertIn("discord.ui.LayoutView", notice)
+        self.assertIn("discord.ui.Container", notice)
+        self.assertIn("discord.ui.TextDisplay", notice)
+        self.assertIn('body = [f"## {title}"]', notice)
+        self.assertIn('normalized_state == "neutral"', notice)
+
+    def test_skill_command_copy_is_short_and_non_redundant(self) -> None:
+        coinflip = node_source(GAMES_INIT, "coinflip_command", ast.AsyncFunctionDef)
+        zero_to_one = node_source(GAMES_INIT, "zero_to_one_command", ast.AsyncFunctionDef)
+        reborn = node_source(GAMES_INIT, "reborn_command", ast.AsyncFunctionDef)
+        changefate = node_source(GAMES_INIT, "changefate_command", ast.AsyncFunctionDef)
+        forcerob = node_source(GAMES_INIT, "forcerob_command", ast.AsyncFunctionDef)
+        joker = node_source(GAMES_INIT, "joker_command", ast.AsyncFunctionDef)
+
+        for command in (coinflip, zero_to_one, reborn, changefate, forcerob, joker):
+            self.assertIn("_make_skill_notice", command)
+        self.assertIn("**Coroa** ·", coinflip)
+        self.assertIn("Nada para inverter no extrato", zero_to_one)
+        self.assertIn("**−{amount} → +{amount}**", zero_to_one)
+        self.assertNotIn("O lançamento original foi preservado", zero_to_one)
+        self.assertNotIn("👁️⃤ 0to1", zero_to_one)
+        self.assertIn("command_prefix=ctx.clean_prefix", reborn)
+        self.assertIn("Seu próximo Buckshot ou Truco será **dourado**", changefate)
+        self.assertIn("A polícia pegou o meliante e trouxe teu dinheiro de volta", changefate)
+        self.assertNotIn("Midas foi preparado", changefate)
+        self.assertIn('"🥷🏿 Forcerob"', forcerob)
+        self.assertNotIn("Total levado", forcerob)
+        self.assertIn("Dura **1min** · máximo **50**", joker)
+
+    def test_skill_copy_is_synchronized_in_panel_help_history_and_games(self) -> None:
+        catalog = node_source(BASE, "_race_catalog", ast.FunctionDef)
+        self.assertIn("roubo garantido de **5–20 fichas**", catalog)
+        self.assertIn("cada valor vale uma vez", catalog)
+        self.assertIn("Só de dia · cooldown de **6h**", catalog)
+        self.assertNotIn("movimentação negativa", catalog)
+
+        help_by_key = {
+            entry["key"]: entry["description"]
+            for entry in HELP["entries"]
+            if isinstance(entry, dict)
+        }
+        self.assertEqual(help_by_key["coinflip"], "Lança a moeda do Apostador")
+        self.assertEqual(help_by_key["0to1"], "Inverte a última perda ou bônus")
+        self.assertEqual(help_by_key["reborn"], "Alterna fichas normais e bônus")
+        self.assertEqual(help_by_key["changefate"], "Recupera um roubo ou garante Midas")
+        self.assertEqual(help_by_key["forcerob"], "Roubo garantido de até 20 fichas")
+        self.assertEqual(help_by_key["joker"], "Protege a próxima derrota paga")
+
+        for reason in (
+            "Coinflip · jackpot",
+            "Reborn · conversão",
+            "0to1 · conversão",
+            "0to1 · roubo revertido",
+            "Change Fate · devolução",
+            "Change Fate · polícia",
+            "Joker · reembolso",
+        ):
+            self.assertIn(reason, BASE)
+        self.assertIn("**Coinflip** · **+{coinflip_bonus}**", ROLETA)
+        for game in (ROLETA, BUCKSHOT, TRUCO, POKER, ALVO, CORRIDA):
+            self.assertIn('f"**+{refund}** {self._CHIP_BONUS_EMOJI}"', game)
 
     def test_temporary_effects_clear_but_cooldowns_persist_on_reroll(self) -> None:
         runtime_fields = node_source(BASE, "GincanaBase", ast.ClassDef).split("_ACHIEVEMENT_THUMBNAIL_FILENAME", 1)[0]

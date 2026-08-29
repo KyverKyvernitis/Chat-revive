@@ -532,6 +532,30 @@ class GincanaBase:
         view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(body)), accent_color=color))
         return view
 
+    def _make_skill_notice(
+        self,
+        title: str,
+        lines: list[str],
+        *,
+        state: str = "success",
+        accent_color: discord.Color | None = None,
+    ) -> discord.ui.LayoutView:
+        """Cria respostas compactas e consistentes para skills de raça."""
+        view = discord.ui.LayoutView(timeout=None)
+        normalized_state = str(state or "success").strip().lower()
+        if accent_color is not None:
+            color = accent_color
+        elif normalized_state == "error":
+            color = discord.Color(OFF_COLOR)
+        elif normalized_state == "neutral":
+            color = discord.Color.dark_grey()
+        else:
+            color = discord.Color(ON_COLOR)
+        body = [f"## {title}"]
+        body.extend([str(line) for line in lines if str(line).strip()])
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(body)), accent_color=color))
+        return view
+
     def _gincana_input_mode(self, guild_id: int) -> str:
         getter = getattr(self.db, "get_gincana_input_mode", None)
         if not callable(getter):
@@ -2141,7 +2165,15 @@ class GincanaBase:
                 "name": "Preto",
                 "emoji": "🥷🏿",
                 "effects": [
-                    {"key": "forcerob", "emoji": "🥷🏿", "title": "Forcerob", "desc": f"Use **_forcerob @usuário** uma vez por dia para garantir um roubo de até **20 fichas**, priorizando {self._CHIP_BONUS_EMOJI}"},
+                    {
+                        "key": "forcerob",
+                        "emoji": "🥷🏿",
+                        "title": "Forcerob",
+                        "desc": (
+                            "**_forcerob @usuário** · roubo garantido de **5–20 fichas**\n"
+                            f"-# Usa {self._CHIP_BONUS_EMOJI} primeiro · 1 uso por dia"
+                        ),
+                    },
                     {"key": "mao_negra", "emoji": "🖐🏿", "title": "Mão Negra", "desc": "Você pode roubar **2 vezes** a cada **4h**"},
                     {"key": "labia", "emoji": "🗣️", "title": "Lábia", "desc": "Você pode pedir esmola **2 vezes** a cada **3h**"},
                     {"key": "sangue_frio", "emoji": "🧊", "title": "Sangue Frio", "desc": f"Quando um roubo dá errado, você perde apenas **5** {self._CHIP_LOSS_EMOJI}"},
@@ -2152,7 +2184,16 @@ class GincanaBase:
                 "name": "Apostador",
                 "emoji": "🎰",
                 "effects": [
-                    {"key": "coinflip", "emoji": "🪙", "title": "Coinflip", "desc": f"Use **_coinflip** uma vez por dia: ganhe **50** {self._CHIP_BONUS_EMOJI} por **10s** ou arme **+20** {self._CHIP_BONUS_EMOJI} no próximo jackpot"},
+                    {
+                        "key": "coinflip",
+                        "emoji": "🪙",
+                        "title": "Coinflip",
+                        "desc": (
+                            f"**_coinflip** · Coroa: **50** {self._CHIP_BONUS_EMOJI} por **10s** · "
+                            f"Cara: **+20** {self._CHIP_BONUS_EMOJI} no próximo jackpot\n"
+                            "-# 1 uso por dia"
+                        ),
+                    },
                     {"key": "jackpot", "emoji": "🎰", "title": "Jackpot 999", "desc": f"Na Roleta, você tem **{self._format_percent_text(0.15)} de chance** de acertar **999** e ganhar **100** {self._CHIP_GAIN_EMOJI}"},
                     {"key": "all_in", "emoji": "🎲", "title": "All-in 777", "desc": f"Há **{self._format_percent_text(0.05)} de chance** de acertar **777** e ganhar **200** {self._CHIP_GAIN_EMOJI}"},
                     {"key": "666", "emoji": "😈", "title": "Marca da Besta", "desc": f"Quando o jackpot não vem, há **{self._format_percent_text(0.25)} de chance** de cair **666** e ganhar **{ROLETA_APOSTADOR_COST}** {self._CHIP_GAIN_EMOJI}"},
@@ -2163,8 +2204,26 @@ class GincanaBase:
                 "name": "Sortudo",
                 "emoji": "🍀",
                 "effects": [
-                    {"key": "changefate", "emoji": "🍀", "title": "Change Fate", "desc": "Use **_changefate** uma vez por dia para recuperar um roubo comum recente e punir o ladrão; sem roubo pendente, prepara Midas"},
-                    {"key": "midas", "emoji": self._EFFECT_EMOJI, "title": "Midas", "desc": f"Ao abrir um Buckshot ou Truco, a partida tem **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} de chance** de começar dourada; Change Fate garante a próxima válida"},
+                    {
+                        "key": "changefate",
+                        "emoji": "🍀",
+                        "title": "Change Fate",
+                        "desc": (
+                            "**_changefate** · recupera o último roubo\n"
+                            "Sem roubo pendente, garante o próximo Buckshot ou Truco dourado\n"
+                            "-# 1 uso por dia"
+                        ),
+                    },
+                    {
+                        "key": "midas",
+                        "emoji": self._EFFECT_EMOJI,
+                        "title": "Midas",
+                        "desc": (
+                            "Buckshot e Truco têm "
+                            f"**{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} de chance** "
+                            "de começar dourados"
+                        ),
+                    },
                     {"key": "premio_extra", "emoji": "🎁", "title": "Prêmio Extra", "desc": f"Seu Daily rende **+5** {self._CHIP_BONUS_EMOJI}\nQuando a ofensiva aumenta o prêmio, você recebe **mais 5** {self._CHIP_BONUS_EMOJI}"},
                     {"key": "bencao", "emoji": "🙏", "title": "Bênção", "desc": "A cada **7h**, você recebe uma jogada grátis\nPode guardar até **2** e usar na Roleta ou em Cartas"},
                     {"key": "wind_boost", "emoji": "🍃", "title": "Wind Boost", "desc": "Na Corrida, cada botão acertado tem **14% de chance** de gerar um impulso, em vez de **9%**"},
@@ -2174,7 +2233,15 @@ class GincanaBase:
                 "name": "Coringa",
                 "emoji": "🃏",
                 "effects": [
-                    {"key": "joker", "emoji": "🃏", "title": "Joker", "desc": f"Use **_joker** uma vez por dia: por **1 minuto**, a próxima derrota paga devolve até **50** {self._CHIP_BONUS_EMOJI}"},
+                    {
+                        "key": "joker",
+                        "emoji": "🃏",
+                        "title": "Joker",
+                        "desc": (
+                            "**_joker** · a próxima derrota em **1min** devolve a entrada em "
+                            f"{self._CHIP_BONUS_EMOJI}\n-# Até **50 fichas** · 1 uso por dia"
+                        ),
+                    },
                     {"key": "as", "emoji": "🂡", "title": "Ás", "desc": f"Ao perder um jogo com lobby, você tem **{self._format_percent_text(0.35)} de chance** de recuperar metade da entrada"},
                     {"key": "trapaceiro", "emoji": "🎭", "title": "Trapaceiro", "desc": f"Quando um roubo dá errado, há **{self._format_percent_text(0.25)} de chance** de você não perder nenhuma ficha"},
                     {"key": "redencao", "emoji": "🃏", "title": "Redenção", "desc": f"Ao perder na Roleta ou em Cartas, você tem **{self._format_percent_text(0.5)} de chance** de recuperar metade do custo"},
@@ -2184,7 +2251,15 @@ class GincanaBase:
                 "name": "Fênix",
                 "emoji": "🐦‍🔥",
                 "effects": [
-                    {"key": "reborn_skill", "emoji": "🐦‍🔥", "title": "Reborn", "desc": f"Use **_reborn** durante o dia para alternar todo o saldo entre {self._CHIP_EMOJI} e {self._CHIP_BONUS_EMOJI}; cooldown de **6h**"},
+                    {
+                        "key": "reborn_skill",
+                        "emoji": "🐦‍🔥",
+                        "title": "Reborn",
+                        "desc": (
+                            f"**_reborn** · alterna todo o saldo entre {self._CHIP_EMOJI} "
+                            f"e {self._CHIP_BONUS_EMOJI}\n-# Só de dia · cooldown de **6h**"
+                        ),
+                    },
                     {"key": "sunrise", "emoji": "🔥", "title": "Sunrise", "desc": "Durante o dia, suas duas primeiras derrotas pagas geram Brasas\nVocê pode guardar até **2**"},
                     {"key": "rebirth", "emoji": "❤️‍🔥", "title": "Rebirth", "desc": f"Vença com Brasas guardadas para receber fichas bônus: **1 Brasa** rende **30** {self._CHIP_BONUS_EMOJI}; **2 Brasas** rendem **40** {self._CHIP_BONUS_EMOJI}"},
                     {"key": "second_dawn", "emoji": "🐦‍🔥", "title": "Second Dawn", "desc": f"Uma vez por dia, se uma derrota deixar seu saldo abaixo de **30**, você recebe **30** {self._CHIP_BONUS_EMOJI}"},
@@ -2194,7 +2269,15 @@ class GincanaBase:
                 "name": "Glitch",
                 "emoji": "👁️⃤",
                 "effects": [
-                    {"key": "0to1", "emoji": "👁️⃤", "title": "0to1", "desc": "Use **_0to1** para inverter a movimentação negativa ou bônus mais recente do extrato, com limite de **50 fichas**"},
+                    {
+                        "key": "0to1",
+                        "emoji": "<a:eyeglitch:1531116300645175436>",
+                        "title": "0to1",
+                        "desc": (
+                            "**_0to1** · inverte a última perda ou bônus do extrato\n"
+                            "-# Até **50 fichas** · cada valor vale uma vez"
+                        ),
+                    },
                     {"key": "desync", "emoji": "<a:eyeglitch:1531116300645175436>", "title": "Desync", "desc": "A cada partida paga, o sistema fica mais instável\nNa terceira, o estado **ERROR** é ativado"},
                     {"key": "overflow", "emoji": "✴️", "title": "Overload", "desc": f"Vença durante o **ERROR** para receber entre **30 e 45** {self._CHIP_BONUS_EMOJI}"},
                     {"key": "rollback", "emoji": "👁️⃤", "title": "Rollback", "desc": "Perca durante o **ERROR** para recuperar **75% da entrada**, com limite de **20 fichas**"},
@@ -2277,9 +2360,9 @@ class GincanaBase:
             "jackpot": f"você acertou **999** e recebeu **100** {self._CHIP_GAIN_EMOJI}",
             "all_in": f"você acertou **777** e recebeu **200** {self._CHIP_GAIN_EMOJI}",
             "666": f"você acertou **666** e recebeu **{ROLETA_APOSTADOR_COST}** {self._CHIP_GAIN_EMOJI}",
-            "midas": "a versão dourada foi ativada",
+            "midas": "rodada dourada",
             "premio_extra": f"seu Daily rendeu fichas bônus extras",
-            "joker": f"a derrota devolveu a entrada em fichas bônus",
+            "joker": "entrada devolvida em fichas bônus",
             "as": "você recuperou metade da entrada",
             "redencao": "você recuperou metade do custo",
             "sunrise": "Brasa armazenada",
@@ -2297,7 +2380,10 @@ class GincanaBase:
             effect_key,
             emoji_count=emoji_count,
         )
-        return f"{emoji} **{title}:** {suffix}" if suffix else f"{emoji} **{title}**"
+        if not suffix:
+            return f"{emoji} **{title}**"
+        separator = " · " if effect_key in {"joker", "midas"} else ": "
+        return f"{emoji} **{title}**{separator}{suffix}"
 
     def _race_effect_marker(self, guild_id: int, user_id: int, effect_key: str) -> str:
         return self._race_effect_message(guild_id, user_id, effect_key)
@@ -2688,7 +2774,7 @@ class GincanaBase:
                     user_id,
                     delta=awarded,
                     kind="bonus",
-                    reason="Bônus do Coinflip no jackpot",
+                    reason="Coinflip · jackpot",
                     event_type="race_skill",
                     skill_eligible=False,
                 )
@@ -2771,7 +2857,7 @@ class GincanaBase:
                     user_id,
                     delta=delta,
                     kind=kind,
-                    reason="Conversão do Reborn",
+                    reason="Reborn · conversão",
                     event_type="race_skill",
                     skill_eligible=False,
                 )
@@ -2966,10 +3052,10 @@ class GincanaBase:
 
                 if delta > 0 and kind == "bonus":
                     user_doc["bonus_chips"] = max(0, int(user_doc.get("bonus_chips", 0) or 0)) - amount
-                    history_rows.append((user_id, -amount, "bonus", "Conversão do 0to1"))
+                    history_rows.append((user_id, -amount, "bonus", "0to1 · conversão"))
                 user_doc["chips"] = int(user_doc.get("chips", CHIPS_INITIAL) or 0) + amount
                 user_doc["has_chip_activity"] = True
-                history_rows.append((user_id, amount, "chips", "Conversão do 0to1"))
+                history_rows.append((user_id, amount, "chips", "0to1 · conversão"))
 
                 if delta < 0 and str(entry.get("event_type", "") or "") == "ordinary_robbery":
                     source_event_id = str(entry.get("event_id", "") or "")
@@ -2999,7 +3085,7 @@ class GincanaBase:
                         linked_doc = dict(old_linked)
                         linked_doc["chips"] = int(linked_doc.get("chips", CHIPS_INITIAL) or 0) - amount
                         linked_doc["has_chip_activity"] = True
-                        history_rows.append((candidate, -amount, "chips", "0to1 após roubo"))
+                        history_rows.append((candidate, -amount, "chips", "0to1 · roubo revertido"))
                 try:
                     await self.db._save_user_doc(guild_id, user_id, user_doc)
                     if linked_doc is not None and actual_linked_id > 0:
@@ -3135,10 +3221,10 @@ class GincanaBase:
                         pass
                     raise
                 if normal_amount > 0:
-                    history_rows.append((user_id, normal_amount, "chips", "Dinheiro recuperado pelo Change Fate", thief_id))
+                    history_rows.append((user_id, normal_amount, "chips", "Change Fate · devolução", thief_id))
                 if bonus_amount > 0:
-                    history_rows.append((user_id, bonus_amount, "bonus", "Dinheiro recuperado pelo Change Fate", thief_id))
-                history_rows.append((thief_id, -(amount + 10), "chips", "Penalidade policial do Change Fate", user_id))
+                    history_rows.append((user_id, bonus_amount, "bonus", "Change Fate · devolução", thief_id))
+                history_rows.append((thief_id, -(amount + 10), "chips", "Change Fate · polícia", user_id))
                 result = {
                     "ok": True,
                     "mode": "police",
@@ -3240,7 +3326,7 @@ class GincanaBase:
                     target_id,
                     delta=-bonus_taken,
                     kind="bonus",
-                    reason=f"Roubo forçado por {user_name}",
+                    reason=f"Forcerob · roubado por {user_name}",
                     ts=event_ts,
                     **metadata_target,
                 )
@@ -3249,7 +3335,7 @@ class GincanaBase:
                     user_id,
                     delta=bonus_taken,
                     kind="bonus",
-                    reason=f"Roubo forçado em {target_name}",
+                    reason=f"Forcerob · roubo em {target_name}",
                     ts=event_ts,
                     **metadata_user,
                 )
@@ -3259,7 +3345,7 @@ class GincanaBase:
                     target_id,
                     delta=-normal_taken,
                     kind="chips",
-                    reason=f"Roubo forçado por {user_name}",
+                    reason=f"Forcerob · roubado por {user_name}",
                     ts=event_ts,
                     **metadata_target,
                 )
@@ -3268,7 +3354,7 @@ class GincanaBase:
                     user_id,
                     delta=normal_taken,
                     kind="chips",
-                    reason=f"Roubo forçado em {target_name}",
+                    reason=f"Forcerob · roubo em {target_name}",
                     ts=event_ts,
                     **metadata_user,
                 )
@@ -3980,7 +4066,7 @@ class GincanaBase:
                     user_id,
                     delta=joker_refund,
                     kind="bonus",
-                    reason="Reembolso do Joker",
+                    reason="Joker · reembolso",
                     event_type="race_skill",
                     skill_eligible=False,
                 )

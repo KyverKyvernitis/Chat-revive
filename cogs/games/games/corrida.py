@@ -1622,7 +1622,7 @@ class GincanaCorridaMixin:
                 user_id,
                 'joker' if refund_mode == 'joker' else 'as',
                 (
-                    f"recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada"
+                    f"**+{refund}** {self._CHIP_BONUS_EMOJI}"
                     if refund_mode == 'joker'
                     else f"recuperou {self._chip_text(refund, kind='gain')} da entrada"
                 ),

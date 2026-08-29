@@ -1724,7 +1724,7 @@ class GincanaRoletaMixin:
                         if coinflip_bonus > 0:
                             gross_payout += coinflip_bonus
                             summary_lines.append(
-                                f"🪙 **Coinflip:** o jackpot rendeu **+{coinflip_bonus}** {self._CHIP_BONUS_EMOJI}"
+                                f"🪙 **Coinflip** · **+{coinflip_bonus}** {self._CHIP_BONUS_EMOJI} no jackpot"
                             )
                         effect_note = ""
                         if is_apostador:
@@ -1778,9 +1778,9 @@ class GincanaRoletaMixin:
                                     guild.id,
                                     actor.id,
                                     "joker",
-                                    f"você recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada",
+                                    f"**+{refund}** {self._CHIP_BONUS_EMOJI}",
                                 )
-                                summary_lines.append(effect_note or f"Você recuperou **{refund}** {self._CHIP_BONUS_EMOJI}")
+                                summary_lines.append(effect_note or f"🃏 **Joker** · **+{refund}** {self._CHIP_BONUS_EMOJI}")
                             else:
                                 effect_note = self._race_effect_message(
                                     guild.id,
@@ -2012,9 +2012,9 @@ class GincanaRoletaMixin:
                                 guild.id,
                                 actor.id,
                                 "joker",
-                                f"você recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada",
+                                f"**+{refund}** {self._CHIP_BONUS_EMOJI}",
                             )
-                            summary_lines.append(effect_note or f"Você recuperou **{refund}** {self._CHIP_BONUS_EMOJI}")
+                            summary_lines.append(effect_note or f"🃏 **Joker** · **+{refund}** {self._CHIP_BONUS_EMOJI}")
                         else:
                             effect_note = self._race_effect_message(
                                 guild.id,

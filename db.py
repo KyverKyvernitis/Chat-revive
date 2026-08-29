@@ -2102,6 +2102,10 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         },
         "$unset": {
             "game_achievements": "",
+            "chip_history": "",
+            "race_skill_0to1_cutoff_ts": "",
+            "race_skill_0to1_last_entry_id": "",
+            "race_ordinary_robberies": "",
         },
     }
     await self.coll.update_many({"type": "user", "guild_id": guild_id}, update_payload)
@@ -2137,6 +2141,10 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         updated["race_mendigar_window_started_at"] = 0.0
         updated["race_mendigar_uses"] = 0
         updated.pop("game_achievements", None)
+        updated.pop("chip_history", None)
+        updated.pop("race_skill_0to1_cutoff_ts", None)
+        updated.pop("race_skill_0to1_last_entry_id", None)
+        updated.pop("race_ordinary_robberies", None)
         self.user_cache[key] = updated
         self._notify_chip_change(guild_id, _uid)
         affected += 1

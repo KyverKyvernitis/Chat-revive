@@ -184,7 +184,8 @@ class RaceSkillTests(unittest.TestCase):
             self.assertIn('_skill_chip_value(refund, kind="bonus", movement="gain")', game)
 
     def test_temporary_effects_clear_but_cooldowns_persist_on_reroll(self) -> None:
-        runtime_fields = node_source(BASE, "GincanaBase", ast.ClassDef).split("_ACHIEVEMENT_THUMBNAIL_FILENAME", 1)[0]
+        base_class = node_source(BASE, "GincanaBase", ast.ClassDef)
+        runtime_fields = base_class.split("_RACE_RUNTIME_FIELDS = (", 1)[1].split("\n    )", 1)[0]
         for field in (
             "race_skill_coinflip_temp_bonus",
             "race_skill_coinflip_jackpot_bonus",
@@ -256,6 +257,27 @@ class RaceSkillTests(unittest.TestCase):
         ordinary = node_source(BASE, "_execute_ordinary_robbery_transfer", ast.AsyncFunctionDef)
         self.assertIn('"event_type": "ordinary_robbery"', ordinary)
         self.assertIn("race_ordinary_robberies", ordinary)
+
+    def test_user_and_server_resets_clear_extract_and_linked_skill_state(self) -> None:
+        base_class = node_source(BASE, "GincanaBase", ast.ClassDef)
+        reset_user = node_source(BASE, "_force_reset_chips", ast.AsyncFunctionDef)
+        reset_profile = node_source(BASE, "_force_full_reset_ficha_profile", ast.AsyncFunctionDef)
+        active_users = node_source(BASE, "_iter_active_chip_user_ids", ast.FunctionDef)
+        reset_guild = node_source(DB, "_settingsdb_reset_guild_chip_economy", ast.AsyncFunctionDef)
+        reset_fields = (
+            "chip_history",
+            "race_skill_0to1_cutoff_ts",
+            "race_skill_0to1_last_entry_id",
+            "race_ordinary_robberies",
+        )
+
+        for field in reset_fields:
+            self.assertIn(f'"{field}"', base_class)
+            self.assertIn(f'"{field}"', reset_guild)
+        for reset in (reset_user, reset_profile):
+            self.assertIn("_CHIP_HISTORY_RESET_FIELDS", reset)
+            self.assertNotIn("append_chip_history", reset)
+        self.assertIn("_CHIP_HISTORY_RESET_FIELDS", active_users)
 
 
 if __name__ == "__main__":

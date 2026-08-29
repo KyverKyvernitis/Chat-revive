@@ -276,6 +276,12 @@ class GincanaBase:
         "race_skill_joker_until",
         "race_state",
     )
+    _CHIP_HISTORY_RESET_FIELDS = (
+        "chip_history",
+        "race_skill_0to1_cutoff_ts",
+        "race_skill_0to1_last_entry_id",
+        "race_ordinary_robberies",
+    )
     _ACHIEVEMENT_THUMBNAIL_FILENAME = "achievement-unlocked.gif"
     _ACHIEVEMENT_THUMBNAIL_PATH = (
         Path(__file__).resolve().parents[1]
@@ -1017,13 +1023,18 @@ class GincanaBase:
             doc.pop("race_key", None)
             doc.pop("race_active", None)
             doc.pop("game_achievements", None)
-            for field in self._RACE_RUNTIME_FIELDS:
+            for field in (*self._RACE_RUNTIME_FIELDS, *self._CHIP_HISTORY_RESET_FIELDS):
                 doc.pop(field, None)
             await self.db._save_user_doc(
                 guild_id,
                 user_id,
                 doc,
-                unset_fields=("race_key", "race_active", *self._RACE_RUNTIME_FIELDS),
+                unset_fields=(
+                    "race_key",
+                    "race_active",
+                    *self._RACE_RUNTIME_FIELDS,
+                    *self._CHIP_HISTORY_RESET_FIELDS,
+                ),
             )
             await self.db.clear_user_game_achievements(guild_id, user_id)
             self._forget_achievement_notice_groups(guild_id, user_id)
@@ -1048,13 +1059,18 @@ class GincanaBase:
             doc.pop("race_key", None)
             doc.pop("race_active", None)
             doc.pop("game_achievements", None)
-            for field in self._RACE_RUNTIME_FIELDS:
+            for field in (*self._RACE_RUNTIME_FIELDS, *self._CHIP_HISTORY_RESET_FIELDS):
                 doc.pop(field, None)
             await self.db._save_user_doc(
                 guild_id,
                 user_id,
                 doc,
-                unset_fields=("race_key", "race_active", *self._RACE_RUNTIME_FIELDS),
+                unset_fields=(
+                    "race_key",
+                    "race_active",
+                    *self._RACE_RUNTIME_FIELDS,
+                    *self._CHIP_HISTORY_RESET_FIELDS,
+                ),
             )
             await self.db.clear_user_game_achievements(guild_id, user_id)
             self._forget_achievement_notice_groups(guild_id, user_id)
@@ -1065,6 +1081,8 @@ class GincanaBase:
         for (stored_guild_id, user_id), doc in list(self.db.user_cache.items()):
             if int(stored_guild_id) != int(guild_id):
                 continue
+            if any(doc.get(field) for field in self._CHIP_HISTORY_RESET_FIELDS):
+                user_ids.add(int(user_id))
             achievement_data = doc.get("game_achievements") or {}
             unlocked = achievement_data.get("unlocked") or {}
             if isinstance(unlocked, dict) and unlocked:

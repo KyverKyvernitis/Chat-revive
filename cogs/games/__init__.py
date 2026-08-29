@@ -25,7 +25,7 @@ from .constants import (
 
 _CALL_COMMAND_NAME = str(TRIGGER_WORD or "pinto").strip().casefold()
 if not re.fullmatch(r"[a-z0-9_-]{1,32}", _CALL_COMMAND_NAME) or _CALL_COMMAND_NAME in {
-    "ficha", "daily", "recarga", "economia", "rank", "poker", "truco", "roubar",
+    "ficha", "fichas", "perfil", "saldo", "daily", "recarga", "economia", "rank", "poker", "truco", "roubar",
     "pay", "race", "roleta", "carta", "corrida", "alvo", "buckshot", "mendigar",
     "focus", "pica", "rola", "dj", "coinflip", "0to1", "reborn", "changefate",
     "forcerob", "joker",
@@ -1203,11 +1203,11 @@ class GamesCog(dcommands.Cog, GamesCore):
     async def economia_prefix(self, ctx: dcommands.Context):
         await self._run_gincana_prefix_command(ctx)
 
-    @dcommands.command(name="ficha", aliases=["fichas"])
-    async def ficha(self, ctx: dcommands.Context):
+    @dcommands.command(name="ficha", aliases=["fichas", "perfil", "saldo"])
+    async def ficha(self, ctx: dcommands.Context, member: discord.Member | None = None):
         if not await self._ensure_games_command_entry(ctx, trigger_hint="ficha"):
             return
-        await self._send_chip_profile(ctx.reply, ctx.author, mention_author=False)
+        await self._send_chip_profile(ctx.reply, member or ctx.author, mention_author=False)
 
     @dcommands.command(name="extrato")
     async def extrato_command(self, ctx: dcommands.Context):

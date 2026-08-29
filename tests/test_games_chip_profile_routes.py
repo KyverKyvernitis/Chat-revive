@@ -15,7 +15,15 @@ class GamesChipProfileRouteTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            "await self._send_chip_profile(ctx.reply, ctx.author, mention_author=False)",
+            '@dcommands.command(name="ficha", aliases=["fichas", "perfil", "saldo"])',
+            command_source,
+        )
+        self.assertIn(
+            "member: discord.Member | None = None",
+            command_source,
+        )
+        self.assertIn(
+            "await self._send_chip_profile(ctx.reply, member or ctx.author, mention_author=False)",
             command_source,
         )
         self.assertIn(

@@ -160,12 +160,12 @@ class RaceSkillTests(unittest.TestCase):
         self.assertIn("result_delta=normal_result_delta", card_round)
         self.assertIn("bonus_result_delta=bonus_result_delta", card_round)
 
-    def test_apostador_equal_number_pairs_refund_17_without_rate_filter(self) -> None:
+    def test_apostador_equal_number_pairs_refund_10_without_rate_filter(self) -> None:
         evaluator_source = node_source(ROLETA, "_evaluate_roleta_middle", ast.FunctionDef)
         namespace: dict[str, object] = {
             "ROLETA_COST": 15,
             "ROLETA_APOSTADOR_COST": 25,
-            "ROLETA_APOSTADOR_PAIR_REFUND": 17,
+            "ROLETA_APOSTADOR_PAIR_REFUND": 10,
             "ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS": 200,
             "ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS": 100,
             "ROLETA_JACKPOT_CHIPS": 100,
@@ -182,7 +182,7 @@ class RaceSkillTests(unittest.TestCase):
                 return 25 if user_id == 2 else 15
 
         dummy = Dummy()
-        self.assertEqual(evaluator(dummy, [4, 5, 4], guild_id=1, user_id=2), ("partial", 17))
+        self.assertEqual(evaluator(dummy, [4, 5, 4], guild_id=1, user_id=2), ("partial", 10))
         self.assertEqual(evaluator(dummy, [4, 5, 4], guild_id=1, user_id=3), ("partial", 7))
         self.assertEqual(evaluator(dummy, [4, "🃏", 4], guild_id=1, user_id=2), ("joker_premium", 50))
         self.assertEqual(evaluator(dummy, [4, 4, 4], guild_id=1, user_id=2), ("partial", 12))

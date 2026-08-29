@@ -229,6 +229,12 @@ class GincanaBuckshotMixin:
 
             guild = self.bot.get_guild(guild_id)
             if guild is None:
+                if bool(session.get('changefate_forced')):
+                    self._release_changefate_golden_reservation(
+                        guild_id,
+                        int(session.get('owner_id') or 0),
+                        str(session.get('changefate_token') or ''),
+                    )
                 self._buckshot_sessions.pop(guild_id, None)
                 return False
 
@@ -570,6 +576,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         spend_map = session.get('entry_spend') or {}
         raw = spend_map.get(int(user_id)) or {}
         bonus_spent = max(0, int(raw.get('bonus', 0) or 0))
+        temporary_spent = min(bonus_spent, max(0, int(raw.get('temporary_bonus', 0) or 0)))
         normal_spent = max(0, int(raw.get('chips', 0) or 0))
         total = bonus_spent + normal_spent
         if total <= 0 and stake > 0:
@@ -583,6 +590,9 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 if overflow > 0:
                     normal_spent = max(0, normal_spent - overflow)
             result = {'chips': normal_spent, 'bonus': bonus_spent}
+        if temporary_spent > 0:
+            result['temporary_bonus'] = min(temporary_spent, int(result.get('bonus', 0) or 0))
+            result['_temporary_bonus_expires_at'] = float(raw.get('_temporary_bonus_expires_at', 0.0) or 0.0)
         period = str(raw.get('_race_period') or '').strip().lower()
         period_key = str(raw.get('_race_period_key') or '').strip()
         if period in {'day', 'night'} and period_key:
@@ -592,10 +602,55 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
 
     async def _buckshot_refund_entry(self, guild_id: int, session: dict, user_id: int, stake: int):
         spend = self._buckshot_entry_spend(session, user_id, stake)
-        if spend.get('bonus', 0) > 0:
-            await self._change_user_bonus_chips(guild_id, user_id, int(spend['bonus']), reason='Devolução do buckshot')
-        if spend.get('chips', 0) > 0:
-            await self._change_user_chips(guild_id, user_id, int(spend['chips']), reason='Devolução do buckshot')
+        await self._refund_entry_spend(
+            guild_id,
+            user_id,
+            spend,
+            reason='Devolução do buckshot',
+        )
+
+    async def _downgrade_buckshot_changefate(
+        self,
+        guild_id: int,
+        session: dict,
+        user_ids: list[int],
+    ) -> None:
+        refund_each = max(0, 30 - int(BUCKSHOT_STAKE))
+        spend_map = session.get('entry_spend') or {}
+        if refund_each <= 0:
+            session['variant'] = 'normal'
+            return
+        for user_id in user_ids:
+            raw = dict(spend_map.get(int(user_id)) or {})
+            remaining = refund_each
+            refund_chips = min(max(0, int(raw.get('chips', 0) or 0)), remaining)
+            raw['chips'] = max(0, int(raw.get('chips', 0) or 0) - refund_chips)
+            remaining -= refund_chips
+            temporary = min(
+                max(0, int(raw.get('bonus', 0) or 0)),
+                max(0, int(raw.get('temporary_bonus', 0) or 0)),
+            )
+            persistent_bonus = max(0, int(raw.get('bonus', 0) or 0) - temporary)
+            refund_bonus = min(persistent_bonus, remaining)
+            raw['bonus'] = max(0, int(raw.get('bonus', 0) or 0) - refund_bonus)
+            remaining -= refund_bonus
+            refund_temporary = min(temporary, remaining)
+            raw['bonus'] = max(0, int(raw.get('bonus', 0) or 0) - refund_temporary)
+            raw['temporary_bonus'] = max(0, temporary - refund_temporary)
+            await self._refund_entry_spend(
+                guild_id,
+                int(user_id),
+                {
+                    'chips': refund_chips,
+                    'bonus': refund_bonus + refund_temporary,
+                    'temporary_bonus': refund_temporary,
+                    '_temporary_bonus_expires_at': float(raw.get('_temporary_bonus_expires_at', 0.0) or 0.0),
+                },
+                reason='Ajuste do Buckshot dourado',
+            )
+            spend_map[int(user_id)] = raw
+        session['entry_spend'] = spend_map
+        session['variant'] = 'normal'
 
     async def _refresh_buckshot_message(self, guild_id: int):
         session = self._get_buckshot_session(guild_id)
@@ -736,6 +791,12 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             await self._safe_cancel_task(session.get('countdown_task'))
             guild = self.bot.get_guild(guild_id)
             if guild is None:
+                if bool(session.get('changefate_forced')):
+                    self._release_changefate_golden_reservation(
+                        guild_id,
+                        int(session.get('owner_id') or 0),
+                        str(session.get('changefate_token') or ''),
+                    )
                 self._buckshot_sessions.pop(guild_id, None)
                 return False
             lobby_message = session.get('lobby_message') or session.get('message')
@@ -749,6 +810,12 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             if len(eligible) < 2:
                 for uid in locked_participants:
                     await self._buckshot_refund_entry(guild.id, session, int(uid), self._buckshot_stake(session))
+                if bool(session.get('changefate_forced')):
+                    self._release_changefate_golden_reservation(
+                        guild.id,
+                        int(session.get('owner_id') or 0),
+                        str(session.get('changefate_token') or ''),
+                    )
                 if lobby_message is not None:
                     try:
                         await lobby_message.edit(view=_BuckshotLobbyClosedView(f'{self._EFFECT_EMOJI} Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
@@ -759,6 +826,20 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                         pass
                 self._buckshot_sessions.pop(guild_id, None)
                 return True
+
+            if bool(session.get('changefate_forced')):
+                consumed_changefate = await self._consume_changefate_golden(
+                    guild.id,
+                    int(session.get('owner_id') or 0),
+                    reservation_token=str(session.get('changefate_token') or ''),
+                )
+                if not consumed_changefate:
+                    session['changefate_forced'] = False
+                    await self._downgrade_buckshot_changefate(
+                        guild.id,
+                        session,
+                        [member.id for member in eligible],
+                    )
 
             chosen = random.choice(eligible) if eligible else None
             if chosen is not None and chosen.voice and chosen.voice.channel:
@@ -831,14 +912,23 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 if is_golden:
                     await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_golden_eliminations', 1)
                 await self._record_game_played(guild.id, chosen.id, weekly_points=3)
-                refund = await self._maybe_apply_coringa_lobby_refund(guild.id, chosen.id, stake)
+                refund, refund_mode = await self._maybe_apply_coringa_loss_refund(
+                    guild.id,
+                    chosen.id,
+                    stake,
+                    chance=0.35,
+                )
                 lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} **Eliminado:** {chosen.mention}")
                 if refund > 0:
                     effect_note = self._race_effect_message(
                         guild.id,
                         chosen.id,
-                        'as',
-                        f"recuperou {self._chip_text(refund, kind='gain')} da entrada",
+                        'joker' if refund_mode == 'joker' else 'as',
+                        (
+                            f"recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada"
+                            if refund_mode == 'joker'
+                            else f"recuperou {self._chip_text(refund, kind='gain')} da entrada"
+                        ),
                     )
                     await self._route_lobby_race_notices(
                         (session.get('race_interactions') or {}).get(chosen.id),
@@ -931,18 +1021,32 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             return True
         if self._get_buckshot_session(guild.id) is not None:
             return True
-        variant = 'golden' if random.random() < self._special_variant_chance_for_user(guild.id, message.author.id) else 'normal'
+        changefate_token = f"buckshot:{guild.id}:{message.author.id}:{time.time_ns()}"
+        changefate_forced = await self._reserve_changefate_golden(
+            guild.id,
+            message.author.id,
+            changefate_token,
+        )
+        variant = (
+            'golden'
+            if changefate_forced or random.random() < self._special_variant_chance_for_user(guild.id, message.author.id)
+            else 'normal'
+        )
         stake = 30 if variant == 'golden' else BUCKSHOT_STAKE
         needs_negative_confirm = self._needs_negative_confirmation(guild.id, message.author.id, stake)
         if needs_negative_confirm:
             confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, stake, title="💥 Confirmar entrada")
             if not confirmed:
+                if changefate_forced:
+                    self._release_changefate_golden_reservation(guild.id, message.author.id, changefate_token)
                 return True
         entry_spend = self._entry_spend_parts(guild.id, message.author.id, stake)
         paid, _balance, note = await self._try_consume_chips(guild.id, message.author.id, stake, reason="Entrada no buckshot")
         if needs_negative_confirm:
             note = None
         if not paid:
+            if changefate_forced:
+                self._release_changefate_golden_reservation(guild.id, message.author.id, changefate_token)
             try: await message.channel.send(embed=self._make_embed('💥 Saldo insuficiente', note or 'Você não tem saldo suficiente para entrar', ok=False))
             except Exception: pass
             return True
@@ -962,6 +1066,8 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             'start_countdown': 0,
             'countdown_task': None,
             'variant': variant,
+            'changefate_forced': bool(changefate_forced),
+            'changefate_token': changefate_token if changefate_forced else '',
             '_last_render_key': None,
         }
         self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
@@ -973,6 +1079,8 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         except Exception:
             self._buckshot_sessions.pop(guild.id, None)
             await self._buckshot_refund_entry(guild.id, session, message.author.id, stake)
+            if changefate_forced:
+                self._release_changefate_golden_reservation(guild.id, message.author.id, changefate_token)
             return True
         session['lobby_message'] = panel_message
         await self._react_with_emoji(message, self._buckshot_reaction_emoji(session), keep=True)

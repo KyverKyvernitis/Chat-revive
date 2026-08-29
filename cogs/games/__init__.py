@@ -27,7 +27,8 @@ _CALL_COMMAND_NAME = str(TRIGGER_WORD or "pinto").strip().casefold()
 if not re.fullmatch(r"[a-z0-9_-]{1,32}", _CALL_COMMAND_NAME) or _CALL_COMMAND_NAME in {
     "ficha", "daily", "recarga", "economia", "rank", "poker", "truco", "roubar",
     "pay", "race", "roleta", "carta", "corrida", "alvo", "buckshot", "mendigar",
-    "focus", "pica", "rola", "dj",
+    "focus", "pica", "rola", "dj", "coinflip", "0to1", "reborn", "changefate",
+    "forcerob", "joker",
 }:
     _CALL_COMMAND_NAME = "pinto"
 
@@ -814,6 +815,114 @@ class _RacePanelView(discord.ui.LayoutView):
             pass
 
 
+class _RebornConfirmView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        cog: "GamesCog",
+        *,
+        guild_id: int,
+        user_id: int,
+        mode: str,
+        amount: int,
+    ):
+        super().__init__(timeout=30.0)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.user_id = int(user_id)
+        self.mode = str(mode)
+        self.amount = max(0, int(amount))
+        self.message: discord.Message | None = None
+        continue_button = discord.ui.Button(label="Continuar", style=discord.ButtonStyle.success)
+        continue_button.callback = self._continue
+        if self.mode == "normal_to_bonus":
+            conversion = (
+                f"Converter **{self.amount}** {cog._CHIP_EMOJI} em "
+                f"**{self.amount}** {cog._CHIP_BONUS_EMOJI}"
+            )
+        else:
+            conversion = (
+                f"Converter **{self.amount}** {cog._CHIP_BONUS_EMOJI} em "
+                f"**{self.amount}** {cog._CHIP_EMOJI}"
+            )
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(
+                    "\n".join(
+                        [
+                            "# 🐦‍🔥 Reborn",
+                            conversion,
+                            "-# A conversão usa todo o saldo indicado e entra em cooldown por 6 horas",
+                        ]
+                    )
+                ),
+                discord.ui.Separator(),
+                discord.ui.ActionRow(continue_button),
+                accent_color=discord.Color.orange(),
+            )
+        )
+
+    async def _continue(self, interaction: discord.Interaction):
+        if (
+            interaction.guild is None
+            or int(interaction.guild.id) != self.guild_id
+            or int(interaction.user.id) != self.user_id
+        ):
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "🐦‍🔥 Reborn",
+                    ["Essa confirmação pertence a outra pessoa"],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer()
+        result = await self.cog._execute_reborn_skill(
+            self.guild_id,
+            self.user_id,
+            expected_mode=self.mode,
+            expected_amount=self.amount,
+        )
+        self.stop()
+        if bool(result.get("ok")):
+            if self.mode == "normal_to_bonus":
+                line = f"Todas as **{self.amount}** fichas normais viraram fichas bônus"
+            else:
+                line = f"Todas as **{self.amount}** fichas bônus viraram fichas normais"
+            view = self.cog._make_v2_notice(
+                "🐦‍🔥 Reborn concluído",
+                [line, "Disponível novamente em **6h**"],
+                ok=True,
+                accent_color=discord.Color.orange(),
+            )
+        else:
+            code = str(result.get("code") or "failed")
+            lines = {
+                "race": ["Sua raça Fênix precisa estar ativa"],
+                "night": ["O Reborn só funciona durante o dia, entre 06:00 e 17:59"],
+                "cooldown": [f"Disponível em **{self.cog._format_wait_compact(float(result.get('remaining', 0) or 0))}**"],
+                "changed": ["Seu saldo mudou depois da confirmação", "Use o comando novamente para conferir o novo valor"],
+                "empty": ["Não há fichas desse tipo para converter"],
+            }.get(code, ["Não foi possível concluir a conversão"])
+            view = self.cog._make_v2_notice("🐦‍🔥 Reborn", lines, ok=False)
+        await interaction.edit_original_response(view=view)
+
+    async def on_timeout(self):
+        self.stop()
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(
+                view=self.cog._make_v2_notice(
+                    "🐦‍🔥 Confirmação expirada",
+                    ["Use o comando novamente"],
+                    ok=False,
+                )
+            )
+        except Exception:
+            pass
+
+
 class GamesCog(dcommands.Cog, GamesCore):
     def __init__(self, bot: dcommands.Bot, db):
         dcommands.Cog.__init__(self)
@@ -1137,6 +1246,237 @@ class GamesCog(dcommands.Cog, GamesCore):
             failure_title="🍀 Raça",
         )
 
+    @dcommands.command(name="coinflip")
+    async def coinflip_command(self, ctx: dcommands.Context):
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="coinflip"):
+            return
+        result = await self._activate_coinflip_skill(ctx.guild.id, ctx.author.id)
+        if not bool(result.get("ok")):
+            code = str(result.get("code") or "failed")
+            lines = (
+                ["A habilidade exige a raça Apostador ativa"]
+                if code == "race"
+                else ["Você já lançou a moeda hoje", f"Disponível em **{self._race_skill_daily_wait_text()}**"]
+            )
+            await ctx.reply(view=self._make_v2_notice("🪙 Coinflip", lines, ok=False), mention_author=False)
+            return
+        if str(result.get("result")) == "coroa":
+            lines = [
+                "Deu **coroa**",
+                f"Você recebeu **50** {self._CHIP_BONUS_EMOJI} temporárias por **10 segundos**",
+                "-# Elas são consumidas antes das fichas permanentes ao entrar em um jogo",
+            ]
+        else:
+            lines = [
+                "Deu **cara**",
+                f"Seu próximo jackpot da Roleta rende **+20** {self._CHIP_BONUS_EMOJI}",
+                f"-# O efeito expira em {self._race_skill_daily_wait_text()}",
+            ]
+        await ctx.reply(
+            view=self._make_v2_notice("🪙 Coinflip", lines, ok=True, accent_color=discord.Color.gold()),
+            mention_author=False,
+        )
+
+    @dcommands.command(name="0to1")
+    async def zero_to_one_command(self, ctx: dcommands.Context):
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="0to1"):
+            return
+        result = await self._execute_0to1_skill(ctx.guild.id, ctx.author.id)
+        if not bool(result.get("ok")):
+            code = str(result.get("code") or "empty")
+            lines = {
+                "race": ["A habilidade exige a raça Glitch ativa"],
+                "empty_balance": ["O último lançamento elegível já não possui fichas bônus para converter"],
+            }.get(code, ["Não existe uma nova movimentação negativa ou bônus elegível no extrato"])
+            await ctx.reply(view=self._make_v2_notice("👁️⃤ 0to1", lines, ok=False), mention_author=False)
+            return
+        amount = int(result.get("amount", 0) or 0)
+        source_delta = int(result.get("source_delta", 0) or 0)
+        source_kind = str(result.get("source_kind") or "chips")
+        if source_delta > 0 and source_kind == "bonus":
+            lines = [
+                f"**{amount}** {self._CHIP_BONUS_EMOJI} viraram **{amount}** {self._CHIP_EMOJI}",
+                "-# O lançamento original foi preservado e não poderá ser usado novamente",
+            ]
+        else:
+            lines = [
+                f"O valor negativo virou **+{amount}** {self._CHIP_EMOJI}",
+                "-# O lançamento original foi preservado e não poderá ser usado novamente",
+            ]
+        linked_id = int(result.get("linked_user_id", 0) or 0)
+        if linked_id > 0:
+            lines.append(f"O efeito também alcançou quem roubou: <@{linked_id}>")
+        await ctx.reply(
+            view=self._make_v2_notice("👁️⃤ 0to1", lines, ok=True, accent_color=discord.Color.purple()),
+            mention_author=False,
+        )
+
+    @dcommands.command(name="reborn")
+    async def reborn_command(self, ctx: dcommands.Context):
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="reborn"):
+            return
+        if not self._race_is(ctx.guild.id, ctx.author.id, "fenix"):
+            await ctx.reply(
+                view=self._make_v2_notice("🐦‍🔥 Reborn", ["A habilidade exige a raça Fênix ativa"], ok=False),
+                mention_author=False,
+            )
+            return
+        preview = self._reborn_skill_preview(ctx.guild.id, ctx.author.id)
+        if not bool(preview.get("daytime")):
+            await ctx.reply(
+                view=self._make_v2_notice(
+                    "🐦‍🔥 Reborn",
+                    ["A habilidade só funciona durante o dia, entre 06:00 e 17:59"],
+                    ok=False,
+                ),
+                mention_author=False,
+            )
+            return
+        remaining = float(preview.get("remaining", 0.0) or 0.0)
+        if remaining > 0:
+            await ctx.reply(
+                view=self._make_v2_notice(
+                    "🐦‍🔥 Reborn",
+                    [f"Disponível em **{self._format_wait_compact(remaining)}**"],
+                    ok=False,
+                ),
+                mention_author=False,
+            )
+            return
+        amount = int(preview.get("amount", 0) or 0)
+        if amount <= 0:
+            source = "fichas bônus" if str(preview.get("mode")) == "bonus_to_normal" else "fichas normais"
+            await ctx.reply(
+                view=self._make_v2_notice("🐦‍🔥 Reborn", [f"Você não possui {source} para converter"], ok=False),
+                mention_author=False,
+            )
+            return
+        view = _RebornConfirmView(
+            self,
+            guild_id=ctx.guild.id,
+            user_id=ctx.author.id,
+            mode=str(preview.get("mode") or "normal_to_bonus"),
+            amount=amount,
+        )
+        view.message = await ctx.reply(view=view, mention_author=False)
+
+    @dcommands.command(name="changefate")
+    async def changefate_command(self, ctx: dcommands.Context):
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="changefate"):
+            return
+        result = await self._execute_changefate_skill(ctx.guild.id, ctx.author.id)
+        if not bool(result.get("ok")):
+            code = str(result.get("code") or "failed")
+            lines = (
+                ["A habilidade exige a raça Sortudo ativa"]
+                if code == "race"
+                else ["Você já mudou o destino hoje", f"Disponível em **{self._race_skill_daily_wait_text()}**"]
+                if code == "cooldown"
+                else ["O destino mudou durante a execução", "Tente novamente"]
+            )
+            await ctx.reply(view=self._make_v2_notice("🍀 Change Fate", lines, ok=False), mention_author=False)
+            return
+        if str(result.get("mode")) == "police":
+            amount = int(result.get("amount", 0) or 0)
+            thief_id = int(result.get("thief_id", 0) or 0)
+            lines = [
+                "a polícia pegou o meliante e trouxe teu dinheiro de volta",
+                f"Você recuperou **{amount} fichas** de <@{thief_id}>",
+                f"O meliante também perdeu **{int(result.get('penalty', 10) or 10)}** {self._CHIP_LOSS_EMOJI}",
+            ]
+        else:
+            lines = [
+                "Midas foi preparado",
+                "A próxima rodada válida de Buckshot ou Truco criada por você será dourada",
+                f"-# O efeito expira em {self._race_skill_daily_wait_text()} e convites cancelados não o consomem",
+            ]
+        await ctx.reply(
+            view=self._make_v2_notice("🍀 Change Fate", lines, ok=True, accent_color=discord.Color.gold()),
+            mention_author=False,
+        )
+
+    @dcommands.command(name="forcerob")
+    async def forcerob_command(self, ctx: dcommands.Context, target: discord.Member | None = None):
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="forcerob @usuário"):
+            return
+        if target is None:
+            await ctx.reply(
+                view=self._make_v2_notice(
+                    "🥷🏿 Roubo forçado",
+                    [f"Use `{ctx.clean_prefix}forcerob @usuário`"],
+                    ok=False,
+                ),
+                mention_author=False,
+            )
+            return
+        if target.bot:
+            await ctx.reply(
+                view=self._make_v2_notice("🥷🏿 Roubo forçado", ["Bots não podem ser roubados"], ok=False),
+                mention_author=False,
+            )
+            return
+        result = await self._execute_forcerob_skill(
+            ctx.guild.id,
+            ctx.author.id,
+            target.id,
+            user_name=ctx.author.display_name,
+            target_name=target.display_name,
+        )
+        if not bool(result.get("ok")):
+            code = str(result.get("code") or "failed")
+            lines = {
+                "race": ["A habilidade exige a raça Preto ativa"],
+                "cooldown": ["Você já usou o roubo forçado hoje", f"Disponível em **{self._race_skill_daily_wait_text()}**"],
+                "self": ["Você não pode roubar a si mesmo"],
+                "poor": [f"{target.mention} precisa ter pelo menos **20 fichas persistentes**"],
+            }.get(code, ["Não foi possível concluir o roubo forçado"])
+            await ctx.reply(view=self._make_v2_notice("🥷🏿 Roubo forçado", lines, ok=False), mention_author=False)
+            return
+        amount = int(result.get("amount", 0) or 0)
+        bonus = int(result.get("bonus", 0) or 0)
+        normal = int(result.get("normal", 0) or 0)
+        parts = []
+        if bonus > 0:
+            parts.append(f"**{bonus}** {self._CHIP_BONUS_EMOJI}")
+        if normal > 0:
+            parts.append(f"**{normal}** {self._CHIP_EMOJI}")
+        await ctx.reply(
+            view=self._make_v2_notice(
+                "🥷🏿 Roubo forçado",
+                [f"Você roubou {' e '.join(parts)} de {target.mention}", f"Total levado: **{amount} fichas**"],
+                ok=True,
+                accent_color=discord.Color.dark_grey(),
+            ),
+            mention_author=False,
+        )
+
+    @dcommands.command(name="joker")
+    async def joker_command(self, ctx: dcommands.Context):
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="joker"):
+            return
+        result = await self._activate_joker_skill(ctx.guild.id, ctx.author.id)
+        if not bool(result.get("ok")):
+            code = str(result.get("code") or "failed")
+            lines = (
+                ["A habilidade exige a raça Coringa ativa"]
+                if code == "race"
+                else ["Você já ativou o Joker hoje", f"Disponível em **{self._race_skill_daily_wait_text()}**"]
+            )
+            await ctx.reply(view=self._make_v2_notice("🃏 Joker", lines, ok=False), mention_author=False)
+            return
+        await ctx.reply(
+            view=self._make_v2_notice(
+                "🃏 Joker ativado",
+                [
+                    "Sua próxima derrota paga dentro de **1 minuto** devolverá **100% da entrada** em fichas bônus",
+                    "-# Limite de 50 fichas; vitórias e partidas canceladas não consomem o efeito",
+                ],
+                ok=True,
+                accent_color=discord.Color.purple(),
+            ),
+            mention_author=False,
+        )
+
     @dcommands.command(name="pay")
     async def pay_command(
         self,
@@ -1374,8 +1714,23 @@ class GamesCog(dcommands.Cog, GamesCore):
         if success:
             max_rob = 40 if self._race_is(guild.id, author.id, "preto") else 30
             amount = random.randint(5, min(max_rob, max(5, target_chips)))
-            await self._change_user_chips(guild.id, target.id, -amount, mark_activity=True, reason=f"Roubado por {author.display_name}")
-            await self._change_user_chips(guild.id, author.id, amount, mark_activity=True, reason=f"Roubo bem-sucedido em {target.display_name}")
+            transfer = await self._execute_ordinary_robbery_transfer(
+                guild.id,
+                author.id,
+                target.id,
+                amount,
+                thief_name=author.display_name,
+                victim_name=target.display_name,
+            )
+            if not bool(transfer.get("ok")):
+                await channel.send(
+                    view=self._make_v2_notice(
+                        "🕵️ Roubo",
+                        ["O saldo do alvo mudou antes do golpe", "Tente novamente"],
+                        ok=False,
+                    )
+                )
+                return True
             flavor = random.choice([
                 f"Você roubou {self._chip_text(amount, kind='gain')} de {target.mention}",
                 f"O golpe encaixou\nVocê levou {self._chip_text(amount, kind='gain')} de {target.mention}",

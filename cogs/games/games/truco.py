@@ -60,6 +60,9 @@ class TrucoGame:
     finished: bool = False
     dm_messages: dict[int, discord.Message] = field(default_factory=dict)
     race_interactions: dict[int, discord.Interaction] = field(default_factory=dict)
+    changefate_forced: bool = False
+    changefate_consumed: bool = False
+    changefate_token: str = ""
     match_history: dict[str, int] | None = None
     last_activity_at: float = field(default_factory=time.monotonic)
 
@@ -265,6 +268,12 @@ class GincanaTrucoMixin:
         self._truco_clear_runtime_guards(game)
 
     async def _truco_release_game(self, game: TrucoGame):
+        if game.changefate_forced and not game.changefate_consumed:
+            self._release_changefate_golden_reservation(
+                game.guild_id,
+                int(game.owner_id),
+                game.changefate_token,
+            )
         self._truco_remove_local_game(game)
         await self._game_sessions.release(game.session_id)
 
@@ -289,18 +298,36 @@ class GincanaTrucoMixin:
             return 0.0
         return max(0.0, time.monotonic() - last_activity)
 
-    def _truco_entry_refund_parts(self, guild_id: int, user_id: int, amount: int) -> tuple[int, int]:
+    def _truco_entry_refund_parts(self, guild_id: int, user_id: int, amount: int) -> tuple[int, int, int, float]:
         spend = max(0, int(amount))
+        temporary = min(self._coinflip_temp_bonus_available(guild_id, user_id), spend)
         current_bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
-        use_bonus = min(current_bonus, spend)
-        return spend - use_bonus, use_bonus
+        use_bonus = min(current_bonus, spend - temporary)
+        doc = self.db._get_user_doc(guild_id, user_id)
+        expires_at = (
+            float(doc.get("race_skill_coinflip_temp_expires_at", 0.0) or 0.0)
+            if temporary > 0
+            else 0.0
+        )
+        return spend - temporary - use_bonus, temporary + use_bonus, temporary, expires_at
 
-    async def _truco_refund_consumed_entries(self, guild_id: int, consumed_entries: list[tuple[int, int, int]]):
-        for user_id, normal_amount, bonus_amount in consumed_entries:
-            if bonus_amount > 0:
-                await self._change_user_bonus_chips(guild_id, int(user_id), int(bonus_amount), mark_activity=True, reason="Devolução do truco")
-            if normal_amount > 0:
-                await self._change_user_chips(guild_id, int(user_id), int(normal_amount), mark_activity=True, reason="Devolução do truco")
+    async def _truco_refund_consumed_entries(
+        self,
+        guild_id: int,
+        consumed_entries: list[tuple[int, int, int, int, float]],
+    ):
+        for user_id, normal_amount, bonus_amount, temporary_amount, expires_at in consumed_entries:
+            await self._refund_entry_spend(
+                guild_id,
+                int(user_id),
+                {
+                    "chips": int(normal_amount),
+                    "bonus": int(bonus_amount),
+                    "temporary_bonus": int(temporary_amount),
+                    "_temporary_bonus_expires_at": float(expires_at),
+                },
+                reason="Devolução do truco",
+            )
 
     async def _truco_abort_game_start(self, game: TrucoGame, *, notice: str):
         if getattr(game, "_start_abort_handled", False):
@@ -311,6 +338,9 @@ class GincanaTrucoMixin:
         if refund_entries:
             await self._truco_refund_consumed_entries(game.guild_id, refund_entries)
             game.entry_refunds = []
+        if game.changefate_consumed:
+            await self._restore_changefate_golden(game.guild_id, int(game.owner_id))
+            game.changefate_consumed = False
         await self._truco_release_game(game)
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(discord.ui.TextDisplay(f"# 🃏 Truco\n{notice}"), accent_color=discord.Color.red()))
@@ -984,6 +1014,27 @@ class GincanaTrucoMixin:
                         "chips": int(game.contribution.get(user_id, TRUCO_ENTRY) or TRUCO_ENTRY),
                         "bonus": 0,
                     }
+                    coringa_note = ""
+                    if not did_win:
+                        normalized_spend = self._normalize_entry_spend(entry_spend)
+                        paid_entry = int(normalized_spend.get("chips", 0) or 0) + int(normalized_spend.get("bonus", 0) or 0)
+                        refund, refund_mode = await self._maybe_apply_coringa_loss_refund(
+                            game.guild_id,
+                            user_id,
+                            paid_entry,
+                            chance=0.35,
+                        )
+                        if refund > 0:
+                            coringa_note = self._race_effect_message(
+                                game.guild_id,
+                                user_id,
+                                "joker" if refund_mode == "joker" else "as",
+                                (
+                                    f"recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada"
+                                    if refund_mode == "joker"
+                                    else f"recuperou {self._chip_text(refund, kind='gain')} da entrada"
+                                ),
+                            )
                     notes = await self._apply_new_race_result(
                         game.guild_id,
                         user_id,
@@ -992,6 +1043,8 @@ class GincanaTrucoMixin:
                         payout=(game.pot + self._truco_bonus_reward_value(game)) if did_win else 0,
                         valid=True,
                     )
+                    if coringa_note:
+                        notes.append(coringa_note)
                     await self._route_lobby_race_notices(
                         game.race_interactions.get(user_id),
                         game.guild_id,
@@ -1128,8 +1181,20 @@ class GincanaTrucoMixin:
             guild.id,
             message.channel.id,
             [challenger.id, opponent.id],
-            variant=self._roll_truco_variant_for_user(guild.id, challenger.id),
+            variant="normal",
         )
+        changefate_forced = await self._reserve_changefate_golden(
+            guild.id,
+            challenger.id,
+            game.session_id,
+        )
+        game.variant = (
+            "golden"
+            if changefate_forced
+            else self._roll_truco_variant_for_user(guild.id, challenger.id)
+        )
+        game.changefate_forced = bool(changefate_forced)
+        game.changefate_token = game.session_id if changefate_forced else ""
         reservation = await self._game_sessions.create_pending(
             session_id=game.session_id,
             game_type="truco",
@@ -1139,6 +1204,8 @@ class GincanaTrucoMixin:
             required_free_user_ids={opponent.id},
         )
         if not reservation.ok:
+            if changefate_forced:
+                self._release_changefate_golden_reservation(guild.id, challenger.id, game.session_id)
             if reservation.code == "guild_full":
                 text = (
                     f"Este servidor já possui {MAX_ACTIVE_GAME_USERS_PER_GUILD} jogadores "
@@ -1153,6 +1220,8 @@ class GincanaTrucoMixin:
 
         if not await self._truco_require_dm_for_players([challenger.id, opponent.id], channel=message.channel, guild=guild):
             await self._game_sessions.release(game.session_id)
+            if changefate_forced:
+                self._release_changefate_golden_reservation(guild.id, challenger.id, game.session_id)
             return True
 
         game.race_effect_marker = (
@@ -1287,9 +1356,13 @@ class GincanaTrucoMixin:
                 await self._truco_update_interaction_message(interaction, view=closed)
                 return
 
-            consumed_entries: list[tuple[int, int, int]] = []
+            consumed_entries: list[tuple[int, int, int, int, float]] = []
             for user_id in (challenger_id, opponent_id):
-                normal_part, bonus_part = self._truco_entry_refund_parts(game.guild_id, user_id, TRUCO_ENTRY)
+                normal_part, bonus_part, temporary_part, temporary_expiry = self._truco_entry_refund_parts(
+                    game.guild_id,
+                    user_id,
+                    TRUCO_ENTRY,
+                )
                 paid, _balance, _payment_note = await self._try_consume_chips(
                     game.guild_id,
                     user_id,
@@ -1308,7 +1381,7 @@ class GincanaTrucoMixin:
                     ))
                     await self._truco_update_interaction_message(interaction, view=closed)
                     return
-                consumed_entries.append((user_id, normal_part, bonus_part))
+                consumed_entries.append((user_id, normal_part, bonus_part, temporary_part, temporary_expiry))
 
             game.entry_refunds = consumed_entries
             period, period_key = self._race_period_info()
@@ -1316,11 +1389,23 @@ class GincanaTrucoMixin:
                 int(user_id): {
                     "chips": int(normal_part),
                     "bonus": int(bonus_part),
+                    "temporary_bonus": int(temporary_part),
+                    "_temporary_bonus_expires_at": float(temporary_expiry),
                     "_race_period": period,
                     "_race_period_key": period_key,
                 }
-                for user_id, normal_part, bonus_part in consumed_entries
+                for user_id, normal_part, bonus_part, temporary_part, temporary_expiry in consumed_entries
             }
+            if game.changefate_forced:
+                game.changefate_consumed = await self._consume_changefate_golden(
+                    game.guild_id,
+                    challenger_id,
+                    reservation_token=game.changefate_token,
+                )
+                if not game.changefate_consumed:
+                    game.changefate_forced = False
+                    game.variant = "normal"
+                    game.race_effect_marker = ""
             game.accepted = True
             game.status = "starting"
             game.race_interactions[interaction.user.id] = interaction
@@ -1570,11 +1655,15 @@ class GincanaTrucoMixin:
                 )
                 if not confirmed:
                     return
-            consumed: list[tuple[int, int, int]] = []
+            consumed: list[tuple[int, int, int, int, float]] = []
             for user_id, delta in deltas.items():
                 if delta <= 0:
                     continue
-                normal_part, bonus_part = self._truco_entry_refund_parts(game.guild_id, user_id, delta)
+                normal_part, bonus_part, temporary_part, temporary_expiry = self._truco_entry_refund_parts(
+                    game.guild_id,
+                    user_id,
+                    delta,
+                )
                 paid, _balance, _note = await self._try_consume_chips(game.guild_id, user_id, delta, reason="Aumento no truco")
                 if not paid:
                     if consumed:
@@ -1584,11 +1673,17 @@ class GincanaTrucoMixin:
                     else:
                         await interaction.response.send_message("Não foi possível cobrar o aumento\nNada foi alterado", ephemeral=True)
                     return
-                consumed.append((user_id, normal_part, bonus_part))
-            for user_id, normal_part, bonus_part in consumed:
+                consumed.append((user_id, normal_part, bonus_part, temporary_part, temporary_expiry))
+            for user_id, normal_part, bonus_part, temporary_part, temporary_expiry in consumed:
                 current_spend = dict(game.entry_spend.get(int(user_id)) or {})
                 current_spend["chips"] = int(current_spend.get("chips", 0) or 0) + int(normal_part)
                 current_spend["bonus"] = int(current_spend.get("bonus", 0) or 0) + int(bonus_part)
+                current_spend["temporary_bonus"] = int(current_spend.get("temporary_bonus", 0) or 0) + int(temporary_part)
+                if temporary_part > 0:
+                    current_spend["_temporary_bonus_expires_at"] = max(
+                        float(current_spend.get("_temporary_bonus_expires_at", 0.0) or 0.0),
+                        float(temporary_expiry),
+                    )
                 game.entry_spend[int(user_id)] = current_spend
             for user_id, delta in deltas.items():
                 game.contribution[user_id] = int(game.contribution.get(user_id, TRUCO_ENTRY)) + delta

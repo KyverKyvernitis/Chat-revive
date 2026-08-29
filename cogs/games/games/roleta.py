@@ -1720,6 +1720,12 @@ class GincanaRoletaMixin:
                         await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                         await self.db.add_user_game_stat(guild.id, actor.id, "roleta_jackpots", 1)
                         await self._grant_weekly_points(guild.id, actor.id, 20)
+                        coinflip_bonus = await self._claim_coinflip_jackpot_bonus(guild.id, actor.id)
+                        if coinflip_bonus > 0:
+                            gross_payout += coinflip_bonus
+                            summary_lines.append(
+                                f"🪙 **Coinflip:** o jackpot rendeu **+{coinflip_bonus}** {self._CHIP_BONUS_EMOJI}"
+                            )
                         effect_note = ""
                         if is_apostador:
                             effect_note = self._race_effect_message(guild.id, actor.id, "all_in" if result_kind == "jackpot_mega" else "jackpot")
@@ -1759,16 +1765,30 @@ class GincanaRoletaMixin:
                         race_payout = 0
                         await self._record_game_played(guild.id, actor.id, weekly_points=2)
                         current_jackpot = await self._increase_roleta_dynamic_jackpot(guild.id)
-                        refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost, chance=0.5)
+                        refund, refund_mode = await self._maybe_apply_coringa_loss_refund(
+                            guild.id,
+                            actor.id,
+                            entry_cost,
+                            chance=0.5,
+                        )
                         gross_payout = int(refund)
                         if refund > 0:
-                            effect_note = self._race_effect_message(
-                                guild.id,
-                                actor.id,
-                                "redencao",
-                                f"você recuperou {self._chip_text(refund, kind='gain')} do custo do giro",
-                            )
-                            summary_lines.append(effect_note or f"Você recuperou {self._chip_text(refund, kind='gain')}")
+                            if refund_mode == "joker":
+                                effect_note = self._race_effect_message(
+                                    guild.id,
+                                    actor.id,
+                                    "joker",
+                                    f"você recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada",
+                                )
+                                summary_lines.append(effect_note or f"Você recuperou **{refund}** {self._CHIP_BONUS_EMOJI}")
+                            else:
+                                effect_note = self._race_effect_message(
+                                    guild.id,
+                                    actor.id,
+                                    "redencao",
+                                    f"você recuperou {self._chip_text(refund, kind='gain')} do custo do giro",
+                                )
+                                summary_lines.append(effect_note or f"Você recuperou {self._chip_text(refund, kind='gain')}")
                         title = self._pick_game_loss_title("roleta")
 
                     race_notes = await self._apply_new_race_result(
@@ -1979,16 +1999,30 @@ class GincanaRoletaMixin:
                     race_won = False
                     race_payout = 0
                     await self._record_game_played(guild.id, actor.id, weekly_points=2)
-                    refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost, chance=0.5)
+                    refund, refund_mode = await self._maybe_apply_coringa_loss_refund(
+                        guild.id,
+                        actor.id,
+                        entry_cost,
+                        chance=0.5,
+                    )
                     gross_payout = int(refund)
                     if refund > 0:
-                        effect_note = self._race_effect_message(
-                            guild.id,
-                            actor.id,
-                            "redencao",
-                            f"você recuperou {self._chip_text(refund, kind='gain')} do custo da mão",
-                        )
-                        summary_lines.append(effect_note or f"Você recuperou {self._chip_text(refund, kind='gain')}")
+                        if refund_mode == "joker":
+                            effect_note = self._race_effect_message(
+                                guild.id,
+                                actor.id,
+                                "joker",
+                                f"você recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada",
+                            )
+                            summary_lines.append(effect_note or f"Você recuperou **{refund}** {self._CHIP_BONUS_EMOJI}")
+                        else:
+                            effect_note = self._race_effect_message(
+                                guild.id,
+                                actor.id,
+                                "redencao",
+                                f"você recuperou {self._chip_text(refund, kind='gain')} do custo da mão",
+                            )
+                            summary_lines.append(effect_note or f"Você recuperou {self._chip_text(refund, kind='gain')}")
                     else:
                         summary_lines.append(flavor)
                     title = self._pick_game_loss_title("cartas")

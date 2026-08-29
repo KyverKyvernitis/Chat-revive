@@ -599,11 +599,12 @@ class GincanaCorridaMixin:
 
     async def _refund_race_entry(self, guild_id: int, session: dict, user_id: int, *, reason: str):
         raw_spend = (session.get("entry_spend") or {}).get(int(user_id)) or {"chips": CORRIDA_STAKE, "bonus": 0}
-        spend = self._normalize_entry_spend(raw_spend)
-        if spend["bonus"] > 0:
-            await self._change_user_bonus_chips(guild_id, int(user_id), int(spend["bonus"]), reason=reason)
-        if spend["chips"] > 0:
-            await self._change_user_chips(guild_id, int(user_id), int(spend["chips"]), reason=reason)
+        await self._refund_entry_spend(
+            guild_id,
+            int(user_id),
+            raw_spend,
+            reason=reason,
+        )
 
     async def _release_race_registry(self, session: dict):
         session_id = str(session.get("registry_session_id") or "")
@@ -1561,12 +1562,17 @@ class GincanaCorridaMixin:
         if final_groups:
             for winner in final_groups[0]:
                 losing_ids.discard(winner.id)
-        coringa_refunds: list[tuple[int, int]] = []
+        coringa_refunds: list[tuple[int, int, str]] = []
         for user_id in losing_ids:
             await self.db.add_user_game_stat(guild.id, int(user_id), "corrida_losses", 1)
-            refund = await self._maybe_apply_coringa_lobby_refund(guild.id, int(user_id), CORRIDA_STAKE)
+            refund, refund_mode = await self._maybe_apply_coringa_loss_refund(
+                guild.id,
+                int(user_id),
+                CORRIDA_STAKE,
+                chance=0.35,
+            )
             if refund > 0:
-                coringa_refunds.append((int(user_id), int(refund)))
+                coringa_refunds.append((int(user_id), int(refund), refund_mode))
         winner_ids = {member.id for member in final_order if rank_map.get(member.id) == 1}
         runner_up_ids = {member.id for member in final_order if rank_map.get(member.id) == 2}
         third_ids = {member.id for member in final_order if rank_map.get(member.id) == 3}
@@ -1610,12 +1616,16 @@ class GincanaCorridaMixin:
                 public_race_notices,
             )
 
-        for user_id, refund in coringa_refunds:
+        for user_id, refund, refund_mode in coringa_refunds:
             refund_note = self._race_effect_message(
                 guild.id,
                 user_id,
-                'as',
-                f"recuperou {self._chip_text(refund, kind='gain')} da entrada",
+                'joker' if refund_mode == 'joker' else 'as',
+                (
+                    f"recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada"
+                    if refund_mode == 'joker'
+                    else f"recuperou {self._chip_text(refund, kind='gain')} da entrada"
+                ),
             )
             await self._route_lobby_race_notices(
                 (session.get("race_interactions") or {}).get(user_id),

@@ -382,12 +382,12 @@ class GincanaAlvoMixin:
 
             if len(locked_ids) == 1:
                 only_id = next(iter(locked_ids))
-                await self._change_user_chips(guild.id, only_id, ALVO_STAKE, reason="Devolução do alvo")
+                await self._refund_target_entry(guild.id, session, only_id)
                 only_member = guild.get_member(only_id)
                 final_text = f"A rodada foi cancelada porque só {only_member.mention if only_member else '1 participante'} entrou\nA entrada foi reembolsada"
             elif len(participants) < 2:
                 for user_id in locked_ids:
-                    await self._change_user_chips(guild.id, user_id, ALVO_STAKE, reason="Devolução do alvo")
+                    await self._refund_target_entry(guild.id, session, user_id)
                 final_text = "A rodada foi cancelada porque não ficaram participantes suficientes\nAs entradas foram reembolsadas"
             else:
                 pot_total = len(locked_ids) * ALVO_STAKE
@@ -523,7 +523,7 @@ class GincanaAlvoMixin:
                 panel_message = await message.channel.send(embed=embed, view=view)
             except Exception:
                 self._target_sessions.pop(guild.id, None)
-                await self._change_user_chips(guild.id, message.author.id, ALVO_STAKE, reason="Devolução do alvo")
+                await self._refund_target_entry(guild.id, session, message.author.id)
                 return True
 
             session["message"] = panel_message
@@ -683,6 +683,18 @@ class _TargetStateView(discord.ui.LayoutView):
 
 
 class GincanaAlvoMixin(GincanaAlvoMixin):
+    async def _refund_target_entry(self, guild_id: int, session: dict, user_id: int) -> None:
+        raw_spend = (session.get('entry_spend') or {}).get(int(user_id)) or {
+            'chips': ALVO_STAKE,
+            'bonus': 0,
+        }
+        await self._refund_entry_spend(
+            guild_id,
+            int(user_id),
+            raw_spend,
+            reason="Devolução do alvo",
+        )
+
     def _get_target_session(self, guild_id: int) -> dict | None:
         session = self._target_sessions.get(guild_id)
         if session and session.get('ended'):
@@ -707,7 +719,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         if guild is not None:
             for user_id in sorted(locked_ids):
                 try:
-                    await self._change_user_chips(guild.id, int(user_id), ALVO_STAKE, reason="Devolução do alvo")
+                    await self._refund_target_entry(guild.id, session, int(user_id))
                 except Exception:
                     pass
         lobby_message = session.get('lobby_message') or session.get('message')
@@ -861,7 +873,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         participants = self._get_target_participants(guild, session)
         if len(locked_ids) == 1:
             only_id = next(iter(locked_ids))
-            await self._change_user_chips(guild.id, only_id, ALVO_STAKE, reason="Devolução do alvo")
+            await self._refund_target_entry(guild.id, session, only_id)
             if lobby_message is not None:
                 try:
                     await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'A rodada precisa de pelo menos **2 participantes**\nA entrada foi devolvida'))
@@ -870,7 +882,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             return True
         if len(participants) < 2:
             for user_id in locked_ids:
-                await self._change_user_chips(guild.id, user_id, ALVO_STAKE, reason="Devolução do alvo")
+                await self._refund_target_entry(guild.id, session, user_id)
             if lobby_message is not None:
                 try:
                     await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Não restaram participantes suficientes\nTodas as entradas foram devolvidas'))
@@ -972,14 +984,23 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         for member in participants:
             if int(rewards.get(member.id, 0) or 0) > 0:
                 continue
-            refund = await self._maybe_apply_coringa_lobby_refund(guild.id, member.id, ALVO_STAKE)
+            refund, refund_mode = await self._maybe_apply_coringa_loss_refund(
+                guild.id,
+                member.id,
+                ALVO_STAKE,
+                chance=0.35,
+            )
             if refund <= 0:
                 continue
             refund_note = self._race_effect_message(
                 guild.id,
                 member.id,
-                'as',
-                f"recuperou {self._chip_text(refund, kind='gain')} da entrada",
+                'joker' if refund_mode == 'joker' else 'as',
+                (
+                    f"recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada"
+                    if refund_mode == 'joker'
+                    else f"recuperou {self._chip_text(refund, kind='gain')} da entrada"
+                ),
             )
             await self._route_lobby_race_notices(
                 (session.get('race_interactions') or {}).get(member.id),
@@ -1109,7 +1130,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             panel_message = await message.channel.send(view=view)
         except Exception:
             self._target_sessions.pop(guild.id, None)
-            await self._change_user_chips(guild.id, message.author.id, ALVO_STAKE, reason="Devolução do alvo")
+            await self._refund_target_entry(guild.id, session, message.author.id)
             return True
         session['lobby_message'] = panel_message
         session['message'] = panel_message

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from typing import Any, Dict, Optional
 
 import time
+import uuid
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -1877,23 +1878,54 @@ SettingsDB.get_chip_leaderboard = _settingsdb_get_chip_leaderboard
 CHIP_HISTORY_MAX_ENTRIES = 25
 
 
-async def _settingsdb_append_chip_history(self, guild_id: int, user_id: int, *, delta: int, kind: str, reason: str | None = None, ts: float | None = None):
+async def _settingsdb_append_chip_history(
+    self,
+    guild_id: int,
+    user_id: int,
+    *,
+    delta: int,
+    kind: str,
+    reason: str | None = None,
+    ts: float | None = None,
+    entry_id: str | None = None,
+    event_type: str | None = None,
+    event_id: str | None = None,
+    other_user_id: int | None = None,
+    skill_eligible: bool | None = None,
+    normal_delta: int | None = None,
+    bonus_delta: int | None = None,
+):
     delta_int = int(delta)
     if delta_int == 0:
         return
     doc = self._get_user_doc(guild_id, user_id)
     kind_key = str(kind or "chips").strip().lower()
     history = list(doc.get("chip_history", []) or [])
-    history.append({
+    entry = {
+        "entry_id": str(entry_id or uuid.uuid4().hex),
         "ts": float(ts) if ts is not None else time.time(),
         "delta": delta_int,
         "kind": kind_key,
         "reason": (str(reason).strip() if reason else "")[:80],
-    })
+    }
+    if event_type:
+        entry["event_type"] = str(event_type).strip().lower()[:40]
+    if event_id:
+        entry["event_id"] = str(event_id).strip()[:80]
+    if other_user_id is not None:
+        entry["other_user_id"] = int(other_user_id)
+    if skill_eligible is not None:
+        entry["skill_eligible"] = bool(skill_eligible)
+    if normal_delta is not None:
+        entry["normal_delta"] = int(normal_delta)
+    if bonus_delta is not None:
+        entry["bonus_delta"] = int(bonus_delta)
+    history.append(entry)
     if len(history) > CHIP_HISTORY_MAX_ENTRIES:
         history = history[-CHIP_HISTORY_MAX_ENTRIES:]
     doc["chip_history"] = history
-    if kind_key == "chips":
+    weekly_delta = delta_int if kind_key == "chips" else int(normal_delta or 0)
+    if weekly_delta != 0:
         week_key = self._current_week_key()
         if str(doc.get("chip_week_key", "") or "") != week_key:
             doc["chip_week_key"] = week_key
@@ -1902,7 +1934,7 @@ async def _settingsdb_append_chip_history(self, guild_id: int, user_id: int, *, 
             current_week_delta = int(doc.get("chip_week_delta", 0) or 0)
         except (TypeError, ValueError):
             current_week_delta = 0
-        doc["chip_week_delta"] = current_week_delta + delta_int
+        doc["chip_week_delta"] = current_week_delta + weekly_delta
     await self._save_user_doc(guild_id, user_id, doc)
 
 

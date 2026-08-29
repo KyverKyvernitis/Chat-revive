@@ -4,6 +4,7 @@ import asyncio
 import io
 import random
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -49,6 +50,13 @@ SORTUDO_STREAK_EXTRA_BONUS = 5
 RANK_PREVIOUS_EMOJI = "<a:k0_SetaE:1542282885153816596>"
 RANK_NEXT_EMOJI = "<a:k0_SetaD:1542282957966802986>"
 RANK_PAGINATION_TIMEOUT_SECONDS = 10 * 60
+RACE_SKILL_REBORN_COOLDOWN_SECONDS = 6 * 60 * 60
+RACE_SKILL_COINFLIP_BONUS = 50
+RACE_SKILL_COINFLIP_SECONDS = 10
+RACE_SKILL_JACKPOT_BONUS = 20
+RACE_SKILL_JOKER_SECONDS = 60
+RACE_SKILL_JOKER_REFUND_CAP = 50
+RACE_SKILL_0TO1_LIMIT = 50
 
 
 class _NegativeDebtConfirmView(discord.ui.LayoutView):
@@ -260,6 +268,12 @@ class GincanaBase:
         "race_robbery_uses",
         "race_mendigar_window_started_at",
         "race_mendigar_uses",
+        "race_skill_coinflip_temp_bonus",
+        "race_skill_coinflip_temp_expires_at",
+        "race_skill_coinflip_jackpot_bonus",
+        "race_skill_coinflip_jackpot_expires_at",
+        "race_skill_changefate_golden_until",
+        "race_skill_joker_until",
         "race_state",
     )
     _ACHIEVEMENT_THUMBNAIL_FILENAME = "achievement-unlocked.gif"
@@ -296,6 +310,7 @@ class GincanaBase:
         self._race_panel_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._race_rerolls_in_progress: set[tuple[int, int]] = set()
         self._race_reroll_confirmation_versions: dict[tuple[int, int], int] = {}
+        self._changefate_golden_reservations: dict[tuple[int, int], str] = {}
         self._achievement_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._achievement_notice_groups: dict[tuple[int, int, int], AchievementNoticeBurst] = {}
         self._achievement_notice_cleanup_task: asyncio.Task | None = None
@@ -664,7 +679,29 @@ class GincanaBase:
         except Exception:
             return 0
 
-    async def _change_user_bonus_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True, reason: str | None = None) -> int:
+    def _coinflip_temp_bonus_available(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        now: float | None = None,
+    ) -> int:
+        doc = self.db._get_user_doc(guild_id, user_id)
+        expires_at = float(doc.get("race_skill_coinflip_temp_expires_at", 0.0) or 0.0)
+        if expires_at <= float(time.time() if now is None else now):
+            return 0
+        return max(0, int(doc.get("race_skill_coinflip_temp_bonus", 0) or 0))
+
+    async def _change_user_bonus_chips(
+        self,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+        *,
+        mark_activity: bool = True,
+        reason: str | None = None,
+        history_metadata: dict | None = None,
+    ) -> int:
         requested_delta = int(amount)
         async with self._chip_economy_lock(guild_id, user_id):
             old_bonus = self._get_user_bonus_chips(guild_id, user_id)
@@ -674,12 +711,28 @@ class GincanaBase:
             if mark_activity:
                 await self._mark_chip_activity(guild_id, user_id)
             try:
-                await self.db.append_chip_history(guild_id, user_id, delta=actual_delta, kind="bonus", reason=reason)
+                await self.db.append_chip_history(
+                    guild_id,
+                    user_id,
+                    delta=actual_delta,
+                    kind="bonus",
+                    reason=reason,
+                    **dict(history_metadata or {}),
+                )
             except Exception:
                 pass
         return int(new_bonus)
 
-    async def _change_user_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True, reason: str | None = None) -> int:
+    async def _change_user_chips(
+        self,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+        *,
+        mark_activity: bool = True,
+        reason: str | None = None,
+        history_metadata: dict | None = None,
+    ) -> int:
         requested_delta = int(amount)
         async with self._chip_economy_lock(guild_id, user_id):
             old_balance = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
@@ -693,9 +746,23 @@ class GincanaBase:
                 await self._mark_chip_activity(guild_id, user_id)
             try:
                 if normal_delta != 0:
-                    await self.db.append_chip_history(guild_id, user_id, delta=normal_delta, kind="chips", reason=reason)
+                    await self.db.append_chip_history(
+                        guild_id,
+                        user_id,
+                        delta=normal_delta,
+                        kind="chips",
+                        reason=reason,
+                        **dict(history_metadata or {}),
+                    )
                 if bonus_delta != 0:
-                    await self.db.append_chip_history(guild_id, user_id, delta=bonus_delta, kind="bonus", reason=reason)
+                    await self.db.append_chip_history(
+                        guild_id,
+                        user_id,
+                        delta=bonus_delta,
+                        kind="bonus",
+                        reason=reason,
+                        **dict(history_metadata or {}),
+                    )
             except Exception:
                 pass
         return int(new_balance)
@@ -1750,6 +1817,21 @@ class GincanaBase:
             self._chip_economy_locks[key] = lock
         return lock
 
+    @asynccontextmanager
+    async def _ordered_chip_economy_locks(self, guild_id: int, *user_ids: int):
+        """Adquire locks de múltiplas carteiras sempre na mesma ordem."""
+        locks = [
+            self._chip_economy_lock(guild_id, user_id)
+            for user_id in sorted({int(value) for value in user_ids})
+        ]
+        for lock in locks:
+            await lock.acquire()
+        try:
+            yield
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+
     def _negative_debt_gate_lock(self, guild_id: int, user_id: int) -> asyncio.Lock:
         key = (int(guild_id), int(user_id))
         lock = self._negative_debt_gate_locks.get(key)
@@ -1988,12 +2070,15 @@ class GincanaBase:
     def _format_primary_chip_balance(self, guild_id: int, user_id: int) -> str:
         chips = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         bonus = self._get_user_bonus_chips(guild_id, user_id)
+        temporary_bonus = self._coinflip_temp_bonus_available(guild_id, user_id)
         if chips < 0:
             primary = f"**{chips}** {self._CHIP_LOSS_EMOJI}"
         else:
             primary = f"**{chips}** {self._CHIP_EMOJI}"
-        if bonus > 0:
-            primary += f" • **{bonus}** {self._CHIP_BONUS_EMOJI}"
+        if bonus + temporary_bonus > 0:
+            primary += f" • **{bonus + temporary_bonus}** {self._CHIP_BONUS_EMOJI}"
+        if temporary_bonus > 0:
+            primary += f" _({temporary_bonus} temporárias)_"
         return primary
 
     def _format_compact_chip_balance(self, guild_id: int, user_id: int) -> str:
@@ -2001,9 +2086,18 @@ class GincanaBase:
 
     def _chip_spend_breakdown_text(self, guild_id: int, user_id: int, amount: int) -> str:
         spend = max(0, int(amount))
+        temporary = self._coinflip_temp_bonus_available(guild_id, user_id)
         bonus = self._get_user_bonus_chips(guild_id, user_id)
-        use_bonus = min(bonus, spend)
-        use_normal = spend - use_bonus
+        use_temporary = min(temporary, spend)
+        use_bonus = min(bonus, spend - use_temporary)
+        use_normal = spend - use_temporary - use_bonus
+        if use_temporary > 0:
+            parts = [f"{self._bonus_chip_amount(use_temporary)} temporárias"]
+            if use_bonus > 0:
+                parts.append(self._bonus_chip_amount(use_bonus))
+            if use_normal > 0:
+                parts.append(self._chip_amount(use_normal))
+            return f"Você entrou usando {' e '.join(parts)}"
         if use_bonus > 0 and use_normal > 0:
             return f"Você entrou usando {self._bonus_chip_amount(use_bonus)} e {self._chip_amount(use_normal)}"
         if use_bonus > 0:
@@ -2021,8 +2115,9 @@ class GincanaBase:
         chips = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         bonus = self._get_user_bonus_chips(guild_id, user_id)
         spend = max(0, int(amount))
-        use_bonus = min(bonus, spend)
-        remaining = spend - use_bonus
+        use_temporary = min(self._coinflip_temp_bonus_available(guild_id, user_id), spend)
+        use_bonus = min(bonus, spend - use_temporary)
+        remaining = spend - use_temporary - use_bonus
         return chips - remaining, bonus - use_bonus
 
     def _user_has_played_any_game(self, guild_id: int, user_id: int) -> bool:
@@ -2046,6 +2141,7 @@ class GincanaBase:
                 "name": "Preto",
                 "emoji": "🥷🏿",
                 "effects": [
+                    {"key": "forcerob", "emoji": "🥷🏿", "title": "Forcerob", "desc": f"Use **_forcerob @usuário** uma vez por dia para garantir um roubo de até **20 fichas**, priorizando {self._CHIP_BONUS_EMOJI}"},
                     {"key": "mao_negra", "emoji": "🖐🏿", "title": "Mão Negra", "desc": "Você pode roubar **2 vezes** a cada **4h**"},
                     {"key": "labia", "emoji": "🗣️", "title": "Lábia", "desc": "Você pode pedir esmola **2 vezes** a cada **3h**"},
                     {"key": "sangue_frio", "emoji": "🧊", "title": "Sangue Frio", "desc": f"Quando um roubo dá errado, você perde apenas **5** {self._CHIP_LOSS_EMOJI}"},
@@ -2056,6 +2152,7 @@ class GincanaBase:
                 "name": "Apostador",
                 "emoji": "🎰",
                 "effects": [
+                    {"key": "coinflip", "emoji": "🪙", "title": "Coinflip", "desc": f"Use **_coinflip** uma vez por dia: ganhe **50** {self._CHIP_BONUS_EMOJI} por **10s** ou arme **+20** {self._CHIP_BONUS_EMOJI} no próximo jackpot"},
                     {"key": "jackpot", "emoji": "🎰", "title": "Jackpot 999", "desc": f"Na Roleta, você tem **{self._format_percent_text(0.15)} de chance** de acertar **999** e ganhar **100** {self._CHIP_GAIN_EMOJI}"},
                     {"key": "all_in", "emoji": "🎲", "title": "All-in 777", "desc": f"Há **{self._format_percent_text(0.05)} de chance** de acertar **777** e ganhar **200** {self._CHIP_GAIN_EMOJI}"},
                     {"key": "666", "emoji": "😈", "title": "Marca da Besta", "desc": f"Quando o jackpot não vem, há **{self._format_percent_text(0.25)} de chance** de cair **666** e ganhar **{ROLETA_APOSTADOR_COST}** {self._CHIP_GAIN_EMOJI}"},
@@ -2066,7 +2163,8 @@ class GincanaBase:
                 "name": "Sortudo",
                 "emoji": "🍀",
                 "effects": [
-                    {"key": "midas", "emoji": "✨", "title": "Midas", "desc": f"Ao abrir um Buckshot ou Truco, a partida tem **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} de chance** de começar dourada"},
+                    {"key": "changefate", "emoji": "🍀", "title": "Change Fate", "desc": "Use **_changefate** uma vez por dia para recuperar um roubo comum recente e punir o ladrão; sem roubo pendente, prepara Midas"},
+                    {"key": "midas", "emoji": self._EFFECT_EMOJI, "title": "Midas", "desc": f"Ao abrir um Buckshot ou Truco, a partida tem **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} de chance** de começar dourada; Change Fate garante a próxima válida"},
                     {"key": "premio_extra", "emoji": "🎁", "title": "Prêmio Extra", "desc": f"Seu Daily rende **+5** {self._CHIP_BONUS_EMOJI}\nQuando a ofensiva aumenta o prêmio, você recebe **mais 5** {self._CHIP_BONUS_EMOJI}"},
                     {"key": "bencao", "emoji": "🙏", "title": "Bênção", "desc": "A cada **7h**, você recebe uma jogada grátis\nPode guardar até **2** e usar na Roleta ou em Cartas"},
                     {"key": "wind_boost", "emoji": "🍃", "title": "Wind Boost", "desc": "Na Corrida, cada botão acertado tem **14% de chance** de gerar um impulso, em vez de **9%**"},
@@ -2076,6 +2174,7 @@ class GincanaBase:
                 "name": "Coringa",
                 "emoji": "🃏",
                 "effects": [
+                    {"key": "joker", "emoji": "🃏", "title": "Joker", "desc": f"Use **_joker** uma vez por dia: por **1 minuto**, a próxima derrota paga devolve até **50** {self._CHIP_BONUS_EMOJI}"},
                     {"key": "as", "emoji": "🂡", "title": "Ás", "desc": f"Ao perder um jogo com lobby, você tem **{self._format_percent_text(0.35)} de chance** de recuperar metade da entrada"},
                     {"key": "trapaceiro", "emoji": "🎭", "title": "Trapaceiro", "desc": f"Quando um roubo dá errado, há **{self._format_percent_text(0.25)} de chance** de você não perder nenhuma ficha"},
                     {"key": "redencao", "emoji": "🃏", "title": "Redenção", "desc": f"Ao perder na Roleta ou em Cartas, você tem **{self._format_percent_text(0.5)} de chance** de recuperar metade do custo"},
@@ -2085,6 +2184,7 @@ class GincanaBase:
                 "name": "Fênix",
                 "emoji": "🐦‍🔥",
                 "effects": [
+                    {"key": "reborn_skill", "emoji": "🐦‍🔥", "title": "Reborn", "desc": f"Use **_reborn** durante o dia para alternar todo o saldo entre {self._CHIP_EMOJI} e {self._CHIP_BONUS_EMOJI}; cooldown de **6h**"},
                     {"key": "sunrise", "emoji": "🔥", "title": "Sunrise", "desc": "Durante o dia, suas duas primeiras derrotas pagas geram Brasas\nVocê pode guardar até **2**"},
                     {"key": "rebirth", "emoji": "❤️‍🔥", "title": "Rebirth", "desc": f"Vença com Brasas guardadas para receber fichas bônus: **1 Brasa** rende **30** {self._CHIP_BONUS_EMOJI}; **2 Brasas** rendem **40** {self._CHIP_BONUS_EMOJI}"},
                     {"key": "second_dawn", "emoji": "🐦‍🔥", "title": "Second Dawn", "desc": f"Uma vez por dia, se uma derrota deixar seu saldo abaixo de **30**, você recebe **30** {self._CHIP_BONUS_EMOJI}"},
@@ -2094,6 +2194,7 @@ class GincanaBase:
                 "name": "Glitch",
                 "emoji": "👁️⃤",
                 "effects": [
+                    {"key": "0to1", "emoji": "👁️⃤", "title": "0to1", "desc": "Use **_0to1** para inverter a movimentação negativa ou bônus mais recente do extrato, com limite de **50 fichas**"},
                     {"key": "desync", "emoji": "<a:eyeglitch:1531116300645175436>", "title": "Desync", "desc": "A cada partida paga, o sistema fica mais instável\nNa terceira, o estado **ERROR** é ativado"},
                     {"key": "overflow", "emoji": "✴️", "title": "Overload", "desc": f"Vença durante o **ERROR** para receber entre **30 e 45** {self._CHIP_BONUS_EMOJI}"},
                     {"key": "rollback", "emoji": "👁️⃤", "title": "Rollback", "desc": "Perca durante o **ERROR** para recuperar **75% da entrada**, com limite de **20 fichas**"},
@@ -2178,6 +2279,7 @@ class GincanaBase:
             "666": f"você acertou **666** e recebeu **{ROLETA_APOSTADOR_COST}** {self._CHIP_GAIN_EMOJI}",
             "midas": "a versão dourada foi ativada",
             "premio_extra": f"seu Daily rendeu fichas bônus extras",
+            "joker": f"a derrota devolveu a entrada em fichas bônus",
             "as": "você recuperou metade da entrada",
             "redencao": "você recuperou metade do custo",
             "sunrise": "Brasa armazenada",
@@ -2310,6 +2412,7 @@ class GincanaBase:
             unset_fields.extend(("race_key", "race_active"))
         if reset_state:
             self._race_private_notices.pop((int(guild_id), int(user_id)), None)
+            self._changefate_golden_reservations.pop((int(guild_id), int(user_id)), None)
             self._reset_race_runtime_doc(doc, key)
             unset_fields.extend(self._RACE_RUNTIME_FIELDS)
         await self.db._save_user_doc(
@@ -2363,6 +2466,7 @@ class GincanaBase:
                 doc["race_active"] = True
                 self._reset_race_runtime_doc(doc, chosen)
                 self._race_private_notices.pop((guild_id, user_id), None)
+                self._changefate_golden_reservations.pop((guild_id, user_id), None)
                 try:
                     await self.db._save_user_doc(
                         guild_id,
@@ -2398,6 +2502,785 @@ class GincanaBase:
             lock = asyncio.Lock()
             self._race_progress_locks[key] = lock
         return lock
+
+    def _race_skill_daily_key(self) -> str:
+        return self._race_now().date().isoformat()
+
+    def _race_skill_daily_used(self, doc: dict, skill_key: str) -> bool:
+        uses = dict(doc.get("race_skill_daily_last_use") or {})
+        return str(uses.get(str(skill_key), "") or "") == self._race_skill_daily_key()
+
+    def _mark_race_skill_daily_used(self, doc: dict, skill_key: str) -> None:
+        uses = dict(doc.get("race_skill_daily_last_use") or {})
+        uses[str(skill_key)] = self._race_skill_daily_key()
+        doc["race_skill_daily_last_use"] = uses
+
+    def _race_skill_daily_wait_text(self) -> str:
+        return self._format_daily_reset_remaining(self._daily_reset_remaining_seconds())
+
+    async def _activate_coinflip_skill(self, guild_id: int, user_id: int) -> dict[str, object]:
+        guild_id, user_id = int(guild_id), int(user_id)
+        async with self._race_progress_lock(guild_id, user_id):
+            async with self._chip_economy_lock(guild_id, user_id):
+                doc = self.db._get_user_doc(guild_id, user_id)
+                if not self._race_is(guild_id, user_id, "apostador"):
+                    return {"ok": False, "code": "race"}
+                if self._race_skill_daily_used(doc, "coinflip"):
+                    return {"ok": False, "code": "cooldown"}
+                now = float(time.time())
+                result = random.choice(("cara", "coroa"))
+                self._mark_race_skill_daily_used(doc, "coinflip")
+                if result == "coroa":
+                    doc["race_skill_coinflip_temp_bonus"] = RACE_SKILL_COINFLIP_BONUS
+                    doc["race_skill_coinflip_temp_expires_at"] = now + RACE_SKILL_COINFLIP_SECONDS
+                    doc.pop("race_skill_coinflip_jackpot_bonus", None)
+                    doc.pop("race_skill_coinflip_jackpot_expires_at", None)
+                else:
+                    doc["race_skill_coinflip_jackpot_bonus"] = RACE_SKILL_JACKPOT_BONUS
+                    doc["race_skill_coinflip_jackpot_expires_at"] = now + self._daily_reset_remaining_seconds()
+                    doc.pop("race_skill_coinflip_temp_bonus", None)
+                    doc.pop("race_skill_coinflip_temp_expires_at", None)
+                await self.db._save_user_doc(
+                    guild_id,
+                    user_id,
+                    doc,
+                    unset_fields=(
+                        "race_skill_coinflip_temp_bonus",
+                        "race_skill_coinflip_temp_expires_at",
+                        "race_skill_coinflip_jackpot_bonus",
+                        "race_skill_coinflip_jackpot_expires_at",
+                    ),
+                )
+                return {"ok": True, "result": result}
+
+    async def _activate_joker_skill(self, guild_id: int, user_id: int) -> dict[str, object]:
+        guild_id, user_id = int(guild_id), int(user_id)
+        async with self._race_progress_lock(guild_id, user_id):
+            async with self._chip_economy_lock(guild_id, user_id):
+                doc = self.db._get_user_doc(guild_id, user_id)
+                if not self._race_is(guild_id, user_id, "coringa"):
+                    return {"ok": False, "code": "race"}
+                if self._race_skill_daily_used(doc, "joker"):
+                    return {"ok": False, "code": "cooldown"}
+                self._mark_race_skill_daily_used(doc, "joker")
+                doc["race_skill_joker_until"] = float(time.time()) + RACE_SKILL_JOKER_SECONDS
+                await self.db._save_user_doc(guild_id, user_id, doc)
+                return {"ok": True, "expires_in": RACE_SKILL_JOKER_SECONDS}
+
+    def _changefate_golden_is_armed(self, guild_id: int, user_id: int) -> bool:
+        if not self._race_is(guild_id, user_id, "sortudo"):
+            return False
+        if (int(guild_id), int(user_id)) in self._changefate_golden_reservations:
+            return False
+        doc = self.db._get_user_doc(guild_id, user_id)
+        return float(doc.get("race_skill_changefate_golden_until", 0.0) or 0.0) > time.time()
+
+    async def _reserve_changefate_golden(
+        self,
+        guild_id: int,
+        user_id: int,
+        reservation_token: str,
+    ) -> bool:
+        guild_id, user_id = int(guild_id), int(user_id)
+        key = (guild_id, user_id)
+        token = str(reservation_token or "").strip()
+        if not token:
+            return False
+        async with self._race_progress_lock(guild_id, user_id):
+            if key in self._changefate_golden_reservations:
+                return False
+            doc = self.db._get_user_doc(guild_id, user_id)
+            if (
+                not self._race_is(guild_id, user_id, "sortudo")
+                or float(doc.get("race_skill_changefate_golden_until", 0.0) or 0.0) <= time.time()
+            ):
+                return False
+            self._changefate_golden_reservations[key] = token
+            return True
+
+    def _release_changefate_golden_reservation(
+        self,
+        guild_id: int,
+        user_id: int,
+        reservation_token: str,
+    ) -> None:
+        key = (int(guild_id), int(user_id))
+        if self._changefate_golden_reservations.get(key) == str(reservation_token or ""):
+            self._changefate_golden_reservations.pop(key, None)
+
+    async def _consume_changefate_golden(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        reservation_token: str | None = None,
+    ) -> bool:
+        guild_id, user_id = int(guild_id), int(user_id)
+        key = (guild_id, user_id)
+        expected_token = str(reservation_token or "").strip()
+        async with self._race_progress_lock(guild_id, user_id):
+            async with self._chip_economy_lock(guild_id, user_id):
+                doc = self.db._get_user_doc(guild_id, user_id)
+                reserved_token = self._changefate_golden_reservations.get(key, "")
+                if expected_token and reserved_token != expected_token:
+                    return False
+                if not expected_token and reserved_token:
+                    return False
+                if (
+                    not self._race_is(guild_id, user_id, "sortudo")
+                    or float(doc.get("race_skill_changefate_golden_until", 0.0) or 0.0) <= time.time()
+                ):
+                    if expected_token and reserved_token == expected_token:
+                        self._changefate_golden_reservations.pop(key, None)
+                    return False
+                doc.pop("race_skill_changefate_golden_until", None)
+                self._changefate_golden_reservations.pop(key, None)
+                await self.db._save_user_doc(
+                    guild_id,
+                    user_id,
+                    doc,
+                    unset_fields=("race_skill_changefate_golden_until",),
+                )
+                return True
+
+    async def _restore_changefate_golden(self, guild_id: int, user_id: int) -> bool:
+        """Restaura a garantia quando uma rodada falha antes de começar."""
+        guild_id, user_id = int(guild_id), int(user_id)
+        async with self._race_progress_lock(guild_id, user_id):
+            async with self._chip_economy_lock(guild_id, user_id):
+                doc = self.db._get_user_doc(guild_id, user_id)
+                if not self._race_is(guild_id, user_id, "sortudo"):
+                    return False
+                self._changefate_golden_reservations.pop((guild_id, user_id), None)
+                doc["race_skill_changefate_golden_until"] = float(time.time()) + self._daily_reset_remaining_seconds()
+                await self.db._save_user_doc(guild_id, user_id, doc)
+                return True
+
+    async def _claim_coinflip_jackpot_bonus(self, guild_id: int, user_id: int) -> int:
+        guild_id, user_id = int(guild_id), int(user_id)
+        awarded = 0
+        async with self._race_progress_lock(guild_id, user_id):
+            async with self._chip_economy_lock(guild_id, user_id):
+                doc = self.db._get_user_doc(guild_id, user_id)
+                if (
+                    self._race_is(guild_id, user_id, "apostador")
+                    and float(doc.get("race_skill_coinflip_jackpot_expires_at", 0.0) or 0.0) > time.time()
+                ):
+                    awarded = max(0, int(doc.get("race_skill_coinflip_jackpot_bonus", 0) or 0))
+                doc.pop("race_skill_coinflip_jackpot_bonus", None)
+                doc.pop("race_skill_coinflip_jackpot_expires_at", None)
+                if awarded > 0:
+                    doc["bonus_chips"] = max(0, int(doc.get("bonus_chips", 0) or 0)) + awarded
+                    doc["has_chip_activity"] = True
+                await self.db._save_user_doc(
+                    guild_id,
+                    user_id,
+                    doc,
+                    unset_fields=(
+                        "race_skill_coinflip_jackpot_bonus",
+                        "race_skill_coinflip_jackpot_expires_at",
+                    ),
+                )
+        if awarded > 0:
+            try:
+                await self.db.append_chip_history(
+                    guild_id,
+                    user_id,
+                    delta=awarded,
+                    kind="bonus",
+                    reason="Bônus do Coinflip no jackpot",
+                    event_type="race_skill",
+                    skill_eligible=False,
+                )
+            except Exception:
+                pass
+        return awarded
+
+    def _reborn_skill_preview(self, guild_id: int, user_id: int) -> dict[str, object]:
+        doc = self.db._get_user_doc(guild_id, user_id)
+        mode = str(doc.get("race_skill_reborn_next_mode", "normal_to_bonus") or "normal_to_bonus")
+        if mode not in {"normal_to_bonus", "bonus_to_normal"}:
+            mode = "normal_to_bonus"
+        used_at = float(doc.get("race_skill_reborn_used_at", 0.0) or 0.0)
+        remaining = max(0.0, used_at + RACE_SKILL_REBORN_COOLDOWN_SECONDS - time.time())
+        amount = (
+            max(0, int(doc.get("bonus_chips", 0) or 0))
+            if mode == "bonus_to_normal"
+            else max(0, int(doc.get("chips", CHIPS_INITIAL) or 0))
+        )
+        period, _period_key = self._race_period_info()
+        return {
+            "mode": mode,
+            "amount": amount,
+            "remaining": remaining,
+            "daytime": period == "day",
+        }
+
+    async def _execute_reborn_skill(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_mode: str,
+        expected_amount: int,
+    ) -> dict[str, object]:
+        guild_id, user_id = int(guild_id), int(user_id)
+        history: list[tuple[int, str]] = []
+        async with self._race_progress_lock(guild_id, user_id):
+            async with self._chip_economy_lock(guild_id, user_id):
+                doc = self.db._get_user_doc(guild_id, user_id)
+                if not self._race_is(guild_id, user_id, "fenix"):
+                    return {"ok": False, "code": "race"}
+                period, _period_key = self._race_period_info()
+                if period != "day":
+                    return {"ok": False, "code": "night"}
+                used_at = float(doc.get("race_skill_reborn_used_at", 0.0) or 0.0)
+                remaining = max(0.0, used_at + RACE_SKILL_REBORN_COOLDOWN_SECONDS - time.time())
+                if remaining > 0:
+                    return {"ok": False, "code": "cooldown", "remaining": remaining}
+                mode = str(doc.get("race_skill_reborn_next_mode", "normal_to_bonus") or "normal_to_bonus")
+                if mode not in {"normal_to_bonus", "bonus_to_normal"}:
+                    mode = "normal_to_bonus"
+                amount = (
+                    max(0, int(doc.get("bonus_chips", 0) or 0))
+                    if mode == "bonus_to_normal"
+                    else max(0, int(doc.get("chips", CHIPS_INITIAL) or 0))
+                )
+                if mode != str(expected_mode) or amount != max(0, int(expected_amount)):
+                    return {"ok": False, "code": "changed", "mode": mode, "amount": amount}
+                if amount <= 0:
+                    return {"ok": False, "code": "empty", "mode": mode}
+                if mode == "normal_to_bonus":
+                    doc["chips"] = int(doc.get("chips", CHIPS_INITIAL) or 0) - amount
+                    doc["bonus_chips"] = max(0, int(doc.get("bonus_chips", 0) or 0)) + amount
+                    doc["race_skill_reborn_next_mode"] = "bonus_to_normal"
+                    history = [(-amount, "chips"), (amount, "bonus")]
+                else:
+                    doc["bonus_chips"] = max(0, int(doc.get("bonus_chips", 0) or 0)) - amount
+                    doc["chips"] = int(doc.get("chips", CHIPS_INITIAL) or 0) + amount
+                    doc["race_skill_reborn_next_mode"] = "normal_to_bonus"
+                    history = [(-amount, "bonus"), (amount, "chips")]
+                doc["race_skill_reborn_used_at"] = float(time.time())
+                doc["has_chip_activity"] = True
+                await self.db._save_user_doc(guild_id, user_id, doc)
+
+        for delta, kind in history:
+            try:
+                await self.db.append_chip_history(
+                    guild_id,
+                    user_id,
+                    delta=delta,
+                    kind=kind,
+                    reason="Conversão do Reborn",
+                    event_type="race_skill",
+                    skill_eligible=False,
+                )
+            except Exception:
+                pass
+        return {"ok": True, "mode": expected_mode, "amount": max(0, int(expected_amount))}
+
+    async def _execute_ordinary_robbery_transfer(
+        self,
+        guild_id: int,
+        thief_id: int,
+        victim_id: int,
+        amount: int,
+        *,
+        thief_name: str,
+        victim_name: str,
+    ) -> dict[str, object]:
+        """Move um roubo comum e cria o vínculo usado pelo Change Fate/0to1."""
+        guild_id, thief_id, victim_id = int(guild_id), int(thief_id), int(victim_id)
+        amount = max(0, int(amount))
+        if amount <= 0 or thief_id == victim_id:
+            return {"ok": False}
+        event_id = f"robbery:{time.time_ns()}"
+        event_ts = float(time.time())
+        normal_taken = bonus_taken = 0
+        async with self._ordered_chip_economy_locks(guild_id, thief_id, victim_id):
+            old_thief = self.db._get_user_doc(guild_id, thief_id)
+            old_victim = self.db._get_user_doc(guild_id, victim_id)
+            thief_doc = dict(old_thief)
+            victim_doc = dict(old_victim)
+            victim_bonus = max(0, int(victim_doc.get("bonus_chips", 0) or 0))
+            victim_normal = int(victim_doc.get("chips", CHIPS_INITIAL) or 0)
+            bonus_taken = min(victim_bonus, amount)
+            normal_taken = amount - bonus_taken
+            if normal_taken > max(0, victim_normal):
+                return {"ok": False}
+
+            victim_doc["bonus_chips"] = victim_bonus - bonus_taken
+            victim_doc["chips"] = victim_normal - normal_taken
+            victim_doc["has_chip_activity"] = True
+            thief_doc["chips"] = int(thief_doc.get("chips", CHIPS_INITIAL) or 0) + amount
+            thief_doc["has_chip_activity"] = True
+            robberies = list(victim_doc.get("race_ordinary_robberies", []) or [])
+            robberies.append(
+                {
+                    "event_id": event_id,
+                    "ts": event_ts,
+                    "thief_id": thief_id,
+                    "amount": amount,
+                    "normal": normal_taken,
+                    "bonus": bonus_taken,
+                    "resolved": False,
+                }
+            )
+            victim_doc["race_ordinary_robberies"] = robberies[-10:]
+            try:
+                await self.db._save_user_doc(guild_id, victim_id, victim_doc)
+                await self.db._save_user_doc(guild_id, thief_id, thief_doc)
+            except Exception:
+                try:
+                    await self.db._save_user_doc(guild_id, victim_id, old_victim)
+                    await self.db._save_user_doc(guild_id, thief_id, old_thief)
+                except Exception:
+                    pass
+                raise
+
+        metadata_victim = {
+            "event_type": "ordinary_robbery",
+            "event_id": event_id,
+            "other_user_id": thief_id,
+            "skill_eligible": True,
+        }
+        metadata_thief = {
+            "event_type": "ordinary_robbery",
+            "event_id": event_id,
+            "other_user_id": victim_id,
+            "skill_eligible": True,
+        }
+        try:
+            await self.db.append_chip_history(
+                guild_id,
+                victim_id,
+                delta=-amount,
+                kind=(
+                    "bonus"
+                    if bonus_taken == amount
+                    else "chips"
+                    if normal_taken == amount
+                    else "mixed"
+                ),
+                reason=f"Roubado por {thief_name}",
+                ts=event_ts,
+                normal_delta=-normal_taken,
+                bonus_delta=-bonus_taken,
+                **metadata_victim,
+            )
+            await self.db.append_chip_history(
+                guild_id,
+                thief_id,
+                delta=amount,
+                kind="chips",
+                reason=f"Roubo bem-sucedido em {victim_name}",
+                ts=event_ts,
+                **metadata_thief,
+            )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "event_id": event_id,
+            "amount": amount,
+            "normal": normal_taken,
+            "bonus": bonus_taken,
+        }
+
+    @staticmethod
+    def _race_skill_0to1_entry(doc: dict) -> dict | None:
+        cutoff = float(doc.get("race_skill_0to1_cutoff_ts", 0.0) or 0.0)
+        resolved_robberies = {
+            str(event.get("event_id", "") or "")
+            for event in list(doc.get("race_ordinary_robberies", []) or [])
+            if bool(event.get("resolved", False))
+        }
+        blocked_types = {"admin", "reset", "race_skill", "forced_robbery"}
+        blocked_reason_parts = (
+            "reroll",
+            "reset",
+            "admin",
+            "0to1",
+            "reborn",
+            "coinflip",
+            "change fate",
+            "changefate",
+            "joker",
+            "roubo forçado",
+        )
+        history = list(doc.get("chip_history", []) or [])
+        for entry in reversed(history):
+            try:
+                ts = float(entry.get("ts", 0.0) or 0.0)
+                delta = int(entry.get("delta", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            kind = str(entry.get("kind", "chips") or "chips").strip().lower()
+            event_type = str(entry.get("event_type", "") or "").strip().lower()
+            reason = str(entry.get("reason", "") or "").strip().lower()
+            if ts <= cutoff or entry.get("skill_eligible") is False:
+                continue
+            if event_type in blocked_types or any(part in reason for part in blocked_reason_parts):
+                continue
+            if event_type == "ordinary_robbery" and str(entry.get("event_id", "") or "") in resolved_robberies:
+                continue
+            if delta < 0 or (kind == "bonus" and delta > 0):
+                return dict(entry)
+        return None
+
+    async def _execute_0to1_skill(self, guild_id: int, user_id: int) -> dict[str, object]:
+        guild_id, user_id = int(guild_id), int(user_id)
+        result: dict[str, object] = {"ok": False, "code": "empty"}
+        history_rows: list[tuple[int, int, str, str]] = []
+        async with self._race_progress_lock(guild_id, user_id):
+            initial_doc = self.db._get_user_doc(guild_id, user_id)
+            if not self._race_is(guild_id, user_id, "glitch"):
+                return {"ok": False, "code": "race"}
+            initial_entry = self._race_skill_0to1_entry(initial_doc)
+            if initial_entry is None:
+                return result
+            linked_user_id = 0
+            if (
+                str(initial_entry.get("event_type", "") or "") == "ordinary_robbery"
+                and int(initial_entry.get("delta", 0) or 0) < 0
+            ):
+                linked_user_id = int(initial_entry.get("other_user_id", 0) or 0)
+            lock_ids = (user_id, linked_user_id) if linked_user_id > 0 and linked_user_id != user_id else (user_id,)
+            async with self._ordered_chip_economy_locks(guild_id, *lock_ids):
+                old_user = self.db._get_user_doc(guild_id, user_id)
+                user_doc = dict(old_user)
+                entry = self._race_skill_0to1_entry(user_doc)
+                if entry is None:
+                    return result
+                delta = int(entry.get("delta", 0) or 0)
+                kind = str(entry.get("kind", "chips") or "chips").strip().lower()
+                source_amount = abs(delta) if delta < 0 else delta
+                amount = min(RACE_SKILL_0TO1_LIMIT, max(0, source_amount))
+                if delta > 0 and kind == "bonus":
+                    amount = min(amount, max(0, int(user_doc.get("bonus_chips", 0) or 0)))
+                user_doc["race_skill_0to1_cutoff_ts"] = float(entry.get("ts", time.time()) or time.time())
+                user_doc["race_skill_0to1_last_entry_id"] = str(entry.get("entry_id", "") or "")
+                if amount <= 0:
+                    await self.db._save_user_doc(guild_id, user_id, user_doc)
+                    return {"ok": False, "code": "empty_balance"}
+
+                if delta > 0 and kind == "bonus":
+                    user_doc["bonus_chips"] = max(0, int(user_doc.get("bonus_chips", 0) or 0)) - amount
+                    history_rows.append((user_id, -amount, "bonus", "Conversão do 0to1"))
+                user_doc["chips"] = int(user_doc.get("chips", CHIPS_INITIAL) or 0) + amount
+                user_doc["has_chip_activity"] = True
+                history_rows.append((user_id, amount, "chips", "Conversão do 0to1"))
+
+                if delta < 0 and str(entry.get("event_type", "") or "") == "ordinary_robbery":
+                    source_event_id = str(entry.get("event_id", "") or "")
+                    robberies = list(user_doc.get("race_ordinary_robberies", []) or [])
+                    for index, robbery in enumerate(robberies):
+                        if str(robbery.get("event_id", "") or "") != source_event_id:
+                            continue
+                        updated_robbery = dict(robbery)
+                        updated_robbery["resolved"] = True
+                        updated_robbery["resolved_at"] = float(time.time())
+                        updated_robbery["resolved_by"] = "0to1"
+                        robberies[index] = updated_robbery
+                        user_doc["race_ordinary_robberies"] = robberies
+                        break
+
+                linked_doc = None
+                old_linked = None
+                actual_linked_id = 0
+                if (
+                    delta < 0
+                    and str(entry.get("event_type", "") or "") == "ordinary_robbery"
+                ):
+                    candidate = int(entry.get("other_user_id", 0) or 0)
+                    if candidate in lock_ids and candidate != user_id:
+                        actual_linked_id = candidate
+                        old_linked = self.db._get_user_doc(guild_id, candidate)
+                        linked_doc = dict(old_linked)
+                        linked_doc["chips"] = int(linked_doc.get("chips", CHIPS_INITIAL) or 0) - amount
+                        linked_doc["has_chip_activity"] = True
+                        history_rows.append((candidate, -amount, "chips", "0to1 após roubo"))
+                try:
+                    await self.db._save_user_doc(guild_id, user_id, user_doc)
+                    if linked_doc is not None and actual_linked_id > 0:
+                        await self.db._save_user_doc(guild_id, actual_linked_id, linked_doc)
+                except Exception:
+                    try:
+                        await self.db._save_user_doc(guild_id, user_id, old_user)
+                        if old_linked is not None and actual_linked_id > 0:
+                            await self.db._save_user_doc(guild_id, actual_linked_id, old_linked)
+                    except Exception:
+                        pass
+                    raise
+                result = {
+                    "ok": True,
+                    "amount": amount,
+                    "source_delta": delta,
+                    "source_kind": kind,
+                    "linked_user_id": actual_linked_id,
+                }
+
+        for target_id, delta, kind, reason in history_rows:
+            try:
+                await self.db.append_chip_history(
+                    guild_id,
+                    target_id,
+                    delta=delta,
+                    kind=kind,
+                    reason=reason,
+                    event_type="race_skill",
+                    other_user_id=(user_id if target_id != user_id else None),
+                    skill_eligible=False,
+                )
+            except Exception:
+                pass
+        return result
+
+    @staticmethod
+    def _recent_unresolved_robbery(doc: dict, *, now: float, max_age: float = 24 * 60 * 60) -> dict | None:
+        for event in reversed(list(doc.get("race_ordinary_robberies", []) or [])):
+            try:
+                event_ts = float(event.get("ts", 0.0) or 0.0)
+                amount = int(event.get("amount", 0) or 0)
+                thief_id = int(event.get("thief_id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if (
+                not bool(event.get("resolved", False))
+                and amount > 0
+                and thief_id > 0
+                and 0.0 <= now - event_ts <= max_age
+            ):
+                return dict(event)
+        return None
+
+    async def _execute_changefate_skill(self, guild_id: int, user_id: int) -> dict[str, object]:
+        guild_id, user_id = int(guild_id), int(user_id)
+        now = float(time.time())
+        history_rows: list[tuple[int, int, str, str, int | None]] = []
+        result: dict[str, object]
+        async with self._race_progress_lock(guild_id, user_id):
+            initial_doc = self.db._get_user_doc(guild_id, user_id)
+            if not self._race_is(guild_id, user_id, "sortudo"):
+                return {"ok": False, "code": "race"}
+            if self._race_skill_daily_used(initial_doc, "changefate"):
+                return {"ok": False, "code": "cooldown"}
+            event = self._recent_unresolved_robbery(initial_doc, now=now)
+
+            if event is None:
+                async with self._chip_economy_lock(guild_id, user_id):
+                    doc = self.db._get_user_doc(guild_id, user_id)
+                    if not self._race_is(guild_id, user_id, "sortudo"):
+                        return {"ok": False, "code": "race"}
+                    if self._race_skill_daily_used(doc, "changefate"):
+                        return {"ok": False, "code": "cooldown"}
+                    self._mark_race_skill_daily_used(doc, "changefate")
+                    doc["race_skill_changefate_golden_until"] = now + self._daily_reset_remaining_seconds()
+                    await self.db._save_user_doc(guild_id, user_id, doc)
+                return {"ok": True, "mode": "golden"}
+
+            thief_id = int(event.get("thief_id", 0) or 0)
+            event_id = str(event.get("event_id", "") or "")
+            async with self._ordered_chip_economy_locks(guild_id, user_id, thief_id):
+                old_user = self.db._get_user_doc(guild_id, user_id)
+                old_thief = self.db._get_user_doc(guild_id, thief_id)
+                user_doc = dict(old_user)
+                thief_doc = dict(old_thief)
+                if not self._race_is(guild_id, user_id, "sortudo"):
+                    return {"ok": False, "code": "race"}
+                if self._race_skill_daily_used(user_doc, "changefate"):
+                    return {"ok": False, "code": "cooldown"}
+                robberies = list(user_doc.get("race_ordinary_robberies", []) or [])
+                event_index = next(
+                    (
+                        index
+                        for index, current in enumerate(robberies)
+                        if str(current.get("event_id", "") or "") == event_id
+                        and not bool(current.get("resolved", False))
+                    ),
+                    None,
+                )
+                if event_index is None:
+                    return {"ok": False, "code": "changed"}
+                current_event = dict(robberies[event_index])
+                amount = max(0, int(current_event.get("amount", 0) or 0))
+                normal_amount = max(0, int(current_event.get("normal", 0) or 0))
+                bonus_amount = max(0, int(current_event.get("bonus", 0) or 0))
+                if amount <= 0 or normal_amount + bonus_amount != amount:
+                    return {"ok": False, "code": "changed"}
+
+                user_doc["chips"] = int(user_doc.get("chips", CHIPS_INITIAL) or 0) + normal_amount
+                user_doc["bonus_chips"] = max(0, int(user_doc.get("bonus_chips", 0) or 0)) + bonus_amount
+                user_doc["has_chip_activity"] = True
+                thief_doc["chips"] = int(thief_doc.get("chips", CHIPS_INITIAL) or 0) - amount - 10
+                thief_doc["has_chip_activity"] = True
+                current_event["resolved"] = True
+                current_event["resolved_at"] = now
+                current_event["resolved_by"] = "changefate"
+                robberies[event_index] = current_event
+                user_doc["race_ordinary_robberies"] = robberies
+                user_doc["race_skill_0to1_cutoff_ts"] = max(
+                    float(user_doc.get("race_skill_0to1_cutoff_ts", 0.0) or 0.0),
+                    float(current_event.get("ts", 0.0) or 0.0),
+                )
+                self._mark_race_skill_daily_used(user_doc, "changefate")
+                try:
+                    await self.db._save_user_doc(guild_id, user_id, user_doc)
+                    await self.db._save_user_doc(guild_id, thief_id, thief_doc)
+                except Exception:
+                    try:
+                        await self.db._save_user_doc(guild_id, user_id, old_user)
+                        await self.db._save_user_doc(guild_id, thief_id, old_thief)
+                    except Exception:
+                        pass
+                    raise
+                if normal_amount > 0:
+                    history_rows.append((user_id, normal_amount, "chips", "Dinheiro recuperado pelo Change Fate", thief_id))
+                if bonus_amount > 0:
+                    history_rows.append((user_id, bonus_amount, "bonus", "Dinheiro recuperado pelo Change Fate", thief_id))
+                history_rows.append((thief_id, -(amount + 10), "chips", "Penalidade policial do Change Fate", user_id))
+                result = {
+                    "ok": True,
+                    "mode": "police",
+                    "amount": amount,
+                    "penalty": 10,
+                    "thief_id": thief_id,
+                    "normal": normal_amount,
+                    "bonus": bonus_amount,
+                }
+
+        for target_id, delta, kind, reason, other_id in history_rows:
+            try:
+                await self.db.append_chip_history(
+                    guild_id,
+                    target_id,
+                    delta=delta,
+                    kind=kind,
+                    reason=reason,
+                    event_type="race_skill",
+                    event_id=event_id,
+                    other_user_id=other_id,
+                    skill_eligible=False,
+                )
+            except Exception:
+                pass
+        return result
+
+    async def _execute_forcerob_skill(
+        self,
+        guild_id: int,
+        user_id: int,
+        target_id: int,
+        *,
+        user_name: str,
+        target_name: str,
+    ) -> dict[str, object]:
+        guild_id, user_id, target_id = int(guild_id), int(user_id), int(target_id)
+        if user_id == target_id:
+            return {"ok": False, "code": "self"}
+        event_id = f"forcerob:{time.time_ns()}"
+        event_ts = float(time.time())
+        async with self._race_progress_lock(guild_id, user_id):
+            initial_doc = self.db._get_user_doc(guild_id, user_id)
+            if not self._race_is(guild_id, user_id, "preto"):
+                return {"ok": False, "code": "race"}
+            if self._race_skill_daily_used(initial_doc, "forcerob"):
+                return {"ok": False, "code": "cooldown"}
+            async with self._ordered_chip_economy_locks(guild_id, user_id, target_id):
+                old_user = self.db._get_user_doc(guild_id, user_id)
+                old_target = self.db._get_user_doc(guild_id, target_id)
+                user_doc = dict(old_user)
+                target_doc = dict(old_target)
+                if not self._race_is(guild_id, user_id, "preto"):
+                    return {"ok": False, "code": "race"}
+                if self._race_skill_daily_used(user_doc, "forcerob"):
+                    return {"ok": False, "code": "cooldown"}
+                target_bonus = max(0, int(target_doc.get("bonus_chips", 0) or 0))
+                target_normal = max(0, int(target_doc.get("chips", CHIPS_INITIAL) or 0))
+                available = target_bonus + target_normal
+                if available < 20:
+                    return {"ok": False, "code": "poor", "available": available}
+                amount = random.randint(5, min(20, available))
+                bonus_taken = min(target_bonus, amount)
+                normal_taken = amount - bonus_taken
+                target_doc["bonus_chips"] = target_bonus - bonus_taken
+                target_doc["chips"] = int(target_doc.get("chips", CHIPS_INITIAL) or 0) - normal_taken
+                target_doc["has_chip_activity"] = True
+                user_doc["bonus_chips"] = max(0, int(user_doc.get("bonus_chips", 0) or 0)) + bonus_taken
+                user_doc["chips"] = int(user_doc.get("chips", CHIPS_INITIAL) or 0) + normal_taken
+                user_doc["has_chip_activity"] = True
+                self._mark_race_skill_daily_used(user_doc, "forcerob")
+                try:
+                    await self.db._save_user_doc(guild_id, target_id, target_doc)
+                    await self.db._save_user_doc(guild_id, user_id, user_doc)
+                except Exception:
+                    try:
+                        await self.db._save_user_doc(guild_id, target_id, old_target)
+                        await self.db._save_user_doc(guild_id, user_id, old_user)
+                    except Exception:
+                        pass
+                    raise
+
+        metadata_user = {
+            "event_type": "forced_robbery",
+            "event_id": event_id,
+            "other_user_id": target_id,
+            "skill_eligible": False,
+        }
+        metadata_target = {
+            "event_type": "forced_robbery",
+            "event_id": event_id,
+            "other_user_id": user_id,
+            "skill_eligible": False,
+        }
+        try:
+            if bonus_taken > 0:
+                await self.db.append_chip_history(
+                    guild_id,
+                    target_id,
+                    delta=-bonus_taken,
+                    kind="bonus",
+                    reason=f"Roubo forçado por {user_name}",
+                    ts=event_ts,
+                    **metadata_target,
+                )
+                await self.db.append_chip_history(
+                    guild_id,
+                    user_id,
+                    delta=bonus_taken,
+                    kind="bonus",
+                    reason=f"Roubo forçado em {target_name}",
+                    ts=event_ts,
+                    **metadata_user,
+                )
+            if normal_taken > 0:
+                await self.db.append_chip_history(
+                    guild_id,
+                    target_id,
+                    delta=-normal_taken,
+                    kind="chips",
+                    reason=f"Roubo forçado por {user_name}",
+                    ts=event_ts,
+                    **metadata_target,
+                )
+                await self.db.append_chip_history(
+                    guild_id,
+                    user_id,
+                    delta=normal_taken,
+                    kind="chips",
+                    reason=f"Roubo forçado em {target_name}",
+                    ts=event_ts,
+                    **metadata_user,
+                )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "amount": amount,
+            "normal": normal_taken,
+            "bonus": bonus_taken,
+            "event_id": event_id,
+        }
 
     def _race_panel_lock(self, guild_id: int, user_id: int) -> asyncio.Lock:
         key = (int(guild_id), int(user_id))
@@ -2621,12 +3504,20 @@ class GincanaBase:
 
     def _entry_spend_parts(self, guild_id: int, user_id: int, amount: int) -> dict[str, object]:
         spend = max(0, int(amount or 0))
+        temporary_used = min(self._coinflip_temp_bonus_available(guild_id, user_id), spend)
+        source_doc = self.db._get_user_doc(guild_id, user_id)
         bonus = self._get_user_bonus_chips(guild_id, user_id)
-        bonus_used = min(bonus, spend)
+        bonus_used = min(bonus, spend - temporary_used)
         period, period_key = self._race_period_info()
         return {
-            "bonus": bonus_used,
-            "chips": spend - bonus_used,
+            "bonus": bonus_used + temporary_used,
+            "chips": spend - bonus_used - temporary_used,
+            "temporary_bonus": temporary_used,
+            "_temporary_bonus_expires_at": (
+                float(source_doc.get("race_skill_coinflip_temp_expires_at", 0.0) or 0.0)
+                if temporary_used > 0
+                else 0.0
+            ),
             "_race_period": period,
             "_race_period_key": period_key,
         }
@@ -2636,7 +3527,102 @@ class GincanaBase:
         return {
             "chips": max(0, int(raw.get("chips", 0) or 0)),
             "bonus": max(0, int(raw.get("bonus", 0) or 0)),
+            "temporary_bonus": max(0, int(raw.get("temporary_bonus", 0) or 0)),
         }
+
+    async def _consume_coinflip_temporary_amount(
+        self,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+    ) -> int:
+        requested = max(0, int(amount))
+        if requested <= 0:
+            return 0
+        async with self._chip_economy_lock(guild_id, user_id):
+            doc = self.db._get_user_doc(guild_id, user_id)
+            expires_at = float(doc.get("race_skill_coinflip_temp_expires_at", 0.0) or 0.0)
+            available = (
+                max(0, int(doc.get("race_skill_coinflip_temp_bonus", 0) or 0))
+                if expires_at > time.time()
+                else 0
+            )
+            consumed = min(requested, available)
+            remaining = available - consumed
+            if remaining > 0:
+                doc["race_skill_coinflip_temp_bonus"] = remaining
+            else:
+                doc.pop("race_skill_coinflip_temp_bonus", None)
+                doc.pop("race_skill_coinflip_temp_expires_at", None)
+            await self.db._save_user_doc(
+                guild_id,
+                user_id,
+                doc,
+                unset_fields=(
+                    "race_skill_coinflip_temp_bonus",
+                    "race_skill_coinflip_temp_expires_at",
+                ),
+            )
+            return consumed
+
+    async def _restore_coinflip_temporary_amount(
+        self,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+        *,
+        expires_at: float,
+    ) -> int:
+        restore = max(0, int(amount))
+        original_expiry = float(expires_at or 0.0)
+        if restore <= 0 or original_expiry <= time.time():
+            return 0
+        async with self._chip_economy_lock(guild_id, user_id):
+            doc = self.db._get_user_doc(guild_id, user_id)
+            current_expiry = float(doc.get("race_skill_coinflip_temp_expires_at", 0.0) or 0.0)
+            current_amount = (
+                max(0, int(doc.get("race_skill_coinflip_temp_bonus", 0) or 0))
+                if current_expiry > time.time()
+                else 0
+            )
+            doc["race_skill_coinflip_temp_bonus"] = current_amount + restore
+            doc["race_skill_coinflip_temp_expires_at"] = max(current_expiry, original_expiry)
+            await self.db._save_user_doc(guild_id, user_id, doc)
+        return restore
+
+    async def _refund_entry_spend(
+        self,
+        guild_id: int,
+        user_id: int,
+        entry_spend: dict | None,
+        *,
+        reason: str,
+    ) -> None:
+        raw = dict(entry_spend or {})
+        spend = self._normalize_entry_spend(raw)
+        temporary = min(spend["bonus"], spend["temporary_bonus"])
+        persistent_bonus = spend["bonus"] - temporary
+        if persistent_bonus > 0:
+            await self._change_user_bonus_chips(
+                guild_id,
+                user_id,
+                persistent_bonus,
+                reason=reason,
+            )
+        if spend["chips"] > 0:
+            await self._change_user_chips(
+                guild_id,
+                user_id,
+                spend["chips"],
+                reason=reason,
+            )
+        if temporary > 0:
+            await self._restore_coinflip_temporary_amount(
+                guild_id,
+                user_id,
+                temporary,
+                expires_at=float(raw.get("_temporary_bonus_expires_at", 0.0) or 0.0),
+            )
 
     def _split_refund_by_entry(self, entry_spend: dict[str, int], amount: int) -> dict[str, int]:
         spend = self._normalize_entry_spend(entry_spend)
@@ -2949,17 +3935,88 @@ class GincanaBase:
             return marker
         return "Uma bênção pagou este giro" if kind_key == "roleta" else "Uma bênção pagou esta mão"
 
-    async def _maybe_apply_coringa_cashback(self, guild_id: int, user_id: int, entry_cost: int, *, chance: float = 0.35) -> int:
-        if entry_cost <= 0 or not self._race_is(guild_id, user_id, "coringa"):
-            return 0
+    async def _maybe_apply_coringa_loss_refund(
+        self,
+        guild_id: int,
+        user_id: int,
+        entry_cost: int,
+        *,
+        chance: float = 0.35,
+    ) -> tuple[int, str]:
+        """Retorna ``(valor, modo)``; o Joker ativo substitui o passivo."""
+        cost = max(0, int(entry_cost))
+        if cost <= 0 or not self._race_is(guild_id, user_id, "coringa"):
+            return 0, ""
+
+        joker_refund = 0
+        async with self._race_progress_lock(guild_id, user_id):
+            async with self._chip_economy_lock(guild_id, user_id):
+                doc = self.db._get_user_doc(guild_id, user_id)
+                active_until = float(doc.get("race_skill_joker_until", 0.0) or 0.0)
+                if active_until > time.time() and self._race_is(guild_id, user_id, "coringa"):
+                    joker_refund = min(RACE_SKILL_JOKER_REFUND_CAP, cost)
+                    doc.pop("race_skill_joker_until", None)
+                    doc["bonus_chips"] = max(0, int(doc.get("bonus_chips", 0) or 0)) + joker_refund
+                    doc["has_chip_activity"] = True
+                    await self.db._save_user_doc(
+                        guild_id,
+                        user_id,
+                        doc,
+                        unset_fields=("race_skill_joker_until",),
+                    )
+                elif active_until > 0.0 and active_until <= time.time():
+                    doc.pop("race_skill_joker_until", None)
+                    await self.db._save_user_doc(
+                        guild_id,
+                        user_id,
+                        doc,
+                        unset_fields=("race_skill_joker_until",),
+                    )
+
+        if joker_refund > 0:
+            try:
+                await self.db.append_chip_history(
+                    guild_id,
+                    user_id,
+                    delta=joker_refund,
+                    kind="bonus",
+                    reason="Reembolso do Joker",
+                    event_type="race_skill",
+                    skill_eligible=False,
+                )
+            except Exception:
+                pass
+            return joker_refund, "joker"
+
         if random.random() >= float(chance):
-            return 0
-        refund = max(1, int(round(int(entry_cost) * 0.5)))
-        await self._change_user_chips(guild_id, user_id, refund, mark_activity=True, reason="Reembolso Coringa")
+            return 0, ""
+        refund = max(1, int(round(cost * 0.5)))
+        await self._change_user_chips(
+            guild_id,
+            user_id,
+            refund,
+            mark_activity=True,
+            reason="Reembolso Coringa",
+        )
+        return refund, "passive"
+
+    async def _maybe_apply_coringa_cashback(self, guild_id: int, user_id: int, entry_cost: int, *, chance: float = 0.35) -> int:
+        refund, _mode = await self._maybe_apply_coringa_loss_refund(
+            guild_id,
+            user_id,
+            entry_cost,
+            chance=chance,
+        )
         return refund
 
     async def _maybe_apply_coringa_lobby_refund(self, guild_id: int, user_id: int, entry_cost: int) -> int:
-        return await self._maybe_apply_coringa_cashback(guild_id, user_id, entry_cost, chance=0.35)
+        refund, _mode = await self._maybe_apply_coringa_loss_refund(
+            guild_id,
+            user_id,
+            entry_cost,
+            chance=0.35,
+        )
+        return refund
 
     def _coringa_avoids_robbery_penalty(self, guild_id: int, user_id: int) -> bool:
         return self._race_is(guild_id, user_id, "coringa") and random.random() < 0.25
@@ -3155,6 +4212,24 @@ class GincanaBase:
             if delta == 0:
                 continue
             kind = str(entry.get("kind") or "chips").lower()
+            reason = str(entry.get("reason") or "").strip() or "Transação"
+            ts = entry.get("ts") or 0
+            when = self._format_chip_history_relative_time(ts)
+            if kind == "mixed":
+                normal_delta = int(entry.get("normal_delta", 0) or 0)
+                bonus_delta = int(entry.get("bonus_delta", 0) or 0)
+                chips_total += normal_delta
+                bonus_total += bonus_delta
+                mixed_parts: list[str] = []
+                if normal_delta != 0:
+                    sign = "+" if normal_delta > 0 else ""
+                    icon = self._CHIP_GAIN_EMOJI if normal_delta > 0 else self._CHIP_LOSS_EMOJI
+                    mixed_parts.append(f"{icon} **{sign}{normal_delta}**")
+                if bonus_delta != 0:
+                    sign = "+" if bonus_delta > 0 else ""
+                    mixed_parts.append(f"{self._CHIP_BONUS_EMOJI} **{sign}{bonus_delta}**")
+                movement_lines.append(f"{' + '.join(mixed_parts)} • {reason} · _{when}_")
+                continue
             is_bonus = (kind == "bonus")
             if is_bonus:
                 chip_emoji = self._CHIP_BONUS_EMOJI
@@ -3163,9 +4238,6 @@ class GincanaBase:
                 chip_emoji = self._CHIP_GAIN_EMOJI if delta > 0 else self._CHIP_LOSS_EMOJI
                 chips_total += delta
             amount_text = f"+{delta}" if delta > 0 else f"{delta}"
-            reason = str(entry.get("reason") or "").strip() or "Transação"
-            ts = entry.get("ts") or 0
-            when = self._format_chip_history_relative_time(ts)
             movement_lines.append(f"{chip_emoji} **{amount_text}** • {reason} · _{when}_")
 
         if not movement_lines:
@@ -3399,8 +4471,17 @@ class GincanaBase:
         async with self._chip_economy_lock(guild_id, user_id):
             current_before = int(self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL) or 0)
             current_bonus = self._get_user_bonus_chips(guild_id, user_id)
-            use_bonus = min(current_bonus, spend)
-            remaining = spend - use_bonus
+            doc = self.db._get_user_doc(guild_id, user_id)
+            now = float(time.time())
+            temporary_expires_at = float(doc.get("race_skill_coinflip_temp_expires_at", 0.0) or 0.0)
+            current_temporary = (
+                max(0, int(doc.get("race_skill_coinflip_temp_bonus", 0) or 0))
+                if temporary_expires_at > now
+                else 0
+            )
+            use_temporary = min(current_temporary, spend)
+            use_bonus = min(current_bonus, spend - use_temporary)
+            remaining = spend - use_temporary - use_bonus
             projected_chips = current_before - remaining
             projected_bonus = current_bonus - use_bonus
             note = self._negative_transition_note(guild_id, user_id, spend)
@@ -3412,11 +4493,23 @@ class GincanaBase:
 
             # Reserva econômica em um único documento. Isso evita que spam de
             # jogos diferentes intercale o débito de bônus e o débito normal.
-            doc = self.db._get_user_doc(guild_id, user_id)
             doc["chips"] = int(projected_chips)
             doc["bonus_chips"] = int(projected_bonus)
+            if current_temporary - use_temporary > 0 and temporary_expires_at > now:
+                doc["race_skill_coinflip_temp_bonus"] = int(current_temporary - use_temporary)
+            else:
+                doc.pop("race_skill_coinflip_temp_bonus", None)
+                doc.pop("race_skill_coinflip_temp_expires_at", None)
             doc["has_chip_activity"] = True
-            await self.db._save_user_doc(guild_id, user_id, doc)
+            await self.db._save_user_doc(
+                guild_id,
+                user_id,
+                doc,
+                unset_fields=(
+                    "race_skill_coinflip_temp_bonus",
+                    "race_skill_coinflip_temp_expires_at",
+                ),
+            )
             history_normal = int(remaining)
             history_bonus = int(use_bonus)
 

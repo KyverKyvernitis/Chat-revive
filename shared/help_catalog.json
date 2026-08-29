@@ -633,6 +633,54 @@
       ]
     },
     {
+      "key": "coinflip",
+      "category": "games",
+      "group": "Skills de raça",
+      "description": "Lança a moeda exclusiva do Apostador",
+      "usage": "coinflip",
+      "search_terms": ["apostador", "moeda", "skill"]
+    },
+    {
+      "key": "0to1",
+      "category": "games",
+      "group": "Skills de raça",
+      "description": "Inverte uma movimentação elegível do Glitch",
+      "usage": "0to1",
+      "search_terms": ["glitch", "extrato", "skill"]
+    },
+    {
+      "key": "reborn",
+      "category": "games",
+      "group": "Skills de raça",
+      "description": "Converte todo o saldo da Fênix",
+      "usage": "reborn",
+      "search_terms": ["fenix", "fênix", "converter", "skill"]
+    },
+    {
+      "key": "changefate",
+      "category": "games",
+      "group": "Skills de raça",
+      "description": "Muda o destino do Sortudo",
+      "usage": "changefate",
+      "search_terms": ["sortudo", "midas", "policia", "skill"]
+    },
+    {
+      "key": "forcerob",
+      "category": "games",
+      "group": "Skills de raça",
+      "description": "Executa o roubo garantido do Preto",
+      "usage": "forcerob @usuário",
+      "search_terms": ["preto", "roubo forçado", "skill"]
+    },
+    {
+      "key": "joker",
+      "category": "games",
+      "group": "Skills de raça",
+      "description": "Prepara o reembolso ativo do Coringa",
+      "usage": "joker",
+      "search_terms": ["coringa", "reembolso", "skill"]
+    },
+    {
       "key": "roleta",
       "category": "games",
       "group": "Jogos",

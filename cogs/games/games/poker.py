@@ -229,8 +229,9 @@ class GincanaPokerMixin:
         chips = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
         bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
         spend = max(0, int(buy_in))
-        use_bonus = min(bonus, spend)
-        remaining = spend - use_bonus
+        use_temporary = min(self._coinflip_temp_bonus_available(guild_id, user_id), spend)
+        use_bonus = min(bonus, spend - use_temporary)
+        remaining = spend - use_temporary - use_bonus
         stack_bonus = bonus - use_bonus
         stack_normal = chips - remaining
         return stack_normal, stack_bonus, stack_normal + stack_bonus
@@ -526,11 +527,20 @@ class GincanaPokerMixin:
         for player_id in game.players:
             normal = int(game.stack_normal.get(player_id, 0) or 0)
             bonus = int(game.stack_bonus.get(player_id, 0) or 0)
+            raw_spend = dict(game.entry_spend.get(player_id) or {})
             if game.phase == "invite":
-                spend = self._normalize_entry_spend(game.entry_spend.get(player_id))
+                spend = self._normalize_entry_spend(raw_spend)
+                temporary = min(int(spend.get("bonus", 0) or 0), int(spend.get("temporary_bonus", 0) or 0))
                 normal += int(spend.get("chips", 0) or 0)
-                bonus += int(spend.get("bonus", 0) or 0)
+                bonus += int(spend.get("bonus", 0) or 0) - temporary
             await self._persist_poker_player_stack(game.guild_id, player_id, normal=normal, bonus=bonus, reason="Devolução do poker")
+            if game.phase == "invite":
+                await self._restore_coinflip_temporary_amount(
+                    game.guild_id,
+                    player_id,
+                    int(raw_spend.get("temporary_bonus", 0) or 0),
+                    expires_at=float(raw_spend.get("_temporary_bonus_expires_at", 0.0) or 0.0),
+                )
         await self._disable_poker_views(game)
         if game.status_message is not None:
             try:
@@ -677,6 +687,30 @@ class GincanaPokerMixin:
             player_a.id: True if outcome > 0 else (False if outcome < 0 else None),
             player_b.id: True if outcome < 0 else (False if outcome > 0 else None),
         }
+        coringa_notes: dict[int, str] = {}
+        if outcome != 0:
+            losing_player_id = player_b.id if outcome > 0 else player_a.id
+            losing_spend = self._normalize_entry_spend(
+                game.entry_spend.get(losing_player_id) or {"chips": game.buy_in, "bonus": 0}
+            )
+            losing_entry = int(losing_spend.get("chips", 0) or 0) + int(losing_spend.get("bonus", 0) or 0)
+            refund, refund_mode = await self._maybe_apply_coringa_loss_refund(
+                game.guild_id,
+                losing_player_id,
+                losing_entry,
+                chance=0.35,
+            )
+            if refund > 0:
+                coringa_notes[losing_player_id] = self._race_effect_message(
+                    game.guild_id,
+                    losing_player_id,
+                    "joker" if refund_mode == "joker" else "as",
+                    (
+                        f"recuperou **{refund}** {self._CHIP_BONUS_EMOJI} da entrada"
+                        if refund_mode == "joker"
+                        else f"recuperou {self._chip_text(refund, kind='gain')} da entrada"
+                    ),
+                )
         public_race_notices: list[str] = []
         for player_id in game.players:
             notes = await self._apply_new_race_result(
@@ -687,6 +721,8 @@ class GincanaPokerMixin:
                 payout=int(payout_map[player_id]),
                 valid=True,
             )
+            if coringa_notes.get(player_id):
+                notes.append(coringa_notes[player_id])
             await self._route_lobby_race_notices(
                 game.race_interactions.get(player_id),
                 game.guild_id,
@@ -1078,6 +1114,41 @@ class GincanaPokerMixin:
         }
         host_stack_normal, host_stack_bonus, host_stack = self._poker_project_stack_after_buy_in(guild.id, message.author.id, POKER_BUY_IN)
         opp_stack_normal, opp_stack_bonus, opp_stack = self._poker_project_stack_after_buy_in(guild.id, opponent.id, POKER_BUY_IN)
+        consumed_temporary: list[tuple[int, int, float]] = []
+        for player_id in (message.author.id, opponent.id):
+            raw_spend = game.entry_spend[player_id]
+            expected_temporary = int(raw_spend.get("temporary_bonus", 0) or 0)
+            actual_temporary = await self._consume_coinflip_temporary_amount(
+                guild.id,
+                player_id,
+                expected_temporary,
+            )
+            consumed_temporary.append(
+                (
+                    player_id,
+                    actual_temporary,
+                    float(raw_spend.get("_temporary_bonus_expires_at", 0.0) or 0.0),
+                )
+            )
+            if actual_temporary != expected_temporary:
+                for restore_user_id, restore_amount, restore_expiry in consumed_temporary:
+                    await self._restore_coinflip_temporary_amount(
+                        guild.id,
+                        restore_user_id,
+                        restore_amount,
+                        expires_at=restore_expiry,
+                    )
+                try:
+                    await message.channel.send(
+                        embed=self._make_poker_status_embed(
+                            "🃏 Saldo atualizado",
+                            "Um bônus temporário expirou durante a preparação\nTente novamente",
+                            ok=False,
+                        )
+                    )
+                except Exception:
+                    pass
+                return True
         game.stack_normal = {message.author.id: host_stack_normal, opponent.id: opp_stack_normal}
         game.stack_bonus = {message.author.id: host_stack_bonus, opponent.id: opp_stack_bonus}
         game.stacks = {message.author.id: host_stack, opponent.id: opp_stack}
@@ -1100,7 +1171,11 @@ class GincanaPokerMixin:
             )
             game.status_message = status_message
         except Exception:
-            self._poker_games.pop(guild.id, None)
+            await self._cancel_poker_game(
+                game,
+                reason="publish_failed",
+                notice="Não consegui publicar o convite agora\nAs entradas foram devolvidas",
+            )
             return True
 
         dm_failures: list[discord.Member] = []

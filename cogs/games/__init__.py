@@ -1431,11 +1431,14 @@ class GamesCog(dcommands.Cog, GamesCore):
             if bonus > 0:
                 recovered_parts.append(self._skill_chip_value(bonus, kind="bonus", movement="gain"))
             recovered = " + ".join(recovered_parts) or f"**{amount} fichas**"
+            penalty = int(result.get("penalty", 10) or 10)
+            thief_loss = amount + penalty
+            thief_loss_text = self._skill_chip_value(thief_loss, movement="loss")
             lines = [
-                "A polícia pegou o meliante e trouxe teu dinheiro de volta",
-                f"Recuperado: {recovered}",
-                f"-# Penalidade de <@{thief_id}>: "
-                f"{self._skill_chip_value(int(result.get('penalty', 10) or 10), movement='loss')}",
+                "🚨 A polícia pegou o meliante",
+                f"{recovered} recuperadas",
+                f"-# <@{thief_id}> perdeu {thief_loss_text} · "
+                f"devolução + **{penalty}** de multa",
             ]
         else:
             lines = [

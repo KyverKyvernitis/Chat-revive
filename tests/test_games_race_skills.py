@@ -83,6 +83,39 @@ class RaceSkillTests(unittest.TestCase):
         self.assertEqual(formatter(dummy, 5, kind="bonus", movement="gain"), "orange **+5**")
         self.assertEqual(formatter(dummy, 5, kind="bonus", movement="loss"), "orange **-5**")
 
+    def test_0to1_preserves_normal_bonus_and_mixed_source_types(self) -> None:
+        splitter_source = node_source(BASE, "_race_skill_0to1_source_parts", ast.FunctionDef)
+        namespace: dict[str, object] = {}
+        exec(splitter_source, namespace)
+        splitter = namespace["_race_skill_0to1_source_parts"]
+
+        self.assertEqual(splitter({"delta": -15, "kind": "chips"}, 15), (15, 0))
+        self.assertEqual(splitter({"delta": -15, "kind": "bonus"}, 15), (0, 15))
+        self.assertEqual(
+            splitter(
+                {
+                    "delta": -15,
+                    "kind": "mixed",
+                    "normal_delta": -5,
+                    "bonus_delta": -10,
+                },
+                15,
+            ),
+            (5, 10),
+        )
+        self.assertEqual(
+            splitter(
+                {
+                    "delta": -40,
+                    "kind": "mixed",
+                    "normal_delta": -6,
+                    "bonus_delta": -34,
+                },
+                20,
+            ),
+            (6, 14),
+        )
+
     def test_skill_command_copy_is_short_and_non_redundant(self) -> None:
         coinflip = node_source(GAMES_INIT, "coinflip_command", ast.AsyncFunctionDef)
         zero_to_one = node_source(GAMES_INIT, "zero_to_one_command", ast.AsyncFunctionDef)
@@ -99,8 +132,11 @@ class RaceSkillTests(unittest.TestCase):
         self.assertIn("movement='loss'", zero_to_one)
         self.assertIn("movement='gain'", zero_to_one)
         self.assertIn("kind='bonus', movement='loss'", zero_to_one)
+        self.assertIn('kind="bonus", movement="loss"', zero_to_one)
+        self.assertIn("join(source_parts)", zero_to_one)
         self.assertNotIn("O lançamento original foi preservado", zero_to_one)
-        self.assertNotIn("👁️⃤ 0to1", zero_to_one)
+        self.assertIn("👁️⃤ 0to1", zero_to_one)
+        self.assertNotIn("<a:eyeglitch", zero_to_one)
         self.assertIn("command_prefix=ctx.clean_prefix", reborn)
         self.assertIn("Seu próximo Buckshot ou Truco será **dourado**", changefate)
         self.assertIn("A polícia pegou o meliante e trouxe teu dinheiro de volta", changefate)
@@ -118,6 +154,7 @@ class RaceSkillTests(unittest.TestCase):
         self.assertIn("roubo garantido de **5–20 fichas**", catalog)
         self.assertIn("cada valor vale uma vez", catalog)
         self.assertIn("Só de dia · cooldown de **6h**", catalog)
+        self.assertRegex(catalog, r'"key": "0to1",\s+"emoji": "👁️⃤"')
         self.assertNotIn("movimentação negativa", catalog)
 
         help_by_key = {
@@ -179,6 +216,9 @@ class RaceSkillTests(unittest.TestCase):
         self.assertIn('"forced_robbery"', selector)
         self.assertIn("resolved_robberies", selector)
         self.assertIn("RACE_SKILL_0TO1_LIMIT", execute)
+        self.assertIn("_race_skill_0to1_source_parts", execute)
+        self.assertIn('"source_normal": source_normal', execute)
+        self.assertIn('"source_bonus": source_bonus', execute)
         self.assertIn('user_doc["race_skill_0to1_cutoff_ts"]', execute)
         self.assertIn('updated_robbery["resolved_by"] = "0to1"', execute)
 

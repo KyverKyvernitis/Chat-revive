@@ -1298,7 +1298,7 @@ class GamesCog(dcommands.Cog, GamesCore):
                 "empty_balance": (["Esse bônus já não está no saldo"], "neutral"),
             }.get(code, (["Nada para inverter no extrato"], "neutral"))
             await ctx.reply(
-                view=self._make_skill_notice("<a:eyeglitch:1531116300645175436> 0to1", lines, state=state),
+                view=self._make_skill_notice("👁️⃤ 0to1", lines, state=state),
                 mention_author=False,
             )
             return
@@ -1311,8 +1311,25 @@ class GamesCog(dcommands.Cog, GamesCore):
                 f"{self._skill_chip_value(amount, movement='gain')}",
             ]
         else:
+            source_parts: list[str] = []
+            source_normal = int(result.get("source_normal", 0) or 0)
+            source_bonus = int(result.get("source_bonus", 0) or 0)
+            if source_normal > 0:
+                source_parts.append(self._skill_chip_value(source_normal, movement="loss"))
+            if source_bonus > 0:
+                source_parts.append(
+                    self._skill_chip_value(source_bonus, kind="bonus", movement="loss")
+                )
+            if not source_parts:
+                source_parts.append(
+                    self._skill_chip_value(
+                        amount,
+                        kind="bonus" if source_kind == "bonus" else "normal",
+                        movement="loss",
+                    )
+                )
             lines = [
-                f"{self._skill_chip_value(amount, movement='loss')} → "
+                f"{' + '.join(source_parts)} → "
                 f"{self._skill_chip_value(amount, movement='gain')}",
             ]
         linked_id = int(result.get("linked_user_id", 0) or 0)
@@ -1322,7 +1339,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             )
         await ctx.reply(
             view=self._make_skill_notice(
-                "<a:eyeglitch:1531116300645175436> 0to1",
+                "👁️⃤ 0to1",
                 lines,
                 accent_color=discord.Color.purple(),
             ),

@@ -2293,7 +2293,7 @@ class GincanaBase:
                 "effects": [
                     {
                         "key": "0to1",
-                        "emoji": "<a:eyeglitch:1531116300645175436>",
+                        "emoji": "👁️⃤",
                         "title": "0to1",
                         "desc": (
                             "**_0to1** · inverte a última perda ou bônus do extrato\n"
@@ -3036,6 +3036,38 @@ class GincanaBase:
                 return dict(entry)
         return None
 
+    @staticmethod
+    def _race_skill_0to1_source_parts(entry: dict, amount: int) -> tuple[int, int]:
+        """Return the normal/bonus loss represented by a capped 0to1 reversal."""
+        capped_amount = max(0, int(amount))
+        try:
+            delta = int(entry.get("delta", 0) or 0)
+        except (TypeError, ValueError):
+            delta = 0
+        if delta >= 0 or capped_amount <= 0:
+            return 0, 0
+
+        kind = str(entry.get("kind", "chips") or "chips").strip().lower()
+        if kind == "bonus":
+            return 0, capped_amount
+        if kind != "mixed":
+            return capped_amount, 0
+
+        try:
+            recorded_normal = abs(int(entry.get("normal_delta", 0) or 0))
+        except (TypeError, ValueError):
+            recorded_normal = 0
+        try:
+            recorded_bonus = abs(int(entry.get("bonus_delta", 0) or 0))
+        except (TypeError, ValueError):
+            recorded_bonus = 0
+
+        normal = min(recorded_normal, capped_amount)
+        bonus = min(recorded_bonus, capped_amount - normal)
+        # Históricos antigos podem não ter a divisão da movimentação mista.
+        normal += capped_amount - normal - bonus
+        return normal, bonus
+
     async def _execute_0to1_skill(self, guild_id: int, user_id: int) -> dict[str, object]:
         guild_id, user_id = int(guild_id), int(user_id)
         result: dict[str, object] = {"ok": False, "code": "empty"}
@@ -3064,6 +3096,7 @@ class GincanaBase:
                 kind = str(entry.get("kind", "chips") or "chips").strip().lower()
                 source_amount = abs(delta) if delta < 0 else delta
                 amount = min(RACE_SKILL_0TO1_LIMIT, max(0, source_amount))
+                source_normal, source_bonus = self._race_skill_0to1_source_parts(entry, amount)
                 if delta > 0 and kind == "bonus":
                     amount = min(amount, max(0, int(user_doc.get("bonus_chips", 0) or 0)))
                 user_doc["race_skill_0to1_cutoff_ts"] = float(entry.get("ts", time.time()) or time.time())
@@ -3125,6 +3158,8 @@ class GincanaBase:
                     "amount": amount,
                     "source_delta": delta,
                     "source_kind": kind,
+                    "source_normal": source_normal,
+                    "source_bonus": source_bonus,
                     "linked_user_id": actual_linked_id,
                 }
 

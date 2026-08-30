@@ -5,6 +5,7 @@ from .games.buckshot import GincanaBuckshotMixin
 from .games.corrida import GincanaCorridaMixin
 from .games.poker import GincanaPokerMixin
 from .games.roleta import GincanaRoletaMixin
+from .games.slots import GincanaSlotsMixin
 from .games.truco import GincanaTrucoMixin
 from .handlers.focus import GincanaFocusMixin
 from .handlers.message_router import GincanaMessageRouterMixin
@@ -21,6 +22,7 @@ class GamesCore(
     GincanaFocusMixin,
     GincanaPokerMixin,
     GincanaMessageRouterMixin,
+    GincanaSlotsMixin,
     GincanaRoletaMixin,
     GincanaTrucoMixin,
     GincanaBuckshotMixin,

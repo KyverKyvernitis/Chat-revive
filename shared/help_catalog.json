@@ -704,6 +704,18 @@
       ]
     },
     {
+      "key": "roleta2",
+      "category": "games",
+      "group": "Jogos",
+      "description": "Testa a nova roleta de slots 3×3",
+      "usage": "roleta2",
+      "search_terms": [
+        "slots",
+        "caça-níquel",
+        "roleta nova"
+      ]
+    },
+    {
       "key": "buckshot",
       "category": "games",
       "group": "Jogos",

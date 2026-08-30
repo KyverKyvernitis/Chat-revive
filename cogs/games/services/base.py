@@ -1618,7 +1618,11 @@ class GincanaBase:
         return f"Resgatado hoje • Ofensiva: **{streak_text}**"
 
     def _best_game_summary(self, stats: dict) -> str | None:
-        roleta_wins = int(stats.get('roleta_jackpots', 0) or 0) + int(stats.get('cartas_jackpots', 0) or 0)
+        roleta_wins = (
+            int(stats.get('roleta_jackpots', 0) or 0)
+            + int(stats.get('cartas_jackpots', 0) or 0)
+            + int(stats.get('roleta2_jackpots', 0) or 0)
+        )
         candidates = [
             ((int(stats.get('truco_wins', 0) or 0), -int(stats.get('truco_losses', 0) or 0)), f"**Truco** — **{int(stats.get('truco_wins', 0) or 0)}** vitórias"),
             ((int(stats.get('corrida_wins', 0) or 0), -int(stats.get('corrida_losses', 0) or 0)), f"**Corrida** — **{int(stats.get('corrida_wins', 0) or 0)}** vitórias"),
@@ -1659,8 +1663,16 @@ class GincanaBase:
                 line += f" - {' • '.join(parts)}"
             lines.append(line)
 
-        roleta_spins = int(stats.get('roleta_spins', 0) or 0) + int(stats.get('carta_spins', 0) or 0)
-        roleta_jackpots = int(stats.get('roleta_jackpots', 0) or 0) + int(stats.get('cartas_jackpots', 0) or 0)
+        roleta_spins = (
+            int(stats.get('roleta_spins', 0) or 0)
+            + int(stats.get('carta_spins', 0) or 0)
+            + int(stats.get('roleta2_spins', 0) or 0)
+        )
+        roleta_jackpots = (
+            int(stats.get('roleta_jackpots', 0) or 0)
+            + int(stats.get('cartas_jackpots', 0) or 0)
+            + int(stats.get('roleta2_jackpots', 0) or 0)
+        )
         if roleta_spins <= 0 and roleta_jackpots > 0:
             roleta_spins = roleta_jackpots
         if roleta_spins > 0 or roleta_jackpots > 0:

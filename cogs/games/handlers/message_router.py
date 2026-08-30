@@ -28,6 +28,7 @@ class GincanaMessageRouterMixin:
             "_handle_poker_trigger",
             "_handle_truco_trigger",
             "_handle_carta_trigger",
+            "_handle_roleta2_trigger",
             "_handle_roleta_trigger",
         }
         try:
@@ -220,6 +221,9 @@ class GincanaMessageRouterMixin:
             return
 
         if await self._safe_route_call("_handle_carta_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_roleta2_trigger", message):
             return
 
         if await self._safe_route_call("_handle_roleta_trigger", message):

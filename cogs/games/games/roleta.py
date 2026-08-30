@@ -44,6 +44,12 @@ ROLETA_DYNAMIC_JACKPOT_MAX = 200
 ROLETA_DYNAMIC_JACKPOT_LOSS_INCREMENT = 1
 ROLETA_CYCLE_BONUS_CHIPS = 10
 ROLETA_APOSTADOR_PAIR_REFUND = 10
+ROLETA_EQUAL_NUMBER_PAIR_CHANCE = 0.10
+ROLETA_STANDARD_FALLBACK_CHANCE = 0.90
+ROLETA_APOSTADOR_FALLBACK_CHANCE = 0.60
+ROLETA_FALLBACK_JOKER_CHANCE = 0.05
+# Preserva a taxa histórica dos trios comuns: (46,26% - 5%) × 12%.
+ROLETA_FALLBACK_TRIPLE_CHANCE = 0.049512
 CARTA_ANIMATION_FRAME_SECONDS = 0.42
 CARTA_ANIMATION_MIN_STOP_SECONDS = 2.05
 CARTA_ANIMATION_MAX_SECONDS = 4.0
@@ -402,6 +408,13 @@ class GincanaRoletaMixin:
                 return ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS
             return self._current_roleta_dynamic_jackpot(guild_id)
 
+        @staticmethod
+        def _roleta_pair_chance_in_fallback(fallback_chance: float) -> float:
+            fallback = max(0.0, min(1.0, float(fallback_chance)))
+            if fallback <= 0.0:
+                return 0.0
+            return min(1.0, ROLETA_EQUAL_NUMBER_PAIR_CHANCE / fallback)
+
         def _roleta_outcome_for_user(self, guild_id: int, user_id: int) -> dict[str, object]:
             if self._race_is(guild_id, user_id, "apostador"):
                 roll = random.random()
@@ -409,16 +422,28 @@ class GincanaRoletaMixin:
                     return {"target_middle": [7, 7, 7], "forced_kind": "jackpot_mega", "forced_amount": ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS}
                 if roll < 0.20:
                     return {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS}
-                if random.random() < 0.25:
+                # 20% absolutos equivalem aos 25% após os 20% de jackpots.
+                if roll < 0.40:
                     return {"target_middle": [6, 6, 6], "forced_kind": "beast", "forced_amount": ROLETA_APOSTADOR_COST}
                 return {
-                    "target_middle": self._roll_roleta_target_middle(success=False, excluded_special_triples={6, 9}),
+                    "target_middle": self._roll_roleta_target_middle(
+                        success=False,
+                        equal_pair_chance=self._roleta_pair_chance_in_fallback(
+                            ROLETA_APOSTADOR_FALLBACK_CHANCE
+                        ),
+                        excluded_special_triples={6, 9},
+                    ),
                     "forced_kind": None,
                     "forced_amount": None,
                 }
             success = random.randint(1, 10) == 1
             return {
-                "target_middle": self._roll_roleta_target_middle(success=success),
+                "target_middle": self._roll_roleta_target_middle(
+                    success=success,
+                    equal_pair_chance=self._roleta_pair_chance_in_fallback(
+                        ROLETA_STANDARD_FALLBACK_CHANCE
+                    ),
+                ),
                 "forced_kind": "jackpot" if success else None,
                 "forced_amount": None,
             }
@@ -587,28 +612,35 @@ class GincanaRoletaMixin:
             self,
             *,
             success: bool,
+            equal_pair_chance: float = ROLETA_EQUAL_NUMBER_PAIR_CHANCE / ROLETA_STANDARD_FALLBACK_CHANCE,
             excluded_special_triples: set[int] | None = None,
         ) -> list[object]:
             if success:
                 return [7, 7, 7]
+            pair_chance = max(
+                0.0,
+                min(
+                    float(equal_pair_chance),
+                    1.0 - ROLETA_FALLBACK_JOKER_CHANCE - ROLETA_FALLBACK_TRIPLE_CHANCE,
+                ),
+            )
             roll = random.random()
-            if roll < 0.05:
+            if roll < ROLETA_FALLBACK_JOKER_CHANCE:
                 base = random.randint(1, 9)
                 middle = [base, self._random_roleta_joker(), base]
                 random.shuffle(middle)
                 return middle
-            # Os antigos retornos de custo foram redistribuídos para combinações
-            # parciais, preservando aproximadamente o retorno médio da roleta.
-            if roll < 0.4626:
-                # Mantém a mesma chance e o mesmo pagamento de resultado
-                # parcial, mas permite a variação visual de três iguais. O 777
-                # segue reservado ao jackpot; para o Apostador, 666 e 999 também
-                # são excluídos aqui para não alterar as chances de seus efeitos.
-                if random.random() < 0.12:
-                    excluded = {7, *(excluded_special_triples or set())}
-                    triple_choices = [digit for digit in range(1, 10) if digit not in excluded]
-                    repeated = random.choice(triple_choices)
-                    return [repeated, repeated, repeated]
+
+            triple_threshold = ROLETA_FALLBACK_JOKER_CHANCE + ROLETA_FALLBACK_TRIPLE_CHANCE
+            if roll < triple_threshold:
+                # O 777 segue reservado ao jackpot; para o Apostador, 666 e 999
+                # também são excluídos para não alterar seus efeitos próprios.
+                excluded = {7, *(excluded_special_triples or set())}
+                triple_choices = [digit for digit in range(1, 10) if digit not in excluded]
+                repeated = random.choice(triple_choices)
+                return [repeated, repeated, repeated]
+
+            if roll < triple_threshold + pair_chance:
                 repeated = random.randint(1, 9)
                 other = self._random_roleta_digit(exclude={repeated})
                 middle = [repeated, repeated, other]

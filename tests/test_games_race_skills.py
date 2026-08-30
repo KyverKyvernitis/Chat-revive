@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import random
 import unittest
 from pathlib import Path
 
@@ -160,7 +161,7 @@ class RaceSkillTests(unittest.TestCase):
         self.assertIn("result_delta=normal_result_delta", card_round)
         self.assertIn("bonus_result_delta=bonus_result_delta", card_round)
 
-    def test_apostador_equal_number_pairs_refund_10_without_rate_filter(self) -> None:
+    def test_apostador_equal_number_pairs_refund_10(self) -> None:
         evaluator_source = node_source(ROLETA, "_evaluate_roleta_middle", ast.FunctionDef)
         namespace: dict[str, object] = {
             "ROLETA_COST": 15,
@@ -194,6 +195,86 @@ class RaceSkillTests(unittest.TestCase):
         catalog = node_source(BASE, "_race_catalog", ast.FunctionDef)
         for probability in ("0.15", "0.05", "0.25"):
             self.assertIn(f"_format_percent_text({probability})", catalog)
+
+    def test_equal_number_pairs_are_10_percent_for_every_race(self) -> None:
+        self.assertIn("ROLETA_EQUAL_NUMBER_PAIR_CHANCE = 0.10", ROLETA)
+        self.assertIn("ROLETA_STANDARD_FALLBACK_CHANCE = 0.90", ROLETA)
+        self.assertIn("ROLETA_APOSTADOR_FALLBACK_CHANCE = 0.60", ROLETA)
+        outcome_source = node_source(ROLETA, "_roleta_outcome_for_user", ast.FunctionDef)
+        self.assertIn("if roll < 0.40", outcome_source)
+        self.assertNotIn("if random.random() < 0.25", outcome_source)
+
+        namespace: dict[str, object] = {
+            "ROLETA_APOSTADOR_COST": 25,
+            "ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS": 200,
+            "ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS": 100,
+            "ROLETA_EQUAL_NUMBER_PAIR_CHANCE": 0.10,
+            "ROLETA_STANDARD_FALLBACK_CHANCE": 0.90,
+            "ROLETA_APOSTADOR_FALLBACK_CHANCE": 0.60,
+            "ROLETA_FALLBACK_JOKER_CHANCE": 0.05,
+            "ROLETA_FALLBACK_TRIPLE_CHANCE": 0.049512,
+        }
+        for name in (
+            "_roleta_pair_chance_in_fallback",
+            "_roll_roleta_target_middle",
+            "_roleta_outcome_for_user",
+        ):
+            exec(node_source(ROLETA, name, ast.FunctionDef), namespace)
+
+        fallback_pair_chance = namespace["_roleta_pair_chance_in_fallback"]
+        self.assertAlmostEqual(fallback_pair_chance(0.90) * 0.90, 0.10)
+        self.assertAlmostEqual(fallback_pair_chance(0.60) * 0.60, 0.10)
+
+        class Dummy:
+            def __init__(self, engine: random.Random, *, apostador: bool) -> None:
+                self.engine = engine
+                self.apostador = apostador
+
+            def _race_is(self, guild_id: int, user_id: int, race: str) -> bool:
+                return self.apostador and race == "apostador"
+
+            def _random_roleta_digit(self, exclude: set[object] | None = None) -> int:
+                excluded = exclude or set()
+                return self.engine.choice([digit for digit in range(1, 10) if digit not in excluded])
+
+            def _random_roleta_joker(self) -> str:
+                return "🃏"
+
+        Dummy._roleta_pair_chance_in_fallback = staticmethod(fallback_pair_chance)
+        Dummy._roll_roleta_target_middle = namespace["_roll_roleta_target_middle"]
+        outcome = namespace["_roleta_outcome_for_user"]
+
+        def sample(*, apostador: bool, seed: int, spins: int = 100_000) -> tuple[float, dict[str, float]]:
+            engine = random.Random(seed)
+            namespace["random"] = engine
+            dummy = Dummy(engine, apostador=apostador)
+            pair_count = 0
+            forced_counts: dict[str, int] = {}
+            for _ in range(spins):
+                resolved = outcome(dummy, 1, 2)
+                middle = list(resolved["target_middle"])
+                if (
+                    len(middle) == 3
+                    and all(isinstance(value, int) for value in middle)
+                    and len(set(middle)) == 2
+                ):
+                    pair_count += 1
+                forced_kind = str(resolved.get("forced_kind") or "")
+                if forced_kind:
+                    forced_counts[forced_kind] = forced_counts.get(forced_kind, 0) + 1
+            return (
+                pair_count / spins,
+                {key: count / spins for key, count in forced_counts.items()},
+            )
+
+        standard_pair_rate, standard_forced = sample(apostador=False, seed=20260830)
+        apostador_pair_rate, apostador_forced = sample(apostador=True, seed=20260831)
+        self.assertAlmostEqual(standard_pair_rate, 0.10, delta=0.004)
+        self.assertAlmostEqual(apostador_pair_rate, 0.10, delta=0.004)
+        self.assertAlmostEqual(standard_forced["jackpot"], 0.10, delta=0.005)
+        self.assertAlmostEqual(apostador_forced["jackpot_mega"], 0.05, delta=0.005)
+        self.assertAlmostEqual(apostador_forced["jackpot"], 0.15, delta=0.005)
+        self.assertAlmostEqual(apostador_forced["beast"], 0.20, delta=0.005)
 
     def test_equal_pair_and_beast_result_copy_is_compact(self) -> None:
         partial_copy = node_source(ROLETA, "_roleta_partial_result_copy", ast.FunctionDef)

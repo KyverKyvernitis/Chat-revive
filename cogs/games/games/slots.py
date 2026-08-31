@@ -80,7 +80,7 @@ ROLETA2_LOSS_SUMMARIES = {
     "Não veio nada": "Nenhum resultado foi formado",
     "Nenhuma combinação": "Os símbolos pararam sem formar uma combinação",
     "Você ganhou... nada!": "A máquina girou, mas o prêmio não veio",
-    "Foi quase hein": "Dois símbolos combinaram, mas o terceiro não acompanhou",
+    "Foi quase hein": "Dois símbolos combinaram",
     "7 solitário": "Um único 7 apareceu na máquina",
 }
 
@@ -517,7 +517,10 @@ class GincanaSlotsMixin:
 
     def _render_roleta2_board(self, grid: list[list[str]]) -> str:
         return "\n".join(
-            " ".join(SLOT_EMOJIS.get(str(cell), SLOT_EMOJIS[SLOT_SPINNING]) for cell in row)
+            "# " + " ".join(
+                SLOT_EMOJIS.get(str(cell), SLOT_EMOJIS[SLOT_SPINNING])
+                for cell in row
+            )
             for row in grid
         )
 

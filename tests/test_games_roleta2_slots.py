@@ -269,12 +269,30 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
                 "Não veio nada",
             },
         )
+        self.assertEqual(
+            self.namespace["ROLETA2_LOSS_SUMMARIES"]["Foi quase hein"],
+            "Dois símbolos combinaram",
+        )
         picker = next(
             node for node in ast.walk(self.tree)
             if isinstance(node, ast.FunctionDef) and node.name == "_pick_roleta2_loss_copy"
         )
         picker_source = str(ast.get_source_segment(self.source, picker))
         self.assertIn('_last_game_loss_titles["roleta2"]', picker_source)
+
+    def test_board_uses_heading_rows_to_render_larger_slot_emojis(self) -> None:
+        render = self._class_method("_render_roleta2_board")
+        harness = type("Roleta2BoardHarness", (), {"_render_roleta2_board": render})()
+        grid = [
+            ["bar", "framboesa", "banana"],
+            ["banana", "framboesa", "cereja"],
+            ["cereja", "banana", "framboesa"],
+        ]
+        board = harness._render_roleta2_board(grid)
+        rows = board.splitlines()
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row.startswith("# ") for row in rows))
+        self.assertIn("<:slot_bar:1543757593078403072>", rows[0])
 
     def test_roleta2_statistics_are_separate_but_visible_in_profile_totals(self) -> None:
         base = BASE_PATH.read_text(encoding="utf-8")

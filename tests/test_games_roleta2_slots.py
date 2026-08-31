@@ -116,10 +116,14 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             "faltou_um_sete",
             "loss",
         )
+        matching = self.namespace["_slots_matching_kinds"]
         for kind in kinds:
             for _ in range(100):
                 grid = generate(kind, rng)
-                self.assertEqual(detect(grid), kind, (kind, grid))
+                if kind == "deja_vu":
+                    self.assertIn("deja_vu", matching(grid), grid)
+                else:
+                    self.assertEqual(detect(grid), kind, (kind, grid))
                 if kind == "loss":
                     self.assertFalse(has_escorredio(grid), grid)
                     self.assertIn(sum(cell == "seven" for row in grid for cell in row), {0, 1})
@@ -344,6 +348,63 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("discord.Color(OFF_COLOR)", source)
         self.assertIn("ROLETA2_NEUTRAL_COLOR", source)
         self.assertIn("title_emoji or '🎰'", source)
+
+    def test_deja_vu_is_combinable_and_scales_ten_twenty_thirty(self) -> None:
+        matching = self.namespace["_slots_matching_kinds"]
+        grid_matches = self.namespace["_slots_grid_matches_kind"]
+        payout = self.namespace["_slots_deja_vu_payout"]
+        combined_grid = [
+            ["framboesa", "framboesa", "framboesa"],
+            ["banana", "cereja", "banana"],
+            ["bar", "bar", "bar"],
+        ]
+        matches = matching(combined_grid)
+        self.assertIn("deja_vu", matches)
+        self.assertIn("colheita", matches)
+        self.assertIn("banana_split", matches)
+        self.assertIn("bar_triplo", matches)
+        self.assertTrue(grid_matches("deja_vu", combined_grid))
+        self.assertEqual(payout(1), 10)
+        self.assertEqual(payout(2), 20)
+        self.assertEqual(payout(3), 30)
+        self.assertEqual(payout(1) + payout(2), 30)
+
+    def test_deja_vu_respin_runs_inside_the_same_round_with_live_result(self) -> None:
+        execution = self._async_function_source("_execute_roleta2_round")
+        respin = self._async_function_source("_animate_roleta2_respin")
+        respin_view = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_make_roleta2_respin_view"
+        )
+        respin_view_source = str(ast.get_source_segment(self.source, respin_view))
+
+        self.assertEqual(self.namespace["ROLETA2_DEJA_VU_CHAIN_LIMIT"], 20)
+        self.assertEqual(tuple(self.namespace["ROLETA2_RESPIN_START_DELAYS"]), (0.66, 0.67, 0.67))
+        self.assertIn("while True:", execution)
+        self.assertIn("_roll_roleta2_outcome", execution)
+        self.assertIn("_animate_roleta2_respin", execution)
+        self.assertNotIn("_reserve_roleta2_spin_state", respin)
+        self.assertNotIn("_try_consume_chips", respin)
+        self.assertIn("for index, column in enumerate((2, 1, 0))", respin)
+        self.assertIn("for column, delay in zip((2, 1, 0), ROLETA2_COLUMN_DELAYS)", respin)
+        self.assertIn("ROLETA2_RESPIN_START_DELAYS[index]", respin)
+        self.assertIn('"🔁 Déjà vu..."', respin_view_source)
+        self.assertIn('f"**Resultado:**', respin_view_source)
+        self.assertNotIn('f"**Entrada:**', respin_view_source)
+        self.assertIn('ROLETA2_THEME_COLORS["deja_vu"]', respin_view_source)
+
+    def test_deja_vu_roll_can_pay_another_result_on_the_same_board(self) -> None:
+        roll = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
+        )
+        source = str(ast.get_source_segment(self.source, roll))
+        self.assertIn('elif kind == "deja_vu":', source)
+        self.assertIn('matches = _slots_matching_kinds(grid)', source)
+        self.assertIn('components.append(result_details("deja_vu"))', source)
+        self.assertIn('normal_payout = sum(', source)
+        self.assertIn('bonus_payout = sum(', source)
+        self.assertIn('"has_deja_vu": has_deja_vu', source)
 
     def test_roleta2_statistics_are_separate_but_visible_in_profile_totals(self) -> None:
         base = BASE_PATH.read_text(encoding="utf-8")

@@ -39,6 +39,29 @@ SLOT_FRUITS = (SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA)
 SLOT_SYMBOL_WEIGHTS = (30, 27, 25, 12, 6)
 SLOT_SAFE_SYMBOL_WEIGHTS = (32, 29, 26, 13)
 
+# A identidade visual acompanha o evento que causou o resultado. Resultados
+# sem tema próprio continuam usando o saldo líquido para decidir a cor.
+ROLETA2_THEME_COLORS = {
+    SLOT_BANANA: 0xF2C94C,
+    SLOT_FRAMBOESA: 0xC43D5C,
+    SLOT_CEREJA: 0xE5484D,
+    SLOT_BAR: 0x9B59B6,
+    SLOT_SEVEN: 0x3498DB,
+    "deja_vu": 0x4FA3B5,
+}
+ROLETA2_NEUTRAL_COLOR = 0x747F8D
+
+ROLETA2_KIND_TITLE_SYMBOLS = {
+    "sete_pecados": SLOT_SEVEN,
+    "jackpot": SLOT_SEVEN,
+    "bar_triplo": SLOT_BAR,
+    "bar_abriu_as_7": SLOT_BAR,
+    "banana_split": SLOT_BANANA,
+    "escorredio": SLOT_BANANA,
+    "setes_espalhados": SLOT_SEVEN,
+    "faltou_um_sete": SLOT_SEVEN,
+}
+
 # Pontos-base deixam todas as probabilidades auditáveis. O resultado principal
 # é sorteado antes da grade, então a aparência nunca redefine sua raridade.
 ROLETA2_OUTCOME_WEIGHTS = (
@@ -415,11 +438,43 @@ def _slots_generate_escorredio(rng: random.Random) -> tuple[list[list[str]], lis
     return preview, _slots_generate_grid("loss", rng), slip_column
 
 
+def _slots_matching_pair_symbol(grid: list[list[str]]) -> str | None:
+    for line in _SLOT_LINES:
+        values = _slot_line_values(grid, line)
+        for symbol in SLOT_SYMBOLS:
+            if values.count(symbol) == 2:
+                return str(symbol)
+    return None
+
+
 def _slots_colheita_fruit(grid: list[list[str]]) -> str:
     for row in grid:
         if len(set(row)) == 1 and row[0] in SLOT_FRUITS:
             return str(row[0])
     return SLOT_BANANA
+
+
+def _slots_result_presentation(
+    kind: str,
+    grid: list[list[str]],
+    title: str,
+) -> tuple[str, str | None]:
+    symbol: str | None = None
+    if kind == "colheita":
+        symbol = _slots_colheita_fruit(grid)
+    elif kind == "loss":
+        if title == "7 solitário":
+            symbol = SLOT_SEVEN
+        elif title == "Foi quase hein":
+            symbol = _slots_matching_pair_symbol(grid)
+    else:
+        symbol = ROLETA2_KIND_TITLE_SYMBOLS.get(kind)
+
+    if symbol in SLOT_EMOJIS:
+        return SLOT_EMOJIS[symbol], symbol
+    if kind == "deja_vu":
+        return "🔁", "deja_vu"
+    return "🎰", None
 
 
 class GincanaSlotsMixin:
@@ -429,10 +484,7 @@ class GincanaSlotsMixin:
         contextual_title = ""
         if flat.count(SLOT_SEVEN) == 1:
             contextual_title = "7 solitário"
-        elif any(
-            any(values.count(symbol) == 2 for symbol in SLOT_SYMBOLS)
-            for values in (_slot_line_values(grid, line) for line in _SLOT_LINES)
-        ):
+        elif _slots_matching_pair_symbol(grid) is not None:
             contextual_title = "Foi quase hein"
 
         generic_titles = (
@@ -467,8 +519,8 @@ class GincanaSlotsMixin:
             title = "Colheita"
             fruit = _slots_colheita_fruit(grid)
             if fruit == SLOT_FRAMBOESA:
-                normal_payout, bonus_payout = 0, 15
-                summary = "As framboesas transformaram a Colheita em fichas bônus"
+                normal_payout, bonus_payout = 0, 30
+                summary = "Três framboesas renderam fichas bônus"
             elif fruit == SLOT_CEREJA:
                 normal_payout, bonus_payout = 20, 0
                 summary = "As cerejas duplicaram o valor base da Colheita"
@@ -500,9 +552,12 @@ class GincanaSlotsMixin:
                 "faltou_um_sete": "Faltou um sete",
             }
             title = titles.get(kind, "Roleta 2")
+        title_emoji, color_theme = _slots_result_presentation(kind, grid, title)
         return {
             "kind": kind,
             "title": title,
+            "title_emoji": title_emoji,
+            "color_theme": color_theme,
             "summary": summary,
             "grid": grid,
             "preview_grid": preview_grid,
@@ -689,6 +744,8 @@ class GincanaSlotsMixin:
         self,
         *,
         title: str,
+        title_emoji: str,
+        color_theme: str | None,
         summary: str,
         board: str,
         balance_text: str,
@@ -698,13 +755,22 @@ class GincanaSlotsMixin:
         normal_delta: int,
         bonus_delta: int,
     ) -> discord.ui.LayoutView:
-        color = (
-            discord.Color.from_rgb(255, 190, 46)
-            if premium
-            else (discord.Color.green() if success else discord.Color(OFF_COLOR))
-        )
+        # success/premium continuam na assinatura para preservar compatibilidade
+        # com o fluxo atual; a cor do resultado agora segue tema + saldo líquido.
+        _ = success, premium
+        themed_color = ROLETA2_THEME_COLORS.get(str(color_theme or ""))
+        if themed_color is not None:
+            color = discord.Color(int(themed_color))
+        else:
+            net_delta = int(normal_delta) + int(bonus_delta)
+            if net_delta > 0:
+                color = discord.Color.green()
+            elif net_delta < 0:
+                color = discord.Color(OFF_COLOR)
+            else:
+                color = discord.Color(ROLETA2_NEUTRAL_COLOR)
         return self._make_game_layout_view(
-            f"🎰 {title}",
+            f"{title_emoji or '🎰'} {title}",
             summary=summary,
             details=[
                 f"**Resultado:** {self._format_game_result_breakdown(normal_delta, bonus_delta)}",
@@ -968,6 +1034,8 @@ class GincanaSlotsMixin:
             bonus_result_delta = (final_bonus - commit_start_bonus) - entry_bonus
             result_view = self._make_roleta2_result_view(
                 title=str(outcome.get("title") or "Roleta 2"),
+                title_emoji=str(outcome.get("title_emoji") or "🎰"),
+                color_theme=(str(outcome.get("color_theme")) if outcome.get("color_theme") else None),
                 summary="\n".join(line for line in summary_lines if line),
                 board=self._render_roleta2_board(final_grid),
                 balance_text=self._format_game_balance_values(display_normal, display_bonus),

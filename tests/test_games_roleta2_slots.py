@@ -88,16 +88,16 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
                 continue
             normal, bonus = payouts.get(kind, (0, 0))
             expected_gross += (weight / scale) * (normal + bonus)
-        colheita_values = {"banana": 15, "framboesa": 15, "cereja": 20}
+        colheita_values = {"banana": 15, "framboesa": 30, "cereja": 20}
         colheita_average = sum(
             (weight / scale) * colheita_values[fruit]
             for fruit, weight in self.namespace["ROLETA2_COLHEITA_FRUIT_WEIGHTS"]
         )
         expected_gross += (outcome_weights["colheita"] / scale) * colheita_average
         return_rate = expected_gross / int(self.namespace["ROLETA2_COST"])
-        self.assertAlmostEqual(expected_gross, 10.87, places=2)
-        self.assertGreaterEqual(return_rate, 0.72)
-        self.assertLessEqual(return_rate, 0.73)
+        self.assertAlmostEqual(expected_gross, 11.34, places=2)
+        self.assertGreaterEqual(return_rate, 0.75)
+        self.assertLessEqual(return_rate, 0.76)
 
     def test_every_generated_grid_matches_its_selected_result(self) -> None:
         generate = self.namespace["_slots_generate_grid"]
@@ -293,6 +293,57 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertTrue(all(row.startswith("# ") for row in rows))
         self.assertIn("<:slot_bar:1543757593078403072>", rows[0])
+
+    def test_framboesa_colheita_pays_thirty_bonus_with_compact_copy(self) -> None:
+        roll = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
+        )
+        roll_source = str(ast.get_source_segment(self.source, roll))
+        self.assertIn("normal_payout, bonus_payout = 0, 30", roll_source)
+        self.assertIn('summary = "Três framboesas renderam fichas bônus"', roll_source)
+
+    def test_result_title_emoji_and_theme_follow_the_causing_symbol(self) -> None:
+        presentation = self.namespace["_slots_result_presentation"]
+        raspberry_grid = [
+            ["framboesa", "framboesa", "framboesa"],
+            ["banana", "bar", "cereja"],
+            ["cereja", "banana", "bar"],
+        ]
+        emoji, theme = presentation("colheita", raspberry_grid, "Colheita")
+        self.assertEqual(emoji, "<:slot_framboesa:1543757628520271964>")
+        self.assertEqual(theme, "framboesa")
+
+        bar_grid = [["bar"] * 3, ["banana", "cereja", "framboesa"], ["cereja", "banana", "framboesa"]]
+        emoji, theme = presentation("bar_triplo", bar_grid, "BAR triplo")
+        self.assertEqual(emoji, "<:slot_bar:1543757593078403072>")
+        self.assertEqual(theme, "bar")
+
+        almost_grid = [
+            ["cereja", "cereja", "banana"],
+            ["banana", "bar", "framboesa"],
+            ["framboesa", "banana", "bar"],
+        ]
+        emoji, theme = presentation("loss", almost_grid, "Foi quase hein")
+        self.assertEqual(emoji, "<:slot_cereja:1543757610925162516>")
+        self.assertEqual(theme, "cereja")
+
+        emoji, theme = presentation("deja_vu", raspberry_grid, "Déjà vu")
+        self.assertEqual((emoji, theme), ("🔁", "deja_vu"))
+
+    def test_result_color_prioritizes_special_theme_then_net_delta(self) -> None:
+        result_view = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_make_roleta2_result_view"
+        )
+        source = str(ast.get_source_segment(self.source, result_view))
+        self.assertIn("ROLETA2_THEME_COLORS.get", source)
+        self.assertIn("net_delta = int(normal_delta) + int(bonus_delta)", source)
+        self.assertLess(source.index("ROLETA2_THEME_COLORS.get"), source.index("net_delta ="))
+        self.assertIn("discord.Color.green()", source)
+        self.assertIn("discord.Color(OFF_COLOR)", source)
+        self.assertIn("ROLETA2_NEUTRAL_COLOR", source)
+        self.assertIn("title_emoji or '🎰'", source)
 
     def test_roleta2_statistics_are_separate_but_visible_in_profile_totals(self) -> None:
         base = BASE_PATH.read_text(encoding="utf-8")

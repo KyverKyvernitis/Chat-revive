@@ -263,6 +263,7 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             "_sync_roleta2_spin_window",
             "_consume_roleta2_spin",
             "_grant_daily_roleta2_spins",
+            "_grant_roleta2_reward_spins",
             "_reserve_roleta2_spin_state",
         )
         harness_type = type(
@@ -300,6 +301,10 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             self.assertTrue(allowed)
             self.assertEqual((consumed["used"], consumed["available"]), (1, 6))
 
+            free_granted, rewarded = await harness._grant_roleta2_reward_spins(1, 2, 1)
+            self.assertEqual(free_granted, 1)
+            self.assertEqual((rewarded["rewards"], rewarded["total"], rewarded["available"]), (1, 8, 7))
+
             duplicate_grant, unchanged = await harness._grant_daily_roleta2_spins(1, 2)
             self.assertEqual((duplicate_grant, unchanged["bonus"]), (0, 2))
 
@@ -308,8 +313,8 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             )
             reset = await harness._sync_roleta2_spin_window(1, 2)
             self.assertEqual(
-                (reset["used"], reset["bonus"], reset["total"], reset["available"]),
-                (0, 0, 5, 5),
+                (reset["used"], reset["bonus"], reset["rewards"], reset["total"], reset["available"]),
+                (0, 0, 0, 5, 5),
             )
 
         asyncio.run(scenario())
@@ -337,7 +342,7 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         )
         picker_source = str(ast.get_source_segment(self.source, picker))
         self.assertIn('_last_game_loss_titles["roleta2"]', picker_source)
-        self.assertIn('f"Dois símbolos combinaram na {line_number} linha"', picker_source)
+        self.assertIn('f"Duas {pair_emoji} combinaram na {line_number} linha"', picker_source)
 
     def test_almost_copy_uses_the_actual_horizontal_line(self) -> None:
         matching_pair = self.namespace["_slots_matching_pair"]
@@ -357,6 +362,59 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             match = matching_pair(grid)
             self.assertIsNotNone(match)
             self.assertEqual(match[1], expected_row)
+
+    def test_almost_copy_names_the_actual_matching_symbol(self) -> None:
+        picker = self._class_method("_pick_roleta2_loss_copy")
+        harness = type(
+            "Roleta2LossHarness",
+            (),
+            {
+                "_pick_roleta2_loss_copy": picker,
+                "_ensure_game_animation_runtime": lambda self: None,
+            },
+        )()
+        harness._last_game_loss_titles = {}
+        grid = [
+            ["cereja", "cereja", "banana"],
+            ["framboesa", "bar", "banana"],
+            ["banana", "framboesa", "bar"],
+        ]
+        title, summary = harness._pick_roleta2_loss_copy(grid)
+        self.assertEqual(title, "Foi quase hein")
+        self.assertEqual(
+            summary,
+            "Duas <:slot_cereja:1543757610925162516> combinaram na 1ª linha",
+        )
+
+    def test_jackpot_copy_has_compact_title_and_actual_position(self) -> None:
+        summary = self.namespace["_slots_jackpot_summary"]
+        row_grid = [
+            ["banana", "framboesa", "cereja"],
+            ["seven", "seven", "seven"],
+            ["cereja", "bar", "banana"],
+        ]
+        self.assertEqual(
+            summary(row_grid),
+            "Três <:slot_7:1543757577496821800> combinam na 2ª linha",
+        )
+        diagonal_grid = [
+            ["seven", "banana", "framboesa"],
+            ["cereja", "seven", "bar"],
+            ["banana", "framboesa", "seven"],
+        ]
+        self.assertEqual(
+            summary(diagonal_grid),
+            "Três <:slot_7:1543757577496821800> combinam na diagonal principal",
+        )
+        roll_source = self._async_function_source("_execute_roleta2_round")
+        _ = roll_source
+        roll = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
+        )
+        source = str(ast.get_source_segment(self.source, roll))
+        self.assertIn('"jackpot": "Jackpot!"', source)
+        self.assertIn('"jackpot": _slots_jackpot_summary(grid)', source)
 
     def test_roleta2_copy_never_refers_to_a_machine(self) -> None:
         roll = next(
@@ -389,9 +447,10 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         )
         roll_source = str(ast.get_source_segment(self.source, roll))
         self.assertIn("normal_payout, bonus_payout = 0, 30", roll_source)
-        self.assertIn('summary = "Três framboesas renderam fichas bônus"', roll_source)
+        self.assertIn('summary = f"3 {fruit_emoji} renderam +30 {self._CHIP_BONUS_EMOJI}"', roll_source)
+        self.assertIn('free_spins = 1', roll_source)
         self.assertIn(
-            'summary = "As bananas fecharam uma Colheita (entrada devolvida)"',
+            'summary = f"3 {fruit_emoji} fecharam uma Colheita e devolveram a entrada"',
             roll_source,
         )
 
@@ -461,6 +520,27 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
 
         emoji, theme = presentation("deja_vu", raspberry_grid, "Déjà vu")
         self.assertEqual((emoji, theme), ("🔁", "deja_vu"))
+
+    def test_banana_colheita_grants_and_displays_one_free_spin(self) -> None:
+        formatter = self._class_method("_format_roleta2_result_value")
+        harness = type(
+            "Roleta2ResultHarness",
+            (),
+            {
+                "_format_roleta2_result_value": formatter,
+                "_format_game_result_breakdown": lambda self, normal, bonus: f"money:{normal}:{bonus}",
+            },
+        )()
+        self.assertEqual(harness._format_roleta2_result_value(0, 0, 1), "+1 giro grátis")
+        self.assertEqual(
+            harness._format_roleta2_result_value(0, 10, 1),
+            "money:0:10 · +1 giro grátis",
+        )
+        execution = self._async_function_source("_execute_roleta2_round")
+        self.assertIn('free_spins_awarded = sum(', execution)
+        self.assertIn('_grant_roleta2_reward_spins(', execution)
+        self.assertIn('free_spins=free_spins_awarded', execution)
+        self.assertIn('_roleta2_footer_text(', execution)
 
     def test_result_color_prioritizes_special_theme_then_net_delta(self) -> None:
         result_view = next(
@@ -564,20 +644,20 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             "kind": "deja_vu",
             "primary_kind": "colheita",
             "title": "Colheita",
-            "summary": "Três framboesas renderam fichas bônus",
+            "summary": "3 <:slot_framboesa:1543757628520271964> renderam +30 <bonus>",
             "color_theme": "framboesa",
         }
         terminal_loss = {
             "kind": "loss",
             "primary_kind": "loss",
             "title": "Foi quase hein",
-            "summary": "Dois símbolos combinaram na 3ª linha",
+            "summary": "Duas <:slot_cereja:1543757610925162516> combinaram na 3ª linha",
             "color_theme": "cereja",
         }
         display, color_theme = select([previous_colheita, terminal_loss])
         self.assertIs(display, terminal_loss)
         self.assertEqual(display["title"], "Foi quase hein")
-        self.assertEqual(display["summary"], "Dois símbolos combinaram na 3ª linha")
+        self.assertEqual(display["summary"], "Duas <:slot_cereja:1543757610925162516> combinaram na 3ª linha")
         # A identidade temática acumulada pode permanecer sem trocar o texto
         # do tabuleiro terminal por um resultado antigo.
         self.assertEqual(color_theme, "framboesa")

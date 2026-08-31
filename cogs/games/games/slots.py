@@ -575,6 +575,19 @@ def _slots_bar_abriu_as_7_summary(grid: list[list[str]]) -> str:
     return f"Veio dois {SLOT_EMOJIS[SLOT_BAR]} e um {SLOT_EMOJIS[SLOT_SEVEN]}"
 
 
+def _slots_jackpot_summary(grid: list[list[str]]) -> str:
+    target = [SLOT_SEVEN] * 3
+    for index, line in enumerate(_SLOT_LINES[:3]):
+        if _slot_line_values(grid, line) == target:
+            ordinal = ("1ª", "2ª", "3ª")[index]
+            return f"Três {SLOT_EMOJIS[SLOT_SEVEN]} combinam na {ordinal} linha"
+    if _slot_line_values(grid, _SLOT_DIAGONALS[0]) == target:
+        return f"Três {SLOT_EMOJIS[SLOT_SEVEN]} combinam na diagonal principal"
+    if _slot_line_values(grid, _SLOT_DIAGONALS[1]) == target:
+        return f"Três {SLOT_EMOJIS[SLOT_SEVEN]} combinam na diagonal secundária"
+    return f"Três {SLOT_EMOJIS[SLOT_SEVEN]} combinaram"
+
+
 def _slots_colheita_fruit(grid: list[list[str]]) -> str:
     for row in grid:
         if len(set(row)) == 1 and row[0] in SLOT_FRUITS:
@@ -697,8 +710,10 @@ class GincanaSlotsMixin:
             title = random.choice(available or list(generic_titles))
         self._last_game_loss_titles["roleta2"] = title
         if title == "Foi quase hein" and pair_match is not None:
+            pair_symbol = str(pair_match[0])
             line_number = ("1ª", "2ª", "3ª")[int(pair_match[1])]
-            return title, f"Dois símbolos combinaram na {line_number} linha"
+            pair_emoji = SLOT_EMOJIS.get(pair_symbol, "🎰")
+            return title, f"Duas {pair_emoji} combinaram na {line_number} linha"
         return title, ROLETA2_LOSS_SUMMARIES[title]
 
     def _roll_roleta2_outcome(
@@ -739,22 +754,25 @@ class GincanaSlotsMixin:
 
         def result_details(component_kind: str) -> dict[str, object]:
             normal_payout, bonus_payout = ROLETA2_PAYOUTS.get(component_kind, (0, 0))
+            free_spins = 0
             if component_kind == "colheita":
                 title = "Colheita"
                 fruit = _slots_colheita_fruit(grid)
+                fruit_emoji = SLOT_EMOJIS.get(fruit, "🎰")
                 if fruit == SLOT_FRAMBOESA:
                     normal_payout, bonus_payout = 0, 30
-                    summary = "Três framboesas renderam fichas bônus"
+                    summary = f"3 {fruit_emoji} renderam +30 {self._CHIP_BONUS_EMOJI}"
                 elif fruit == SLOT_CEREJA:
                     normal_payout, bonus_payout = 20, 0
                     summary = "As cerejas duplicaram o valor base da Colheita"
                 else:
                     normal_payout, bonus_payout = 15, 0
-                    summary = "As bananas fecharam uma Colheita (entrada devolvida)"
+                    free_spins = 1
+                    summary = f"3 {fruit_emoji} fecharam uma Colheita e devolveram a entrada"
             else:
                 summaries = {
                     "sete_pecados": "Sete dos nove espaços vieram com 7",
-                    "jackpot": "Três 7 fecharam uma linha",
+                    "jackpot": _slots_jackpot_summary(grid),
                     "bar_triplo": "Três BAR fecharam uma linha",
                     "bar_abriu_as_7": _slots_bar_abriu_as_7_summary(grid),
                     "deja_vu": "A primeira e a terceira coluna repetiram o mesmo resultado",
@@ -765,7 +783,7 @@ class GincanaSlotsMixin:
                 }
                 titles = {
                     "sete_pecados": "Sete pecados",
-                    "jackpot": "Jackpot 777",
+                    "jackpot": "Jackpot!",
                     "bar_triplo": "BAR triplo",
                     "bar_abriu_as_7": "Bar abriu às 7",
                     "deja_vu": "Déjà vu",
@@ -787,6 +805,7 @@ class GincanaSlotsMixin:
                 "summary": summary,
                 "normal_payout": int(normal_payout),
                 "bonus_payout": int(bonus_payout),
+                "free_spins": int(free_spins),
                 "premium": component_kind in {
                     "sete_pecados", "jackpot", "bar_triplo", "bar_abriu_as_7"
                 },
@@ -805,6 +824,7 @@ class GincanaSlotsMixin:
                 "summary": summary,
                 "normal_payout": 0,
                 "bonus_payout": 0,
+                "free_spins": 0,
                 "premium": False,
                 "partial": False,
                 "jackpot": False,
@@ -849,6 +869,7 @@ class GincanaSlotsMixin:
         )
         normal_payout = sum(int(component["normal_payout"]) for component in components)
         bonus_payout = sum(int(component["bonus_payout"]) for component in components)
+        free_spins = sum(int(component.get("free_spins", 0) or 0) for component in components)
         non_deja_summaries = [
             str(component["summary"])
             for component in components
@@ -902,6 +923,7 @@ class GincanaSlotsMixin:
             "slip_column": slip_column,
             "normal_payout": int(normal_payout),
             "bonus_payout": int(bonus_payout),
+            "free_spins": int(free_spins),
             "success": kind != "loss",
             "premium": any(bool(component["premium"]) for component in components),
             "partial": all(bool(component["partial"]) for component in components),
@@ -939,9 +961,10 @@ class GincanaSlotsMixin:
             for row in range(3)
         ]
 
-    def _roleta2_window_total(self, bonus_spins: int = 0) -> int:
+    def _roleta2_window_total(self, bonus_spins: int = 0, reward_spins: int = 0) -> int:
         bonus = max(0, min(ROLETA2_DAILY_EXTRA_CAP, int(bonus_spins or 0)))
-        return ROLETA2_SPIN_LIMIT + bonus
+        rewards = max(0, int(reward_spins or 0))
+        return ROLETA2_SPIN_LIMIT + bonus + rewards
 
     async def _sync_roleta2_spin_window(self, guild_id: int, user_id: int) -> dict[str, float | int]:
         now = time.time()
@@ -961,6 +984,10 @@ class GincanaSlotsMixin:
             )
         except Exception:
             bonus = 0
+        try:
+            rewards = max(0, int(doc.get("roleta2_reward_spins", 0) or 0))
+        except Exception:
+            rewards = 0
 
         changed = False
         if started_at <= 0 or (started_at + ROLETA2_WINDOW_SECONDS) <= now:
@@ -970,9 +997,11 @@ class GincanaSlotsMixin:
             doc["roleta2_window_started_at"] = float(started_at)
             doc["roleta2_spins_used"] = 0
             doc["roleta2_bonus_spins"] = 0
+            doc["roleta2_reward_spins"] = 0
+            rewards = 0
             changed = True
 
-        total = self._roleta2_window_total(bonus)
+        total = self._roleta2_window_total(bonus, rewards)
         available = max(0, total - used)
         reset_in = max(0.0, (started_at + ROLETA2_WINDOW_SECONDS) - now)
         if changed:
@@ -981,6 +1010,7 @@ class GincanaSlotsMixin:
             "started_at": float(started_at),
             "used": int(used),
             "bonus": int(bonus),
+            "rewards": int(rewards),
             "total": int(total),
             "available": int(available),
             "reset_in": float(reset_in),
@@ -995,12 +1025,14 @@ class GincanaSlotsMixin:
         doc["roleta2_window_started_at"] = float(state["started_at"])
         doc["roleta2_spins_used"] = used
         doc["roleta2_bonus_spins"] = int(state["bonus"])
+        doc["roleta2_reward_spins"] = int(state.get("rewards", 0) or 0)
         await self.db._save_user_doc(guild_id, user_id, doc)
         total = int(state["total"])
         return {
             "started_at": float(state["started_at"]),
             "used": used,
             "bonus": int(state["bonus"]),
+            "rewards": int(state.get("rewards", 0) or 0),
             "total": total,
             "available": max(0, total - used),
             "reset_in": float(
@@ -1025,8 +1057,28 @@ class GincanaSlotsMixin:
         doc["roleta2_window_started_at"] = float(state["started_at"])
         doc["roleta2_spins_used"] = int(state["used"])
         doc["roleta2_bonus_spins"] = current_bonus + granted
+        doc["roleta2_reward_spins"] = int(state.get("rewards", 0) or 0)
         await self.db._save_user_doc(guild_id, user_id, doc)
         return granted, await self._sync_roleta2_spin_window(guild_id, user_id)
+
+    async def _grant_roleta2_reward_spins(
+        self,
+        guild_id: int,
+        user_id: int,
+        count: int = 1,
+    ) -> tuple[int, dict[str, float | int]]:
+        amount = max(0, int(count or 0))
+        state = await self._sync_roleta2_spin_window(guild_id, user_id)
+        if amount <= 0:
+            return 0, state
+        doc = self.db._get_user_doc(guild_id, user_id)
+        rewards = int(state.get("rewards", 0) or 0) + amount
+        doc["roleta2_window_started_at"] = float(state["started_at"])
+        doc["roleta2_spins_used"] = int(state["used"])
+        doc["roleta2_bonus_spins"] = int(state["bonus"])
+        doc["roleta2_reward_spins"] = rewards
+        await self.db._save_user_doc(guild_id, user_id, doc)
+        return amount, await self._sync_roleta2_spin_window(guild_id, user_id)
 
     async def _reserve_roleta2_spin_state(
         self,
@@ -1122,6 +1174,23 @@ class GincanaSlotsMixin:
             color=discord.Color(ROLETA2_THEME_COLORS[color_theme]),
         )
 
+    def _format_roleta2_result_value(
+        self,
+        normal_delta: int,
+        bonus_delta: int,
+        free_spins: int = 0,
+    ) -> str:
+        parts: list[str] = []
+        if int(normal_delta) != 0 or int(bonus_delta) != 0:
+            parts.append(self._format_game_result_breakdown(normal_delta, bonus_delta))
+        free_count = max(0, int(free_spins or 0))
+        if free_count > 0:
+            spin_label = "giro grátis" if free_count == 1 else "giros grátis"
+            parts.append(f"+{free_count} {spin_label}")
+        if parts:
+            return " · ".join(parts)
+        return self._format_game_result_breakdown(normal_delta, bonus_delta)
+
     def _make_roleta2_result_view(
         self,
         *,
@@ -1136,6 +1205,7 @@ class GincanaSlotsMixin:
         footer_text: str,
         normal_delta: int,
         bonus_delta: int,
+        free_spins: int = 0,
     ) -> discord.ui.LayoutView:
         # success/premium continuam na assinatura para preservar compatibilidade
         # com o fluxo atual; a cor do resultado agora segue tema + saldo líquido.
@@ -1155,7 +1225,7 @@ class GincanaSlotsMixin:
             f"{title_emoji or '🎰'} {title}",
             summary=summary,
             details=[
-                f"**Resultado:** {self._format_game_result_breakdown(normal_delta, bonus_delta)}",
+                f"**Resultado:** {self._format_roleta2_result_value(normal_delta, bonus_delta, free_spins)}",
                 f"**Saldo atual:** {balance_text}",
             ],
             board=board,
@@ -1185,7 +1255,8 @@ class GincanaSlotsMixin:
                     continue
                 normal = max(0, int(component.get("normal_payout", 0) or 0))
                 bonus = max(0, int(component.get("bonus_payout", 0) or 0))
-                if normal <= 0 and bonus <= 0:
+                free_spins = max(0, int(component.get("free_spins", 0) or 0))
+                if normal <= 0 and bonus <= 0 and free_spins <= 0:
                     continue
                 key = (
                     kind,
@@ -1193,11 +1264,12 @@ class GincanaSlotsMixin:
                     str(component.get("title_emoji") or "🎰"),
                 )
                 if key not in aggregated:
-                    aggregated[key] = {"count": 0, "normal": 0, "bonus": 0}
+                    aggregated[key] = {"count": 0, "normal": 0, "bonus": 0, "free_spins": 0}
                     order.append(key)
                 aggregated[key]["count"] += 1
                 aggregated[key]["normal"] += normal
                 aggregated[key]["bonus"] += bonus
+                aggregated[key]["free_spins"] += free_spins
 
         lines: list[str] = []
         for key in order:
@@ -1208,10 +1280,14 @@ class GincanaSlotsMixin:
             rewards: list[str] = []
             normal = int(values["normal"])
             bonus = int(values["bonus"])
-            if normal > 0:
+            free_spins = int(values.get("free_spins", 0) or 0)
+            if normal > 0 and free_spins <= 0:
                 rewards.append(f"+{normal} {self._CHIP_GAIN_EMOJI}")
             if bonus > 0:
                 rewards.append(f"+{bonus} {self._CHIP_BONUS_EMOJI}")
+            if free_spins > 0:
+                spin_label = "giro grátis" if free_spins == 1 else "giros grátis"
+                rewards.append(f"+{free_spins} {spin_label}")
             if rewards:
                 lines.append(f"-# {emoji} {title}{count_text} · " + " · ".join(rewards))
         return lines
@@ -1629,6 +1705,9 @@ class GincanaSlotsMixin:
             bonus_payout = sum(
                 max(0, int(item.get("bonus_payout", 0) or 0)) for item in outcomes
             )
+            free_spins_awarded = sum(
+                max(0, int(item.get("free_spins", 0) or 0)) for item in outcomes
+            )
             gross_payout = normal_payout + bonus_payout
             round_success = bool(successful_outcomes)
             round_jackpot = any(bool(item.get("jackpot")) for item in outcomes)
@@ -1671,6 +1750,14 @@ class GincanaSlotsMixin:
                     actor.id,
                     bonus_payout,
                     reason=f"Roleta2 · {display_outcome.get('title')}",
+                )
+
+            reward_spin_state: dict[str, float | int] | None = None
+            if free_spins_awarded > 0:
+                _granted_spins, reward_spin_state = await self._grant_roleta2_reward_spins(
+                    guild.id,
+                    actor.id,
+                    free_spins_awarded,
                 )
 
             if round_jackpot:
@@ -1737,6 +1824,12 @@ class GincanaSlotsMixin:
             )
             normal_result_delta = (final_normal - commit_start_normal) - entry_normal
             bonus_result_delta = (final_bonus - commit_start_bonus) - entry_bonus
+            if reward_spin_state is not None:
+                is_staff = isinstance(actor, discord.Member) and self._is_staff_member(actor)
+                footer_text = self._roleta2_footer_text(
+                    state=reward_spin_state,
+                    is_staff=is_staff,
+                )
             result_view = self._make_roleta2_result_view(
                 title=str(display_outcome.get("title") or "Roleta 2"),
                 title_emoji=str(display_outcome.get("title_emoji") or "🎰"),
@@ -1749,6 +1842,7 @@ class GincanaSlotsMixin:
                 footer_text=footer_text,
                 normal_delta=normal_result_delta,
                 bonus_delta=bonus_result_delta,
+                free_spins=free_spins_awarded,
             )
             first_game_unlocked = await self._unlock_achievement(guild.id, actor.id, "first_game")
             roulette_achievements = await self._record_roulette_achievement_result(

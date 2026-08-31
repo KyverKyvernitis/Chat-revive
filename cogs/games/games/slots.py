@@ -20,6 +20,7 @@ ROLETA2_PROBABILITY_SCALE = 10_000
 ROLETA2_DEJA_VU_CHAIN_LIMIT = 20
 ROLETA2_DEJA_VU_BASE_PAYOUT = 10
 ROLETA2_RESPIN_START_DELAYS = (0.66, 0.67, 0.67)
+ROLETA2_EFFECT_READ_DELAY = 0.70
 
 SLOT_BANANA = "banana"
 SLOT_FRAMBOESA = "framboesa"
@@ -105,9 +106,9 @@ ROLETA2_LOSS_SEVEN_WEIGHTS = (
 ROLETA2_LOSS_SUMMARIES = {
     "Não veio nada": "Nenhum resultado foi formado",
     "Nenhuma combinação": "Os símbolos pararam sem formar uma combinação",
-    "Você ganhou... nada!": "A máquina girou, mas o prêmio não veio",
+    "Você ganhou... nada!": "O giro terminou, mas o prêmio não veio",
     "Foi quase hein": "Dois símbolos combinaram",
-    "7 solitário": "Um único 7 apareceu na máquina",
+    "7 solitário": "Veio apenas um 7",
 }
 
 ROLETA2_PAYOUTS = {
@@ -425,14 +426,28 @@ def _slots_generate_grid(
     return _slots_fallback_grid(kind, selected_variant)
 
 
-def _slots_generate_escorredio(rng: random.Random) -> tuple[list[list[str]], list[list[str]], int]:
+def _slots_generate_escorredio(
+    rng: random.Random,
+    *,
+    allow_deja_vu: bool = True,
+) -> tuple[list[list[str]], list[list[str]], int]:
     diagonal = rng.choice(_SLOT_DIAGONALS)
     slip_column = rng.randrange(3)
     for _ in range(512):
         preview = _slot_random_grid(rng, include_seven=False)
         _slot_set_line(preview, diagonal, [SLOT_BANANA] * 3)
         if _slots_detect_kind(preview) == "loss" and _slots_has_escorredio(preview):
-            return preview, _slots_generate_grid("loss", rng), slip_column
+            for _reroll in range(512):
+                final = [list(row) for row in preview]
+                for row in range(3):
+                    final[row][slip_column] = _slot_random_symbol(rng, include_seven=True)
+                # Escorredio é o gatilho da coluna extra, não deve se auto-repetir
+                # só porque o novo símbolo manteve a diagonal de bananas.
+                if _slots_has_escorredio(final):
+                    continue
+                if not allow_deja_vu and "deja_vu" in _slots_matching_kinds(final):
+                    continue
+                return preview, final, slip_column
     if diagonal == _SLOT_DIAGONALS[0]:
         preview = [
             [SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA],
@@ -445,16 +460,34 @@ def _slots_generate_escorredio(rng: random.Random) -> tuple[list[list[str]], lis
             [SLOT_CEREJA, SLOT_BANANA, SLOT_FRAMBOESA],
             [SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA],
         ]
-    return preview, _slots_generate_grid("loss", rng), slip_column
+    final = [list(row) for row in preview]
+    fallback_cycle = (SLOT_CEREJA, SLOT_BAR, SLOT_FRAMBOESA)
+    for row in range(3):
+        final[row][slip_column] = fallback_cycle[row]
+    if not allow_deja_vu and "deja_vu" in _slots_matching_kinds(final):
+        final[0][slip_column] = SLOT_BAR
+    return preview, final, slip_column
+
+
+def _slots_matching_pair(grid: list[list[str]]) -> tuple[str, int] | None:
+    for row_index, values in enumerate(grid):
+        for symbol in SLOT_SYMBOLS:
+            if values.count(symbol) == 2:
+                return str(symbol), row_index
+    return None
 
 
 def _slots_matching_pair_symbol(grid: list[list[str]]) -> str | None:
+    match = _slots_matching_pair(grid)
+    return str(match[0]) if match is not None else None
+
+
+def _slots_bar_abriu_as_7_summary(grid: list[list[str]]) -> str:
     for line in _SLOT_LINES:
         values = _slot_line_values(grid, line)
-        for symbol in SLOT_SYMBOLS:
-            if values.count(symbol) == 2:
-                return str(symbol)
-    return None
+        if values.count(SLOT_BAR) == 2 and values.count(SLOT_SEVEN) == 1:
+            return f"Veio dois {SLOT_EMOJIS[SLOT_BAR]} e um {SLOT_EMOJIS[SLOT_SEVEN]}"
+    return f"Veio dois {SLOT_EMOJIS[SLOT_BAR]} e um {SLOT_EMOJIS[SLOT_SEVEN]}"
 
 
 def _slots_colheita_fruit(grid: list[list[str]]) -> str:
@@ -509,10 +542,11 @@ class GincanaSlotsMixin:
     def _pick_roleta2_loss_copy(self, grid: list[list[str]]) -> tuple[str, str]:
         self._ensure_game_animation_runtime()
         flat = [cell for row in grid for cell in row]
+        pair_match = _slots_matching_pair(grid)
         contextual_title = ""
         if flat.count(SLOT_SEVEN) == 1:
             contextual_title = "7 solitário"
-        elif _slots_matching_pair_symbol(grid) is not None:
+        elif pair_match is not None:
             contextual_title = "Foi quase hein"
 
         generic_titles = (
@@ -527,6 +561,9 @@ class GincanaSlotsMixin:
             available = [candidate for candidate in generic_titles if candidate != last_title]
             title = random.choice(available or list(generic_titles))
         self._last_game_loss_titles["roleta2"] = title
+        if title == "Foi quase hein" and pair_match is not None:
+            line_number = ("1ª", "2ª", "3ª")[int(pair_match[1])]
+            return title, f"Dois símbolos combinaram na {line_number} linha"
         return title, ROLETA2_LOSS_SUMMARIES[title]
 
     def _roll_roleta2_outcome(
@@ -546,7 +583,10 @@ class GincanaSlotsMixin:
         preview_grid: list[list[str]] | None = None
         slip_column: int | None = None
         if kind == "escorredio":
-            preview_grid, grid, slip_column = _slots_generate_escorredio(rng)
+            preview_grid, grid, slip_column = _slots_generate_escorredio(
+                rng,
+                allow_deja_vu=allow_deja_vu,
+            )
         else:
             grid = _slots_generate_grid(kind, rng)
 
@@ -563,17 +603,17 @@ class GincanaSlotsMixin:
                     summary = "As cerejas duplicaram o valor base da Colheita"
                 else:
                     normal_payout, bonus_payout = 15, 0
-                    summary = "As bananas fecharam uma Colheita"
+                    summary = "As bananas fecharam uma Colheita (entrada devolvida)"
             else:
                 summaries = {
                     "sete_pecados": "Sete dos nove espaços vieram com 7",
                     "jackpot": "Três 7 fecharam uma linha",
                     "bar_triplo": "Três BAR fecharam uma linha",
-                    "bar_abriu_as_7": "O BAR abriu exatamente às 7",
+                    "bar_abriu_as_7": _slots_bar_abriu_as_7_summary(grid),
                     "deja_vu": "A primeira e a terceira coluna repetiram o mesmo resultado",
                     "banana_split": "As bananas se dividiram ao redor da cereja",
                     "escorredio": "As bananas fizeram uma coluna escorregar e girar outra vez",
-                    "setes_espalhados": "Os 7 apareceram espalhados pela máquina",
+                    "setes_espalhados": "Os 7 vieram espalhados pelo resultado",
                     "faltou_um_sete": "Dois 7 apareceram, mas o terceiro não veio",
                 }
                 titles = {
@@ -640,6 +680,28 @@ class GincanaSlotsMixin:
                 if component_kind in matches
             ]
             components.append(result_details("deja_vu"))
+        elif kind == "escorredio":
+            matches = _slots_matching_kinds(grid)
+            ordered_combinations = (
+                "sete_pecados",
+                "jackpot",
+                "bar_triplo",
+                "bar_abriu_as_7",
+                "colheita",
+                "banana_split",
+                "setes_espalhados",
+                "faltou_um_sete",
+            )
+            # A combinação formada depois da coluna escorregar é o resultado
+            # visual principal; Escorredio permanece acumulado como modificador.
+            components = [
+                result_details(component_kind)
+                for component_kind in ordered_combinations
+                if component_kind in matches
+            ]
+            components.append(result_details("escorredio"))
+            if "deja_vu" in matches:
+                components.append(result_details("deja_vu"))
         else:
             components = [result_details(kind)]
 
@@ -661,15 +723,37 @@ class GincanaSlotsMixin:
 
         component_kinds = tuple(str(component["kind"]) for component in components)
         has_deja_vu = "deja_vu" in component_kinds
+        has_escorredio = "escorredio" in component_kinds
+        escorredio_normal_payout = sum(
+            int(component["normal_payout"])
+            for component in components
+            if component["kind"] == "escorredio"
+        )
+        escorredio_bonus_payout = sum(
+            int(component["bonus_payout"])
+            for component in components
+            if component["kind"] == "escorredio"
+        )
         return {
             "kind": kind,
             "primary_kind": str(primary["kind"]),
             "component_kinds": component_kinds,
             "has_deja_vu": has_deja_vu,
+            "has_escorredio": has_escorredio,
             "deja_vu_index": int(deja_vu_index) if has_deja_vu else 0,
             "deja_vu_payout": (
                 _slots_deja_vu_payout(deja_vu_index) if has_deja_vu else 0
             ),
+            "deja_vu_summary": (
+                "A primeira e a terceira coluna repetiram o mesmo resultado"
+                if has_deja_vu else ""
+            ),
+            "escorredio_summary": (
+                "As bananas fizeram uma coluna escorregar e girar outra vez"
+                if has_escorredio else ""
+            ),
+            "escorredio_normal_payout": int(escorredio_normal_payout),
+            "escorredio_bonus_payout": int(escorredio_bonus_payout),
             "title": str(primary["title"]),
             "title_emoji": str(primary["title_emoji"]),
             "color_theme": primary["color_theme"],
@@ -876,6 +960,31 @@ class GincanaSlotsMixin:
             color=discord.Color(ROLETA2_THEME_COLORS["deja_vu"]),
         )
 
+    def _make_roleta2_effect_view(
+        self,
+        *,
+        title: str,
+        title_emoji: str,
+        color_theme: str,
+        summary: str,
+        board: str,
+        balance_text: str,
+        footer_text: str,
+        normal_delta: int,
+        bonus_delta: int,
+    ) -> discord.ui.LayoutView:
+        return self._make_game_layout_view(
+            f"{title_emoji} {title}",
+            summary=summary,
+            details=[
+                f"**Resultado:** {self._format_game_result_breakdown(normal_delta, bonus_delta)}",
+                f"**Saldo atual:** {balance_text}",
+            ],
+            board=board,
+            footer_text=footer_text,
+            color=discord.Color(ROLETA2_THEME_COLORS[color_theme]),
+        )
+
     def _make_roleta2_result_view(
         self,
         *,
@@ -925,6 +1034,8 @@ class GincanaSlotsMixin:
         balance_text: str,
         footer_text: str,
         paid_entry: int,
+        entry_normal: int,
+        entry_bonus: int,
         spin_message: discord.Message | None = None,
         skip_event: asyncio.Event | None = None,
     ) -> tuple[discord.Message | None, list[list[str]]]:
@@ -980,12 +1091,22 @@ class GincanaSlotsMixin:
         slip_column = outcome.get("slip_column")
         if isinstance(preview_raw, list) and isinstance(slip_column, int):
             stopped = {0, 1, 2}
-            preview_view = self._make_roleta2_spin_view(
-                self._render_roleta2_board(target_grid),
+            escorredio_normal_delta = (
+                int(outcome.get("escorredio_normal_payout", 0) or 0) - int(entry_normal)
+            )
+            escorredio_bonus_delta = (
+                int(outcome.get("escorredio_bonus_payout", 0) or 0) - int(entry_bonus)
+            )
+            preview_view = self._make_roleta2_effect_view(
+                title="Escorredio",
+                title_emoji=SLOT_EMOJIS[SLOT_BANANA],
+                color_theme=SLOT_BANANA,
+                summary=str(outcome.get("escorredio_summary") or ""),
+                board=self._render_roleta2_board(target_grid),
                 balance_text=balance_text,
                 footer_text=footer_text,
-                paid_entry=paid_entry,
-                title="🍌 Escorredio...",
+                normal_delta=escorredio_normal_delta,
+                bonus_delta=escorredio_bonus_delta,
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -996,19 +1117,23 @@ class GincanaSlotsMixin:
             )
             if rendered is not None:
                 spin_message = rendered
-            if not await self._wait_game_animation_delay(skip_event, 0.42):
+            if not await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY):
                 return spin_message, final_grid
             slipping = self._roleta2_display_grid(
                 target_grid,
                 stopped_columns=stopped,
                 spinning_column=max(0, min(2, int(slip_column))),
             )
-            slipping_view = self._make_roleta2_spin_view(
-                self._render_roleta2_board(slipping),
+            slipping_view = self._make_roleta2_effect_view(
+                title="Escorredio...",
+                title_emoji=SLOT_EMOJIS[SLOT_BANANA],
+                color_theme=SLOT_BANANA,
+                summary=str(outcome.get("escorredio_summary") or ""),
+                board=self._render_roleta2_board(slipping),
                 balance_text=balance_text,
                 footer_text=footer_text,
-                paid_entry=paid_entry,
-                title="🍌 Uma coluna escorregou...",
+                normal_delta=escorredio_normal_delta,
+                bonus_delta=escorredio_bonus_delta,
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -1019,7 +1144,35 @@ class GincanaSlotsMixin:
             )
             if rendered is not None:
                 spin_message = rendered
-            await self._wait_game_animation_delay(skip_event, 0.76)
+            if not await self._wait_game_animation_delay(skip_event, 0.76):
+                return spin_message, final_grid
+
+        if bool(outcome.get("has_deja_vu")):
+            deja_view = self._make_roleta2_effect_view(
+                title="Déjà vu",
+                title_emoji="🔁",
+                color_theme="deja_vu",
+                summary=str(outcome.get("deja_vu_summary") or ""),
+                board=self._render_roleta2_board(final_grid),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=(
+                    int(outcome.get("normal_payout", 0) or 0) - int(entry_normal)
+                ),
+                bonus_delta=(
+                    int(outcome.get("bonus_payout", 0) or 0) - int(entry_bonus)
+                ),
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=deja_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
         return spin_message, final_grid
 
@@ -1098,19 +1251,49 @@ class GincanaSlotsMixin:
 
         slip_column = outcome.get("slip_column")
         if isinstance(preview_raw, list) and isinstance(slip_column, int):
-            if not await self._wait_game_animation_delay(skip_event, 0.42):
+            escorredio_normal_delta = normal_delta + int(
+                outcome.get("escorredio_normal_payout", 0) or 0
+            )
+            escorredio_bonus_delta = bonus_delta + int(
+                outcome.get("escorredio_bonus_payout", 0) or 0
+            )
+            preview_view = self._make_roleta2_effect_view(
+                title="Escorredio",
+                title_emoji=SLOT_EMOJIS[SLOT_BANANA],
+                color_theme=SLOT_BANANA,
+                summary=str(outcome.get("escorredio_summary") or ""),
+                board=self._render_roleta2_board(target_grid),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=escorredio_normal_delta,
+                bonus_delta=escorredio_bonus_delta,
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=preview_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            if not await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY):
                 return spin_message, final_grid
             slipping = self._roleta2_display_grid(
                 target_grid,
                 stopped_columns={0, 1, 2},
                 spinning_column=max(0, min(2, int(slip_column))),
             )
-            slipping_view = self._make_roleta2_respin_view(
-                self._render_roleta2_board(slipping),
+            slipping_view = self._make_roleta2_effect_view(
+                title="Escorredio...",
+                title_emoji=SLOT_EMOJIS[SLOT_BANANA],
+                color_theme=SLOT_BANANA,
+                summary=str(outcome.get("escorredio_summary") or ""),
+                board=self._render_roleta2_board(slipping),
                 balance_text=balance_text,
                 footer_text=footer_text,
-                normal_delta=normal_delta,
-                bonus_delta=bonus_delta,
+                normal_delta=escorredio_normal_delta,
+                bonus_delta=escorredio_bonus_delta,
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -1121,7 +1304,31 @@ class GincanaSlotsMixin:
             )
             if rendered is not None:
                 spin_message = rendered
-            await self._wait_game_animation_delay(skip_event, 0.76)
+            if not await self._wait_game_animation_delay(skip_event, 0.76):
+                return spin_message, final_grid
+
+        if bool(outcome.get("has_deja_vu")):
+            deja_view = self._make_roleta2_effect_view(
+                title="Déjà vu",
+                title_emoji="🔁",
+                color_theme="deja_vu",
+                summary=str(outcome.get("deja_vu_summary") or ""),
+                board=self._render_roleta2_board(final_grid),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=normal_delta + int(outcome.get("normal_payout", 0) or 0),
+                bonus_delta=bonus_delta + int(outcome.get("bonus_payout", 0) or 0),
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=deja_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
         return spin_message, final_grid
 
@@ -1173,6 +1380,8 @@ class GincanaSlotsMixin:
                 balance_text=balance_text,
                 footer_text=footer_text,
                 paid_entry=paid_entry,
+                entry_normal=entry_normal,
+                entry_bonus=entry_bonus,
                 spin_message=spin_message,
                 skip_event=skip_event,
             )

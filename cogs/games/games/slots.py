@@ -11,7 +11,6 @@ from config import OFF_COLOR
 
 
 ROLETA2_COST = 15
-ROLETA2_MAX_PRIZE = 200
 ROLETA2_SPIN_LIMIT = 5
 ROLETA2_WINDOW_SECONDS = 6 * 60 * 60
 ROLETA2_DAILY_EXTRA_SPINS = 2
@@ -19,6 +18,8 @@ ROLETA2_DAILY_EXTRA_CAP = 2
 ROLETA2_PROBABILITY_SCALE = 10_000
 ROLETA2_DEJA_VU_CHAIN_LIMIT = 20
 ROLETA2_DEJA_VU_BASE_PAYOUT = 10
+ROLETA2_DEJA_VU_TO_ESCORREDIO_CHANCE = 0.25
+ROLETA2_ESCORREDIO_TO_DEJA_VU_CHANCE = 0.35
 ROLETA2_RESPIN_START_DELAYS = (0.66, 0.67, 0.67)
 ROLETA2_EFFECT_READ_DELAY = 0.70
 
@@ -428,9 +429,10 @@ def _slots_grid_matches_kind(
     selected = variant or {}
     matches = _slots_matching_kinds(grid)
     if kind == "deja_vu":
-        # Déjà vu é um modificador: as colunas repetidas podem coexistir com
-        # uma combinação válida no mesmo tabuleiro.
-        if "deja_vu" not in matches:
+        # Déjà vu pode acumular com resultados de OUTROS estágios da mesma
+        # rodada, mas o tabuleiro que o dispara é exclusivo: nenhuma outra
+        # combinação paga simultaneamente nesse mesmo grid.
+        if matches != {"deja_vu"}:
             return False
     else:
         expected_matches = set() if kind == "loss" else {kind}
@@ -475,23 +477,35 @@ def _slots_generate_grid(
 def _slots_generate_escorredio(
     rng: random.Random,
     *,
-    allow_deja_vu: bool = True,
+    force_deja_vu: bool = False,
 ) -> tuple[list[list[str]], list[list[str]], int]:
     diagonal = rng.choice(_SLOT_DIAGONALS)
-    slip_column = rng.randrange(3)
+    # Para o Escorredio realmente *causar* um Déjà vu, a coluna que escorrega
+    # precisa ser uma das externas; só elas conseguem transformar um preview
+    # que ainda não é Déjà vu em duas colunas externas idênticas.
+    slip_column = rng.choice((0, 2)) if force_deja_vu else rng.randrange(3)
     for _ in range(512):
         preview = _slot_random_grid(rng, include_seven=False)
         _slot_set_line(preview, diagonal, [SLOT_BANANA] * 3)
         if _slots_detect_kind(preview) == "loss" and _slots_has_escorredio(preview):
             for _reroll in range(512):
                 final = [list(row) for row in preview]
-                for row in range(3):
-                    final[row][slip_column] = _slot_random_symbol(rng, include_seven=True)
+                if force_deja_vu:
+                    mirror_column = 2 if slip_column == 0 else 0
+                    for row in range(3):
+                        final[row][slip_column] = final[row][mirror_column]
+                else:
+                    for row in range(3):
+                        final[row][slip_column] = _slot_random_symbol(rng, include_seven=True)
                 # Escorredio é o gatilho da coluna extra, não deve se auto-repetir
                 # só porque o novo símbolo manteve a diagonal de bananas.
                 if _slots_has_escorredio(final):
                     continue
-                if not allow_deja_vu and "deja_vu" in _slots_matching_kinds(final):
+                final_matches = _slots_matching_kinds(final)
+                if force_deja_vu:
+                    if final_matches != {"deja_vu"}:
+                        continue
+                elif "deja_vu" in final_matches:
                     continue
                 return preview, final, slip_column
     if diagonal == _SLOT_DIAGONALS[0]:
@@ -507,11 +521,36 @@ def _slots_generate_escorredio(
             [SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA],
         ]
     final = [list(row) for row in preview]
-    fallback_cycle = (SLOT_CEREJA, SLOT_BAR, SLOT_FRAMBOESA)
-    for row in range(3):
-        final[row][slip_column] = fallback_cycle[row]
-    if not allow_deja_vu and "deja_vu" in _slots_matching_kinds(final):
-        final[0][slip_column] = SLOT_BAR
+    if force_deja_vu:
+        mirror_column = 2 if slip_column == 0 else 0
+        for row in range(3):
+            final[row][slip_column] = final[row][mirror_column]
+        # O fallback acima pode coincidir com outra combinação em um caso
+        # extremo. Este grid é deliberadamente simples e exclusivo para manter
+        # a invariável "Déjà vu sozinho no tabuleiro".
+        if _slots_matching_kinds(final) != {"deja_vu"} or _slots_has_escorredio(final):
+            if slip_column == 0:
+                preview = [
+                    [SLOT_BANANA, SLOT_BAR, SLOT_CEREJA],
+                    [SLOT_CEREJA, SLOT_BANANA, SLOT_FRAMBOESA],
+                    [SLOT_FRAMBOESA, SLOT_BAR, SLOT_BANANA],
+                ]
+            else:
+                preview = [
+                    [SLOT_BANANA, SLOT_BAR, SLOT_FRAMBOESA],
+                    [SLOT_FRAMBOESA, SLOT_BANANA, SLOT_CEREJA],
+                    [SLOT_CEREJA, SLOT_BAR, SLOT_BANANA],
+                ]
+            final = [list(row) for row in preview]
+            mirror_column = 2 if slip_column == 0 else 0
+            for row in range(3):
+                final[row][slip_column] = final[row][mirror_column]
+    else:
+        fallback_cycle = (SLOT_CEREJA, SLOT_BAR, SLOT_FRAMBOESA)
+        for row in range(3):
+            final[row][slip_column] = fallback_cycle[row]
+        if "deja_vu" in _slots_matching_kinds(final):
+            final[0][slip_column] = SLOT_BAR
     return preview, final, slip_column
 
 
@@ -545,6 +584,27 @@ def _slots_colheita_fruit(grid: list[list[str]]) -> str:
 
 def _slots_deja_vu_payout(chain_index: int) -> int:
     return ROLETA2_DEJA_VU_BASE_PAYOUT * max(1, int(chain_index or 1))
+
+
+def _slots_effect_triggers_followup(
+    source_kind: str,
+    rng: random.Random,
+    *,
+    allow_deja_vu: bool = True,
+) -> bool:
+    if source_kind == "deja_vu":
+        return float(rng.random()) < ROLETA2_DEJA_VU_TO_ESCORREDIO_CHANCE
+    if source_kind == "escorredio" and allow_deja_vu:
+        return float(rng.random()) < ROLETA2_ESCORREDIO_TO_DEJA_VU_CHANCE
+    return False
+
+
+def _slots_deja_vu_followup_policy(rng: random.Random) -> tuple[str | None, tuple[str, ...]]:
+    # Os 25% são a chance TOTAL de o próximo estágio ser Escorredio. Nos 75%
+    # restantes ele é removido do sorteio normal, evitando 25% + chance-base.
+    if _slots_effect_triggers_followup("deja_vu", rng):
+        return "escorredio", ()
+    return None, ("escorredio",)
 
 
 def _slots_respin_column_order(deja_vu_index: int) -> tuple[int, int, int]:
@@ -646,21 +706,33 @@ class GincanaSlotsMixin:
         *,
         deja_vu_index: int = 1,
         allow_deja_vu: bool = True,
+        forced_kind: str | None = None,
+        excluded_kinds: tuple[str, ...] = (),
     ) -> dict[str, object]:
-        outcome_table = (
-            ROLETA2_OUTCOME_WEIGHTS
-            if allow_deja_vu
-            else tuple(item for item in ROLETA2_OUTCOME_WEIGHTS if item[0] != "deja_vu")
+        excluded = set(str(item) for item in excluded_kinds)
+        if not allow_deja_vu:
+            excluded.add("deja_vu")
+        outcome_table = tuple(
+            item for item in ROLETA2_OUTCOME_WEIGHTS if item[0] not in excluded
         )
-        kinds, weights = zip(*outcome_table)
-        kind = str(random.choices(kinds, weights=weights, k=1)[0])
+        selected_forced_kind = str(forced_kind or "")
+        if selected_forced_kind and selected_forced_kind not in excluded:
+            kind = selected_forced_kind
+        else:
+            kinds, weights = zip(*outcome_table)
+            kind = str(random.choices(kinds, weights=weights, k=1)[0])
         rng = random
         preview_grid: list[list[str]] | None = None
         slip_column: int | None = None
         if kind == "escorredio":
-            preview_grid, grid, slip_column = _slots_generate_escorredio(
+            trigger_deja_vu = _slots_effect_triggers_followup(
+                "escorredio",
                 rng,
                 allow_deja_vu=allow_deja_vu,
+            )
+            preview_grid, grid, slip_column = _slots_generate_escorredio(
+                rng,
+                force_deja_vu=trigger_deja_vu,
             )
         else:
             grid = _slots_generate_grid(kind, rng)
@@ -738,23 +810,9 @@ class GincanaSlotsMixin:
                 "jackpot": False,
             }]
         elif kind == "deja_vu":
-            matches = _slots_matching_kinds(grid)
-            ordered_combinations = (
-                "sete_pecados",
-                "jackpot",
-                "bar_triplo",
-                "bar_abriu_as_7",
-                "colheita",
-                "banana_split",
-                "setes_espalhados",
-                "faltou_um_sete",
-            )
-            components = [
-                result_details(component_kind)
-                for component_kind in ordered_combinations
-                if component_kind in matches
-            ]
-            components.append(result_details("deja_vu"))
+            # Exclusivo neste tabuleiro. Outros resultados podem entrar na
+            # mesma rodada somente antes/depois, através dos respins.
+            components = [result_details("deja_vu")]
         elif kind == "escorredio":
             matches = _slots_matching_kinds(grid)
             ordered_combinations = (
@@ -769,14 +827,19 @@ class GincanaSlotsMixin:
             )
             # A combinação formada depois da coluna escorregar é o resultado
             # visual principal; Escorredio permanece acumulado como modificador.
-            components = [
-                result_details(component_kind)
-                for component_kind in ordered_combinations
-                if component_kind in matches
-            ]
-            components.append(result_details("escorredio"))
             if "deja_vu" in matches:
+                # O Escorredio aconteceu no preview; o Déjà vu só nasce depois
+                # que a coluna termina de escorregar. Como o grid final é Déjà
+                # vu, nenhuma outra combinação desse mesmo grid pode pagar.
+                components = [result_details("escorredio")]
                 components.append(result_details("deja_vu"))
+            else:
+                components = [
+                    result_details(component_kind)
+                    for component_kind in ordered_combinations
+                    if component_kind in matches
+                ]
+                components.append(result_details("escorredio"))
         else:
             components = [result_details(kind)]
 
@@ -1007,7 +1070,6 @@ class GincanaSlotsMixin:
             title,
             details=[
                 f"**Entrada:** {self._format_game_entry_value(paid_entry)}",
-                f"**Prêmio máximo:** {self._chip_text(ROLETA2_MAX_PRIZE, kind='gain')}",
                 f"**Saldo atual:** {balance_text}",
             ],
             board=board,
@@ -1028,7 +1090,6 @@ class GincanaSlotsMixin:
             "🔁 Déjà vu...",
             details=[
                 f"**Resultado:** {self._format_game_result_breakdown(normal_delta, bonus_delta)}",
-                f"**Prêmio máximo:** {self._chip_text(ROLETA2_MAX_PRIZE, kind='gain')}",
                 f"**Saldo atual:** {balance_text}",
             ],
             board=board,
@@ -1480,16 +1541,25 @@ class GincanaSlotsMixin:
     ) -> bool:
         outcomes: list[dict[str, object]] = []
         deja_vu_count = 0
+        forced_kind: str | None = None
+        excluded_kinds: tuple[str, ...] = ()
         while True:
             allow_deja_vu = deja_vu_count < ROLETA2_DEJA_VU_CHAIN_LIMIT
             outcome = self._roll_roleta2_outcome(
                 deja_vu_index=deja_vu_count + 1,
                 allow_deja_vu=allow_deja_vu,
+                forced_kind=forced_kind,
+                excluded_kinds=excluded_kinds,
             )
             outcomes.append(outcome)
             if not bool(outcome.get("has_deja_vu")):
                 break
             deja_vu_count += 1
+            if deja_vu_count >= ROLETA2_DEJA_VU_CHAIN_LIMIT:
+                forced_kind = None
+                excluded_kinds = ("deja_vu",)
+                continue
+            forced_kind, excluded_kinds = _slots_deja_vu_followup_policy(random)
 
         paid_entry = self._entry_paid_amount(entry_spend, entry_cost)
         if isinstance(entry_spend, dict):

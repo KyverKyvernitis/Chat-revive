@@ -79,6 +79,31 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             self.assertEqual(configured, values)
             self.assertEqual(sum(configured.values()), 10_000)
 
+    def test_special_effect_transition_chances_are_exact(self) -> None:
+        self.assertEqual(self.namespace["ROLETA2_DEJA_VU_TO_ESCORREDIO_CHANCE"], 0.25)
+        self.assertEqual(self.namespace["ROLETA2_ESCORREDIO_TO_DEJA_VU_CHANCE"], 0.35)
+        triggers = self.namespace["_slots_effect_triggers_followup"]
+        policy = self.namespace["_slots_deja_vu_followup_policy"]
+
+        class FixedRng:
+            def __init__(self, value: float):
+                self.value = value
+
+            def random(self) -> float:
+                return self.value
+
+        self.assertTrue(triggers("deja_vu", FixedRng(0.249999)))
+        self.assertFalse(triggers("deja_vu", FixedRng(0.25)))
+        self.assertTrue(triggers("escorredio", FixedRng(0.349999)))
+        self.assertFalse(triggers("escorredio", FixedRng(0.35)))
+        self.assertFalse(
+            triggers("escorredio", FixedRng(0.0), allow_deja_vu=False)
+        )
+        self.assertEqual(policy(FixedRng(0.10)), ("escorredio", ()))
+        # Escorredio sai do sorteio dos 75% restantes; assim a transição total
+        # Déjà vu -> Escorredio continua sendo exatamente 25%.
+        self.assertEqual(policy(FixedRng(0.90)), (None, ("escorredio",)))
+
     def test_fixed_probabilities_keep_the_base_return_in_the_intended_band(self) -> None:
         outcome_weights = dict(self.namespace["ROLETA2_OUTCOME_WEIGHTS"])
         payouts = dict(self.namespace["ROLETA2_PAYOUTS"])
@@ -122,7 +147,7 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             for _ in range(100):
                 grid = generate(kind, rng)
                 if kind == "deja_vu":
-                    self.assertIn("deja_vu", matching(grid), grid)
+                    self.assertEqual(matching(grid), {"deja_vu"}, grid)
                 else:
                     self.assertEqual(detect(grid), kind, (kind, grid))
                 if kind == "loss":
@@ -163,7 +188,7 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             grid = generate("loss", rng, {"seven_count": count})
             self.assertEqual(sum(cell == "seven" for row in grid for cell in row), count)
 
-    def test_escorredio_rerolls_only_one_column_and_can_form_another_result(self) -> None:
+    def test_escorredio_rerolls_only_one_column_and_deja_vu_is_an_explicit_followup(self) -> None:
         generate = self.namespace["_slots_generate_escorredio"]
         has_escorredio = self.namespace["_slots_has_escorredio"]
         matching = self.namespace["_slots_matching_kinds"]
@@ -180,12 +205,21 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
                     [final[row][other_column] for row in range(3)],
                 )
             combined_results.update(matching(final))
-        self.assertTrue(combined_results & {"colheita", "banana_split", "deja_vu", "bar_triplo"})
-
-        no_deja_rng = random.Random(20260831)
-        for _ in range(100):
-            _preview, final, _column = generate(no_deja_rng, allow_deja_vu=False)
             self.assertNotIn("deja_vu", matching(final))
+        self.assertTrue(combined_results & {"colheita", "banana_split", "bar_triplo"})
+
+        forced_deja_rng = random.Random(20260831)
+        for _ in range(100):
+            preview, final, column = generate(forced_deja_rng, force_deja_vu=True)
+            self.assertTrue(has_escorredio(preview), preview)
+            self.assertFalse(has_escorredio(final), final)
+            self.assertIn(column, {0, 2})
+            self.assertEqual(matching(final), {"deja_vu"}, final)
+            for other_column in {0, 1, 2} - {column}:
+                self.assertEqual(
+                    [preview[row][other_column] for row in range(3)],
+                    [final[row][other_column] for row in range(3)],
+                )
 
     def test_command_and_bare_trigger_are_both_wired(self) -> None:
         games = GAMES_PATH.read_text(encoding="utf-8")
@@ -442,7 +476,7 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("ROLETA2_NEUTRAL_COLOR", source)
         self.assertIn("title_emoji or '🎰'", source)
 
-    def test_deja_vu_is_combinable_and_scales_ten_twenty_thirty(self) -> None:
+    def test_deja_vu_is_exclusive_per_board_but_scales_ten_twenty_thirty(self) -> None:
         matching = self.namespace["_slots_matching_kinds"]
         grid_matches = self.namespace["_slots_grid_matches_kind"]
         payout = self.namespace["_slots_deja_vu_payout"]
@@ -456,7 +490,12 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("colheita", matches)
         self.assertIn("banana_split", matches)
         self.assertIn("bar_triplo", matches)
-        self.assertTrue(grid_matches("deja_vu", combined_grid))
+        self.assertFalse(grid_matches("deja_vu", combined_grid))
+        exclusive_grid = self.namespace["_slots_generate_grid"](
+            "deja_vu", random.Random(20260831)
+        )
+        self.assertEqual(matching(exclusive_grid), {"deja_vu"})
+        self.assertTrue(grid_matches("deja_vu", exclusive_grid))
         self.assertEqual(payout(1), 10)
         self.assertEqual(payout(2), 20)
         self.assertEqual(payout(3), 30)
@@ -474,18 +513,26 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
 
     def test_deja_vu_respin_runs_inside_the_same_round_with_live_result(self) -> None:
         execution = self._async_function_source("_execute_roleta2_round")
+        initial_spin_view = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_make_roleta2_spin_view"
+        )
         respin = self._async_function_source("_animate_roleta2_respin")
         respin_view = next(
             node for node in ast.walk(self.tree)
             if isinstance(node, ast.FunctionDef) and node.name == "_make_roleta2_respin_view"
         )
         respin_view_source = str(ast.get_source_segment(self.source, respin_view))
+        initial_spin_view_source = str(ast.get_source_segment(self.source, initial_spin_view))
 
         self.assertEqual(self.namespace["ROLETA2_DEJA_VU_CHAIN_LIMIT"], 20)
         self.assertEqual(tuple(self.namespace["ROLETA2_RESPIN_START_DELAYS"]), (0.66, 0.67, 0.67))
         self.assertAlmostEqual(self.namespace["ROLETA2_EFFECT_READ_DELAY"], 0.70, places=2)
         self.assertIn("while True:", execution)
         self.assertIn("_roll_roleta2_outcome", execution)
+        self.assertIn("forced_kind=forced_kind", execution)
+        self.assertIn("excluded_kinds=excluded_kinds", execution)
+        self.assertIn("_slots_deja_vu_followup_policy(random)", execution)
         self.assertIn("_animate_roleta2_respin", execution)
         self.assertNotIn("_reserve_roleta2_spin_state", respin)
         self.assertNotIn("_try_consume_chips", respin)
@@ -498,6 +545,8 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn('"🔁 Déjà vu..."', respin_view_source)
         self.assertIn('f"**Resultado:**', respin_view_source)
         self.assertNotIn('f"**Entrada:**', respin_view_source)
+        self.assertNotIn("Prêmio máximo", initial_spin_view_source)
+        self.assertNotIn("Prêmio máximo", respin_view_source)
         self.assertIn('ROLETA2_THEME_COLORS["deja_vu"]', respin_view_source)
         self.assertIn("ROLETA2_EFFECT_READ_DELAY", respin)
 
@@ -540,15 +589,16 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("display_outcome, display_color_theme = _slots_final_presentation(outcomes)", execution)
         self.assertNotIn("visible_outcomes[-1]", execution)
 
-    def test_deja_vu_roll_can_pay_another_result_on_the_same_board(self) -> None:
+    def test_deja_vu_roll_never_pays_another_result_on_the_same_board(self) -> None:
         roll = next(
             node for node in ast.walk(self.tree)
             if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
         )
         source = str(ast.get_source_segment(self.source, roll))
         self.assertIn('elif kind == "deja_vu":', source)
-        self.assertIn('matches = _slots_matching_kinds(grid)', source)
-        self.assertIn('components.append(result_details("deja_vu"))', source)
+        deja_branch = source[source.index('elif kind == "deja_vu":'):source.index('elif kind == "escorredio":')]
+        self.assertIn('components = [result_details("deja_vu")]', deja_branch)
+        self.assertNotIn('matches = _slots_matching_kinds(grid)', deja_branch)
         self.assertIn('normal_payout = sum(', source)
         self.assertIn('bonus_payout = sum(', source)
         self.assertIn('"has_deja_vu": has_deja_vu', source)
@@ -565,6 +615,8 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn('elif kind == "escorredio":', roll_source)
         self.assertIn('components.append(result_details("escorredio"))', roll_source)
         self.assertIn('if "deja_vu" in matches:', roll_source)
+        self.assertIn('components = [result_details("escorredio")]', roll_source)
+        self.assertIn('force_deja_vu=trigger_deja_vu', roll_source)
         self.assertIn('"escorredio_normal_payout"', roll_source)
         self.assertIn('title="Escorredio"', initial_animation)
         self.assertIn("ROLETA2_EFFECT_READ_DELAY", initial_animation)

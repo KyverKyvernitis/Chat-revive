@@ -501,6 +501,35 @@ def _slots_deja_vu_payout(chain_index: int) -> int:
     return ROLETA2_DEJA_VU_BASE_PAYOUT * max(1, int(chain_index or 1))
 
 
+def _slots_respin_column_order(deja_vu_index: int) -> tuple[int, int, int]:
+    # O primeiro Déjà vu rebate da direita para a esquerda; cada novo Déjà vu
+    # inverte o sentido inteiro do respin (entrada dos emojis + parada).
+    return (2, 1, 0) if max(1, int(deja_vu_index or 1)) % 2 == 1 else (0, 1, 2)
+
+
+def _slots_final_presentation(
+    outcomes: list[dict[str, object]],
+) -> tuple[dict[str, object], str | None]:
+    if not outcomes:
+        return {}, None
+
+    # Título/descrição/emoji sempre pertencem ao ÚLTIMO tabuleiro mostrado.
+    # A cor pode continuar herdando o último evento especial anterior quando o
+    # terminal é uma perda comum, preservando a identidade visual da cadeia sem
+    # mentir sobre a grade final.
+    terminal = outcomes[-1]
+    terminal_kind = str(terminal.get("primary_kind") or terminal.get("kind") or "loss")
+    color_theme = str(terminal.get("color_theme")) if terminal.get("color_theme") else None
+    if terminal_kind == "loss":
+        for previous in reversed(outcomes[:-1]):
+            previous_kind = str(previous.get("primary_kind") or previous.get("kind") or "loss")
+            if previous_kind == "loss" or not previous.get("color_theme"):
+                continue
+            color_theme = str(previous.get("color_theme"))
+            break
+    return terminal, color_theme
+
+
 def _slots_respin_start_grid(
     current_grid: list[list[str]],
     *,
@@ -1186,6 +1215,7 @@ class GincanaSlotsMixin:
         footer_text: str,
         normal_delta: int,
         bonus_delta: int,
+        respin_index: int,
         spin_message: discord.Message | None = None,
         skip_event: asyncio.Event | None = None,
     ) -> tuple[discord.Message | None, list[list[str]]]:
@@ -1195,8 +1225,9 @@ class GincanaSlotsMixin:
         if skip_event is not None and skip_event.is_set():
             return spin_message, final_grid
 
+        column_order = _slots_respin_column_order(respin_index)
         spinning_columns: set[int] = set()
-        for index, column in enumerate((2, 1, 0)):
+        for index, column in enumerate(column_order):
             spinning_columns.add(column)
             frame = _slots_respin_start_grid(
                 current_grid,
@@ -1225,7 +1256,7 @@ class GincanaSlotsMixin:
                 return spin_message, final_grid
 
         stopped: set[int] = set()
-        for column, delay in zip((2, 1, 0), ROLETA2_COLUMN_DELAYS):
+        for column, delay in zip(column_order, ROLETA2_COLUMN_DELAYS):
             if not await self._wait_game_animation_delay(skip_event, delay):
                 return spin_message, final_grid
             stopped.add(column)
@@ -1388,7 +1419,7 @@ class GincanaSlotsMixin:
             running_normal_payout += max(0, int(first_outcome.get("normal_payout", 0) or 0))
             running_bonus_payout += max(0, int(first_outcome.get("bonus_payout", 0) or 0))
 
-            for next_outcome in outcomes[1:]:
+            for respin_index, next_outcome in enumerate(outcomes[1:], start=1):
                 spin_message, final_grid = await self._animate_roleta2_respin(
                     source_message,
                     current_grid=final_grid,
@@ -1397,6 +1428,7 @@ class GincanaSlotsMixin:
                     footer_text=footer_text,
                     normal_delta=running_normal_payout - entry_normal,
                     bonus_delta=running_bonus_payout - entry_bonus,
+                    respin_index=respin_index,
                     spin_message=spin_message,
                     skip_event=skip_event,
                 )
@@ -1420,16 +1452,7 @@ class GincanaSlotsMixin:
         async with self._game_user_state_lock(guild.id, actor.id):
             commit_start_normal, commit_start_bonus = self._current_game_chip_balances(guild.id, actor.id)
             successful_outcomes = [item for item in outcomes if bool(item.get("success"))]
-            visible_outcomes = [
-                item
-                for item in outcomes
-                if str(item.get("primary_kind") or item.get("kind") or "loss") != "loss"
-            ]
-            # O resultado terminal assume a identidade visual quando ele é
-            # especial; se o respin terminar em perda comum, preservamos o
-            # último evento especial que realmente gerou prêmio.
-            display_outcome = visible_outcomes[-1] if visible_outcomes else outcomes[-1]
-            kind = str(display_outcome.get("primary_kind") or display_outcome.get("kind") or "loss")
+            display_outcome, display_color_theme = _slots_final_presentation(outcomes)
             normal_payout = sum(
                 max(0, int(item.get("normal_payout", 0) or 0)) for item in outcomes
             )
@@ -1446,11 +1469,10 @@ class GincanaSlotsMixin:
             )
             summary_lines: list[str] = [str(display_outcome.get("summary") or "").strip()]
             deja_vu_total = sum(int(item.get("deja_vu_payout", 0) or 0) for item in outcomes)
-            if deja_vu_count > 0 and (
-                kind != "deja_vu" or deja_vu_count > 1
-            ):
-                deja_label = "Déjà vu" if deja_vu_count == 1 else f"Déjà vu ×{deja_vu_count}"
-                summary_lines.append(f"{deja_label} · +{deja_vu_total} acumulados")
+            if deja_vu_count > 0:
+                summary_lines.append(
+                    f"-# 🔁 Déjà vu ×{deja_vu_count} · +{deja_vu_total} {self._CHIP_BONUS_EMOJI}"
+                )
 
             await self.db.add_user_game_stat(guild.id, actor.id, "roleta2_spins", 1)
             weekly_points = 2
@@ -1547,7 +1569,7 @@ class GincanaSlotsMixin:
             result_view = self._make_roleta2_result_view(
                 title=str(display_outcome.get("title") or "Roleta 2"),
                 title_emoji=str(display_outcome.get("title_emoji") or "🎰"),
-                color_theme=(str(display_outcome.get("color_theme")) if display_outcome.get("color_theme") else None),
+                color_theme=display_color_theme,
                 summary="\n".join(line for line in summary_lines if line),
                 board=self._render_roleta2_board(final_grid),
                 balance_text=self._format_game_balance_values(display_normal, display_bonus),

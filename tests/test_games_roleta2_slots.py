@@ -442,14 +442,56 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("_animate_roleta2_respin", execution)
         self.assertNotIn("_reserve_roleta2_spin_state", respin)
         self.assertNotIn("_try_consume_chips", respin)
-        self.assertIn("for index, column in enumerate((2, 1, 0))", respin)
-        self.assertIn("for column, delay in zip((2, 1, 0), ROLETA2_COLUMN_DELAYS)", respin)
+        self.assertIn("column_order = _slots_respin_column_order(respin_index)", respin)
+        self.assertIn("for index, column in enumerate(column_order)", respin)
+        self.assertIn("for column, delay in zip(column_order, ROLETA2_COLUMN_DELAYS)", respin)
         self.assertIn("ROLETA2_RESPIN_START_DELAYS[index]", respin)
+        self.assertIn("for respin_index, next_outcome in enumerate(outcomes[1:], start=1)", execution)
+        self.assertIn("respin_index=respin_index", execution)
         self.assertIn('"🔁 Déjà vu..."', respin_view_source)
         self.assertIn('f"**Resultado:**', respin_view_source)
         self.assertNotIn('f"**Entrada:**', respin_view_source)
         self.assertIn('ROLETA2_THEME_COLORS["deja_vu"]', respin_view_source)
         self.assertIn("ROLETA2_EFFECT_READ_DELAY", respin)
+
+
+    def test_deja_vu_respin_direction_alternates_every_chain_step(self) -> None:
+        order = self.namespace["_slots_respin_column_order"]
+        self.assertEqual(order(1), (2, 1, 0))
+        self.assertEqual(order(2), (0, 1, 2))
+        self.assertEqual(order(3), (2, 1, 0))
+        self.assertEqual(order(4), (0, 1, 2))
+
+    def test_final_presentation_always_matches_the_terminal_board(self) -> None:
+        select = self.namespace["_slots_final_presentation"]
+        previous_colheita = {
+            "kind": "deja_vu",
+            "primary_kind": "colheita",
+            "title": "Colheita",
+            "summary": "Três framboesas renderam fichas bônus",
+            "color_theme": "framboesa",
+        }
+        terminal_loss = {
+            "kind": "loss",
+            "primary_kind": "loss",
+            "title": "Foi quase hein",
+            "summary": "Dois símbolos combinaram na 3ª linha",
+            "color_theme": "cereja",
+        }
+        display, color_theme = select([previous_colheita, terminal_loss])
+        self.assertIs(display, terminal_loss)
+        self.assertEqual(display["title"], "Foi quase hein")
+        self.assertEqual(display["summary"], "Dois símbolos combinaram na 3ª linha")
+        # A identidade temática acumulada pode permanecer sem trocar o texto
+        # do tabuleiro terminal por um resultado antigo.
+        self.assertEqual(color_theme, "framboesa")
+
+    def test_final_deja_vu_modifier_is_compact_and_uses_bonus_emoji(self) -> None:
+        execution = self._async_function_source("_execute_roleta2_round")
+        self.assertIn('f"-# 🔁 Déjà vu ×{deja_vu_count} · +{deja_vu_total} {self._CHIP_BONUS_EMOJI}"', execution)
+        self.assertNotIn("acumulados", execution)
+        self.assertIn("display_outcome, display_color_theme = _slots_final_presentation(outcomes)", execution)
+        self.assertNotIn("visible_outcomes[-1]", execution)
 
     def test_deja_vu_roll_can_pay_another_result_on_the_same_board(self) -> None:
         roll = next(

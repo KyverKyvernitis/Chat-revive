@@ -88,6 +88,12 @@ ROLETA2_LINE_TYPE_WEIGHTS = (
     ("horizontal", 7_500),
     ("diagonal", 2_500),
 )
+# Banana split preserva a proporção 75/25 já usada para orientação, mas usa
+# linhas/colunas para que a descrição sempre corresponda a uma posição visível.
+ROLETA2_BANANA_SPLIT_AXIS_WEIGHTS = (
+    ("horizontal", 7_500),
+    ("vertical", 2_500),
+)
 ROLETA2_COLHEITA_FRUIT_WEIGHTS = (
     (SLOT_BANANA, 4_500),
     (SLOT_FRAMBOESA, 3_500),
@@ -106,7 +112,7 @@ ROLETA2_LOSS_SEVEN_WEIGHTS = (
 ROLETA2_LOSS_SUMMARIES = {
     "Não veio nada": "Nenhum resultado foi formado",
     "Nenhuma combinação": "Os símbolos pararam sem formar uma combinação",
-    "Você ganhou... nada!": "O giro terminou, mas o prêmio não veio",
+    "Você ganhou... nada!": "Uau parece que não veio nada, incrível",
     "Foi quase hein": "Dois símbolos combinaram",
     "7 solitário": "Veio apenas um 7",
 }
@@ -116,7 +122,7 @@ ROLETA2_PAYOUTS = {
     "jackpot": (100, 0),
     "bar_triplo": (80, 0),
     "bar_abriu_as_7": (40, 0),
-    "deja_vu": (10, 0),
+    "deja_vu": (0, 10),
     "banana_split": (10, 10),
     "escorredio": (18, 0),
     "setes_espalhados": (15, 0),
@@ -134,6 +140,12 @@ _SLOT_LINES = (
     ((0, 2), (1, 1), (2, 0)),
 )
 _SLOT_DIAGONALS = _SLOT_LINES[-2:]
+_SLOT_COLUMNS = (
+    ((0, 0), (1, 0), (2, 0)),
+    ((0, 1), (1, 1), (2, 1)),
+    ((0, 2), (1, 2), (2, 2)),
+)
+_SLOT_BANANA_SPLIT_LINES = (*_SLOT_LINES[:3], *_SLOT_COLUMNS)
 
 
 def _slots_validate_probability_table(name: str, table) -> None:
@@ -150,6 +162,7 @@ def _slots_validate_probability_table(name: str, table) -> None:
 for _probability_name, _probability_table in (
     ("resultados", ROLETA2_OUTCOME_WEIGHTS),
     ("tipos de linha", ROLETA2_LINE_TYPE_WEIGHTS),
+    ("eixos do banana split", ROLETA2_BANANA_SPLIT_AXIS_WEIGHTS),
     ("frutas da colheita", ROLETA2_COLHEITA_FRUIT_WEIGHTS),
     ("setes espalhados", ROLETA2_SCATTERED_SEVEN_WEIGHTS),
     ("setes em perdas", ROLETA2_LOSS_SEVEN_WEIGHTS),
@@ -165,6 +178,11 @@ def _slot_weighted_choice(rng: random.Random, table):
 def _slot_pick_result_line(rng: random.Random):
     line_type = str(_slot_weighted_choice(rng, ROLETA2_LINE_TYPE_WEIGHTS))
     return rng.choice(_SLOT_LINES[:3] if line_type == "horizontal" else _SLOT_DIAGONALS)
+
+
+def _slot_pick_banana_split_line(rng: random.Random):
+    axis = str(_slot_weighted_choice(rng, ROLETA2_BANANA_SPLIT_AXIS_WEIGHTS))
+    return rng.choice(_SLOT_LINES[:3] if axis == "horizontal" else _SLOT_COLUMNS)
 
 
 def _slot_line_values(grid: list[list[str]], line) -> list[str]:
@@ -193,6 +211,25 @@ def _slots_has_escorredio(grid: list[list[str]]) -> bool:
     return any(_slot_line_values(grid, line) == [SLOT_BANANA] * 3 for line in _SLOT_DIAGONALS)
 
 
+def _slots_banana_split_location(grid: list[list[str]]) -> tuple[str, int] | None:
+    target = [SLOT_BANANA, SLOT_CEREJA, SLOT_BANANA]
+    for index, line in enumerate(_SLOT_LINES[:3]):
+        if _slot_line_values(grid, line) == target:
+            return "linha", index
+    for index, line in enumerate(_SLOT_COLUMNS):
+        if _slot_line_values(grid, line) == target:
+            return "coluna", index
+    return None
+
+
+def _slots_banana_split_summary(grid: list[list[str]]) -> str:
+    location = _slots_banana_split_location(grid)
+    if location is None:
+        return "Duas bananas ao redor da cereja"
+    axis, index = location
+    return f"Duas bananas ao redor da cereja na {axis} {index + 1}"
+
+
 def _slots_matching_kinds(grid: list[list[str]]) -> set[str]:
     flat = [cell for row in grid for cell in row]
     seven_count = flat.count(SLOT_SEVEN)
@@ -211,7 +248,7 @@ def _slots_matching_kinds(grid: list[list[str]]) -> set[str]:
         matches.add("bar_abriu_as_7")
     if all(grid[row][0] == grid[row][2] for row in range(3)):
         matches.add("deja_vu")
-    if [SLOT_BANANA, SLOT_CEREJA, SLOT_BANANA] in lines:
+    if _slots_banana_split_location(grid) is not None:
         matches.add("banana_split")
     if any(len(set(row)) == 1 and row[0] in SLOT_FRUITS for row in grid):
         matches.add("colheita")
@@ -304,8 +341,10 @@ def _slots_fallback_grid(kind: str, variant: dict[str, object] | None = None) ->
 
 
 def _slots_select_variant(kind: str, rng: random.Random) -> dict[str, object]:
-    if kind in {"jackpot", "bar_triplo", "banana_split"}:
+    if kind in {"jackpot", "bar_triplo"}:
         return {"line": _slot_pick_result_line(rng)}
+    if kind == "banana_split":
+        return {"line": _slot_pick_banana_split_line(rng)}
     if kind == "colheita":
         return {
             "line": rng.choice(_SLOT_LINES[:3]),
@@ -335,8 +374,14 @@ def _slots_build_candidate(
     if kind in {"jackpot", "bar_triplo", "banana_split", "colheita"}:
         grid = _slot_random_grid(rng, include_seven=False)
         line = selected.get("line")
-        if line not in _SLOT_LINES:
-            line = rng.choice(_SLOT_LINES[:3]) if kind == "colheita" else _slot_pick_result_line(rng)
+        allowed_lines = _SLOT_BANANA_SPLIT_LINES if kind == "banana_split" else _SLOT_LINES
+        if line not in allowed_lines:
+            if kind == "colheita":
+                line = rng.choice(_SLOT_LINES[:3])
+            elif kind == "banana_split":
+                line = _slot_pick_banana_split_line(rng)
+            else:
+                line = _slot_pick_result_line(rng)
         if kind == "jackpot":
             values = [SLOT_SEVEN] * 3
         elif kind == "bar_triplo":
@@ -400,7 +445,8 @@ def _slots_grid_matches_kind(
             return False
 
     line = selected.get("line")
-    if line in _SLOT_LINES:
+    allowed_variant_lines = _SLOT_BANANA_SPLIT_LINES if kind == "banana_split" else _SLOT_LINES
+    if line in allowed_variant_lines:
         values = _slot_line_values(grid, line)
         expected_values = {
             "jackpot": [SLOT_SEVEN] * 3,
@@ -640,10 +686,10 @@ class GincanaSlotsMixin:
                     "bar_triplo": "Três BAR fecharam uma linha",
                     "bar_abriu_as_7": _slots_bar_abriu_as_7_summary(grid),
                     "deja_vu": "A primeira e a terceira coluna repetiram o mesmo resultado",
-                    "banana_split": "As bananas se dividiram ao redor da cereja",
+                    "banana_split": _slots_banana_split_summary(grid),
                     "escorredio": "As bananas fizeram uma coluna escorregar e girar outra vez",
                     "setes_espalhados": "Os 7 vieram espalhados pelo resultado",
-                    "faltou_um_sete": "Dois 7 apareceram, mas o terceiro não veio",
+                    "faltou_um_sete": "Se tivesse mais 1 hein",
                 }
                 titles = {
                     "sete_pecados": "Sete pecados",
@@ -659,7 +705,7 @@ class GincanaSlotsMixin:
                 title = titles.get(component_kind, "Roleta 2")
                 summary = summaries.get(component_kind, "Resultado da roleta")
                 if component_kind == "deja_vu":
-                    normal_payout, bonus_payout = _slots_deja_vu_payout(deja_vu_index), 0
+                    normal_payout, bonus_payout = 0, _slots_deja_vu_payout(deja_vu_index)
             title_emoji, color_theme = _slots_result_presentation(component_kind, grid, title)
             return {
                 "kind": component_kind,
@@ -767,6 +813,7 @@ class GincanaSlotsMixin:
             "kind": kind,
             "primary_kind": str(primary["kind"]),
             "component_kinds": component_kinds,
+            "components": tuple(dict(component) for component in components),
             "has_deja_vu": has_deja_vu,
             "has_escorredio": has_escorredio,
             "deja_vu_index": int(deja_vu_index) if has_deja_vu else 0,
@@ -1054,6 +1101,59 @@ class GincanaSlotsMixin:
             footer_text=footer_text,
             color=color,
         )
+
+    def _roleta2_historical_modifier_lines(
+        self,
+        outcomes: list[dict[str, object]],
+    ) -> list[str]:
+        # Resultados pagos em tabuleiros anteriores da cadeia continuam valendo,
+        # mas não podem assumir o título/descrição do tabuleiro final. Exibi-los
+        # como modificadores compactos mantém o valor auditável sem mentir sobre
+        # a grade atualmente mostrada.
+        aggregated: dict[tuple[str, str, str], dict[str, int]] = {}
+        order: list[tuple[str, str, str]] = []
+        for outcome in outcomes[:-1]:
+            raw_components = outcome.get("components")
+            if not isinstance(raw_components, (tuple, list)):
+                continue
+            for component in raw_components:
+                if not isinstance(component, dict):
+                    continue
+                kind = str(component.get("kind") or "")
+                if kind in {"", "loss", "deja_vu"}:
+                    continue
+                normal = max(0, int(component.get("normal_payout", 0) or 0))
+                bonus = max(0, int(component.get("bonus_payout", 0) or 0))
+                if normal <= 0 and bonus <= 0:
+                    continue
+                key = (
+                    kind,
+                    str(component.get("title") or "Resultado"),
+                    str(component.get("title_emoji") or "🎰"),
+                )
+                if key not in aggregated:
+                    aggregated[key] = {"count": 0, "normal": 0, "bonus": 0}
+                    order.append(key)
+                aggregated[key]["count"] += 1
+                aggregated[key]["normal"] += normal
+                aggregated[key]["bonus"] += bonus
+
+        lines: list[str] = []
+        for key in order:
+            _kind, title, emoji = key
+            values = aggregated[key]
+            count = int(values["count"])
+            count_text = f" ×{count}" if count > 1 else ""
+            rewards: list[str] = []
+            normal = int(values["normal"])
+            bonus = int(values["bonus"])
+            if normal > 0:
+                rewards.append(f"+{normal} {self._CHIP_GAIN_EMOJI}")
+            if bonus > 0:
+                rewards.append(f"+{bonus} {self._CHIP_BONUS_EMOJI}")
+            if rewards:
+                lines.append(f"-# {emoji} {title}{count_text} · " + " · ".join(rewards))
+        return lines
 
     async def _animate_roleta2_spin(
         self,
@@ -1468,6 +1568,7 @@ class GincanaSlotsMixin:
                 for item in outcomes
             )
             summary_lines: list[str] = [str(display_outcome.get("summary") or "").strip()]
+            summary_lines.extend(self._roleta2_historical_modifier_lines(outcomes))
             deja_vu_total = sum(int(item.get("deja_vu_payout", 0) or 0) for item in outcomes)
             if deja_vu_count > 0:
                 summary_lines.append(

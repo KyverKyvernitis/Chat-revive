@@ -65,6 +65,7 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
     def test_internal_probabilities_are_fixed_and_total(self) -> None:
         expected = {
             "ROLETA2_LINE_TYPE_WEIGHTS": {"horizontal": 7_500, "diagonal": 2_500},
+            "ROLETA2_BANANA_SPLIT_AXIS_WEIGHTS": {"horizontal": 7_500, "vertical": 2_500},
             "ROLETA2_COLHEITA_FRUIT_WEIGHTS": {
                 "banana": 4_500,
                 "framboesa": 3_500,
@@ -138,12 +139,17 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         for kind, values in (
             ("jackpot", ["seven"] * 3),
             ("bar_triplo", ["bar"] * 3),
-            ("banana_split", ["banana", "cereja", "banana"]),
         ):
             for line in lines:
                 grid = generate(kind, rng, {"line": line})
                 actual = [grid[row][column] for row, column in line]
                 self.assertEqual(actual, values, (kind, line, grid))
+
+        banana_split_lines = self.namespace["_SLOT_BANANA_SPLIT_LINES"]
+        for line in banana_split_lines:
+            grid = generate("banana_split", rng, {"line": line})
+            actual = [grid[row][column] for row, column in line]
+            self.assertEqual(actual, ["banana", "cereja", "banana"], (line, grid))
 
         for fruit in ("banana", "framboesa", "cereja"):
             line = lines[1]
@@ -286,6 +292,10 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             },
         )
         self.assertEqual(self.namespace["ROLETA2_LOSS_SUMMARIES"]["7 solitário"], "Veio apenas um 7")
+        self.assertEqual(
+            self.namespace["ROLETA2_LOSS_SUMMARIES"]["Você ganhou... nada!"],
+            "Uau parece que não veio nada, incrível",
+        )
         self.assertNotIn("máquina", self.namespace["ROLETA2_LOSS_SUMMARIES"]["Você ganhou... nada!"])
         picker = next(
             node for node in ast.walk(self.tree)
@@ -363,6 +373,33 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             "Veio dois <:slot_bar:1543757593078403072> e um <:slot_7:1543757577496821800>",
         )
 
+    def test_banana_split_copy_reports_the_actual_row_or_column(self) -> None:
+        summary = self.namespace["_slots_banana_split_summary"]
+        location = self.namespace["_slots_banana_split_location"]
+        row_grid = [
+            ["framboesa", "bar", "cereja"],
+            ["banana", "cereja", "banana"],
+            ["cereja", "framboesa", "bar"],
+        ]
+        self.assertEqual(location(row_grid), ("linha", 1))
+        self.assertEqual(summary(row_grid), "Duas bananas ao redor da cereja na linha 2")
+
+        column_grid = [
+            ["framboesa", "banana", "bar"],
+            ["cereja", "cereja", "framboesa"],
+            ["bar", "banana", "cereja"],
+        ]
+        self.assertEqual(location(column_grid), ("coluna", 1))
+        self.assertEqual(summary(column_grid), "Duas bananas ao redor da cereja na coluna 2")
+
+    def test_faltou_um_sete_uses_the_new_compact_copy(self) -> None:
+        roll = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
+        )
+        roll_source = str(ast.get_source_segment(self.source, roll))
+        self.assertIn('"faltou_um_sete": "Se tivesse mais 1 hein"', roll_source)
+
     def test_result_title_emoji_and_theme_follow_the_causing_symbol(self) -> None:
         presentation = self.namespace["_slots_result_presentation"]
         raspberry_grid = [
@@ -424,6 +461,16 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertEqual(payout(2), 20)
         self.assertEqual(payout(3), 30)
         self.assertEqual(payout(1) + payout(2), 30)
+        self.assertEqual(self.namespace["ROLETA2_PAYOUTS"]["deja_vu"], (0, 10))
+        roll = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
+        )
+        roll_source = str(ast.get_source_segment(self.source, roll))
+        self.assertIn(
+            "normal_payout, bonus_payout = 0, _slots_deja_vu_payout(deja_vu_index)",
+            roll_source,
+        )
 
     def test_deja_vu_respin_runs_inside_the_same_round_with_live_result(self) -> None:
         execution = self._async_function_source("_execute_roleta2_round")
@@ -523,6 +570,41 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("ROLETA2_EFFECT_READ_DELAY", initial_animation)
         self.assertIn('title="Escorredio"', respin_animation)
         self.assertIn("ROLETA2_EFFECT_READ_DELAY", respin_animation)
+
+    def test_previous_respin_prizes_are_shown_as_compact_modifiers(self) -> None:
+        formatter = self._class_method("_roleta2_historical_modifier_lines")
+        harness = type(
+            "Roleta2ModifierHarness",
+            (),
+            {
+                "_roleta2_historical_modifier_lines": formatter,
+                "_CHIP_GAIN_EMOJI": "<gain>",
+                "_CHIP_BONUS_EMOJI": "<bonus>",
+            },
+        )()
+        prior = {
+            "components": (
+                {
+                    "kind": "banana_split",
+                    "title": "Banana split",
+                    "title_emoji": "🍌",
+                    "normal_payout": 10,
+                    "bonus_payout": 10,
+                },
+                {
+                    "kind": "deja_vu",
+                    "title": "Déjà vu",
+                    "title_emoji": "🔁",
+                    "normal_payout": 0,
+                    "bonus_payout": 10,
+                },
+            )
+        }
+        terminal = {"components": ({"kind": "loss", "normal_payout": 0, "bonus_payout": 0},)}
+        self.assertEqual(
+            harness._roleta2_historical_modifier_lines([prior, terminal]),
+            ["-# 🍌 Banana split · +10 <gain> · +10 <bonus>"],
+        )
 
     def test_roleta2_statistics_are_separate_but_visible_in_profile_totals(self) -> None:
         base = BASE_PATH.read_text(encoding="utf-8")

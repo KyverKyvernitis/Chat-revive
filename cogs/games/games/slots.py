@@ -17,6 +17,7 @@ ROLETA2_DAILY_EXTRA_SPINS = 2
 ROLETA2_DAILY_EXTRA_CAP = 2
 ROLETA2_PROBABILITY_SCALE = 10_000
 ROLETA2_DEJA_VU_CHAIN_LIMIT = 20
+ROLETA2_EFFECT_CHAIN_LIMIT = 60
 ROLETA2_DEJA_VU_BASE_PAYOUT = 10
 ROLETA2_DEJA_VU_TO_ESCORREDIO_CHANCE = 0.25
 ROLETA2_ESCORREDIO_TO_DEJA_VU_CHANCE = 0.35
@@ -65,6 +66,7 @@ ROLETA2_KIND_TITLE_SYMBOLS = {
     "escorredio": SLOT_BANANA,
     "setes_espalhados": SLOT_SEVEN,
     "faltou_um_sete": SLOT_SEVEN,
+    "sete_solitario": SLOT_SEVEN,
 }
 
 # Pontos-base deixam todas as probabilidades auditáveis. O resultado principal
@@ -210,6 +212,41 @@ def _slot_random_grid(rng: random.Random, *, include_seven: bool = True) -> list
 
 def _slots_has_escorredio(grid: list[list[str]]) -> bool:
     return any(_slot_line_values(grid, line) == [SLOT_BANANA] * 3 for line in _SLOT_DIAGONALS)
+
+
+def _slots_is_sete_solitario(grid: list[list[str]]) -> bool:
+    flat = [cell for row in grid for cell in row]
+    return (
+        flat.count(SLOT_SEVEN) == 1
+        and not _slots_matching_kinds(grid)
+        and not _slots_has_escorredio(grid)
+    )
+
+
+def _slots_sete_solitario_column(grid: list[list[str]]) -> int | None:
+    if not _slots_is_sete_solitario(grid):
+        return None
+    for row in range(3):
+        for column in range(3):
+            if grid[row][column] == SLOT_SEVEN:
+                return column
+    return None
+
+
+def _slots_generate_sete_solitario_respin(
+    rng: random.Random,
+    grid: list[list[str]],
+) -> tuple[list[list[str]], int]:
+    locked_column = _slots_sete_solitario_column(grid)
+    if locked_column is None:
+        raise ValueError("tabuleiro sem 7 solitário")
+    final = [list(row) for row in grid]
+    for row in range(3):
+        for column in range(3):
+            if column == locked_column:
+                continue
+            final[row][column] = _slot_random_symbol(rng, include_seven=True)
+    return final, int(locked_column)
 
 
 def _slots_banana_split_location(grid: list[list[str]]) -> tuple[str, int] | None:
@@ -474,6 +511,54 @@ def _slots_generate_grid(
     return _slots_fallback_grid(kind, selected_variant)
 
 
+def _slots_apply_escorredio_preview(
+    rng: random.Random,
+    preview_grid: list[list[str]],
+    *,
+    force_deja_vu: bool = False,
+) -> tuple[list[list[str]], list[list[str]], int]:
+    preview = [list(row) for row in preview_grid]
+    if not _slots_has_escorredio(preview):
+        raise ValueError("preview sem Escorredio")
+
+    candidate_columns = (0, 2) if force_deja_vu else (0, 1, 2)
+    for _ in range(512):
+        slip_column = int(rng.choice(candidate_columns))
+        final = [list(row) for row in preview]
+        if force_deja_vu:
+            mirror_column = 2 if slip_column == 0 else 0
+            for row in range(3):
+                final[row][slip_column] = final[row][mirror_column]
+            # A transição forçada é exclusiva: o novo tabuleiro é resolvido
+            # como Déjà vu, mesmo se os mesmos símbolos também desenharem outra
+            # combinação visual rara. O Escorredio já pertence ao estágio anterior.
+            if "deja_vu" in _slots_matching_kinds(final):
+                return preview, final, slip_column
+            continue
+
+        for row in range(3):
+            final[row][slip_column] = _slot_random_symbol(rng, include_seven=True)
+        # O Escorredio já foi consumido neste estágio e não se auto-repete.
+        if _slots_has_escorredio(final):
+            continue
+        # Os 35% são a chance total da transição Escorredio -> Déjà vu.
+        if "deja_vu" in _slots_matching_kinds(final):
+            continue
+        return preview, final, slip_column
+
+    slip_column = int(candidate_columns[0])
+    final = [list(row) for row in preview]
+    if force_deja_vu:
+        mirror_column = 2 if slip_column == 0 else 0
+        for row in range(3):
+            final[row][slip_column] = final[row][mirror_column]
+    else:
+        fallback_cycle = (SLOT_CEREJA, SLOT_BAR, SLOT_FRAMBOESA)
+        for row in range(3):
+            final[row][slip_column] = fallback_cycle[row]
+    return preview, final, slip_column
+
+
 def _slots_generate_escorredio(
     rng: random.Random,
     *,
@@ -692,9 +777,12 @@ class GincanaSlotsMixin:
         flat = [cell for row in grid for cell in row]
         pair_match = _slots_matching_pair(grid)
         contextual_title = ""
-        if flat.count(SLOT_SEVEN) == 1:
-            contextual_title = "7 solitário"
-        elif pair_match is not None:
+        if _slots_is_sete_solitario(grid):
+            # 7 solitário agora é uma mecânica de respin, então nunca pode ser
+            # substituído por uma copy genérica só porque repetiu em sequência.
+            self._last_game_loss_titles["roleta2"] = "7 solitário"
+            return "7 solitário", ROLETA2_LOSS_SUMMARIES["7 solitário"]
+        if pair_match is not None:
             contextual_title = "Foi quase hein"
 
         generic_titles = (
@@ -723,34 +811,61 @@ class GincanaSlotsMixin:
         allow_deja_vu: bool = True,
         forced_kind: str | None = None,
         excluded_kinds: tuple[str, ...] = (),
+        grid_override: list[list[str]] | None = None,
     ) -> dict[str, object]:
-        excluded = set(str(item) for item in excluded_kinds)
-        if not allow_deja_vu:
-            excluded.add("deja_vu")
-        outcome_table = tuple(
-            item for item in ROLETA2_OUTCOME_WEIGHTS if item[0] not in excluded
-        )
-        selected_forced_kind = str(forced_kind or "")
-        if selected_forced_kind and selected_forced_kind not in excluded:
-            kind = selected_forced_kind
-        else:
-            kinds, weights = zip(*outcome_table)
-            kind = str(random.choices(kinds, weights=weights, k=1)[0])
         rng = random
         preview_grid: list[list[str]] | None = None
         slip_column: int | None = None
-        if kind == "escorredio":
-            trigger_deja_vu = _slots_effect_triggers_followup(
-                "escorredio",
-                rng,
-                allow_deja_vu=allow_deja_vu,
-            )
-            preview_grid, grid, slip_column = _slots_generate_escorredio(
-                rng,
-                force_deja_vu=trigger_deja_vu,
-            )
+
+        if grid_override is not None:
+            candidate_grid = [list(row) for row in grid_override]
+            candidate_matches = _slots_matching_kinds(candidate_grid)
+            # Um tabuleiro que desenha Déjà vu é resolvido exclusivamente como
+            # Déjà vu. Outras combinações podem existir em outros estágios da
+            # mesma rodada, nunca simultaneamente neste grid.
+            if allow_deja_vu and "deja_vu" in candidate_matches:
+                kind = "deja_vu"
+                grid = candidate_grid
+            elif _slots_has_escorredio(candidate_grid):
+                kind = "escorredio"
+                trigger_deja_vu = _slots_effect_triggers_followup(
+                    "escorredio",
+                    rng,
+                    allow_deja_vu=allow_deja_vu,
+                )
+                preview_grid, grid, slip_column = _slots_apply_escorredio_preview(
+                    rng,
+                    candidate_grid,
+                    force_deja_vu=trigger_deja_vu,
+                )
+            else:
+                kind = _slots_detect_kind(candidate_grid)
+                grid = candidate_grid
         else:
-            grid = _slots_generate_grid(kind, rng)
+            excluded = set(str(item) for item in excluded_kinds)
+            if not allow_deja_vu:
+                excluded.add("deja_vu")
+            outcome_table = tuple(
+                item for item in ROLETA2_OUTCOME_WEIGHTS if item[0] not in excluded
+            )
+            selected_forced_kind = str(forced_kind or "")
+            if selected_forced_kind and selected_forced_kind not in excluded:
+                kind = selected_forced_kind
+            else:
+                kinds, weights = zip(*outcome_table)
+                kind = str(random.choices(kinds, weights=weights, k=1)[0])
+            if kind == "escorredio":
+                trigger_deja_vu = _slots_effect_triggers_followup(
+                    "escorredio",
+                    rng,
+                    allow_deja_vu=allow_deja_vu,
+                )
+                preview_grid, grid, slip_column = _slots_generate_escorredio(
+                    rng,
+                    force_deja_vu=trigger_deja_vu,
+                )
+            else:
+                grid = _slots_generate_grid(kind, rng)
 
         def result_details(component_kind: str) -> dict[str, object]:
             normal_payout, bonus_payout = ROLETA2_PAYOUTS.get(component_kind, (0, 0))
@@ -830,8 +945,6 @@ class GincanaSlotsMixin:
                 "jackpot": False,
             }]
         elif kind == "deja_vu":
-            # Exclusivo neste tabuleiro. Outros resultados podem entrar na
-            # mesma rodada somente antes/depois, através dos respins.
             components = [result_details("deja_vu")]
         elif kind == "escorredio":
             matches = _slots_matching_kinds(grid)
@@ -845,14 +958,10 @@ class GincanaSlotsMixin:
                 "setes_espalhados",
                 "faltou_um_sete",
             )
-            # A combinação formada depois da coluna escorregar é o resultado
-            # visual principal; Escorredio permanece acumulado como modificador.
             if "deja_vu" in matches:
-                # O Escorredio aconteceu no preview; o Déjà vu só nasce depois
-                # que a coluna termina de escorregar. Como o grid final é Déjà
-                # vu, nenhuma outra combinação desse mesmo grid pode pagar.
-                components = [result_details("escorredio")]
-                components.append(result_details("deja_vu"))
+                # Escorredio pertence ao preview; o grid final é exclusivamente
+                # Déjà vu e só ele pode pagar nesse segundo estágio.
+                components = [result_details("escorredio"), result_details("deja_vu")]
             else:
                 components = [
                     result_details(component_kind)
@@ -883,6 +992,13 @@ class GincanaSlotsMixin:
         component_kinds = tuple(str(component["kind"]) for component in components)
         has_deja_vu = "deja_vu" in component_kinds
         has_escorredio = "escorredio" in component_kinds
+        has_sete_solitario = (
+            not has_deja_vu
+            and _slots_is_sete_solitario(grid)
+        )
+        sete_solitario_column = (
+            _slots_sete_solitario_column(grid) if has_sete_solitario else None
+        )
         escorredio_normal_payout = sum(
             int(component["normal_payout"])
             for component in components
@@ -900,6 +1016,9 @@ class GincanaSlotsMixin:
             "components": tuple(dict(component) for component in components),
             "has_deja_vu": has_deja_vu,
             "has_escorredio": has_escorredio,
+            "has_sete_solitario": has_sete_solitario,
+            "sete_solitario_column": sete_solitario_column,
+            "sete_solitario_summary": ("Veio apenas um 7" if has_sete_solitario else ""),
             "deja_vu_index": int(deja_vu_index) if has_deja_vu else 0,
             "deja_vu_payout": (
                 _slots_deja_vu_payout(deja_vu_index) if has_deja_vu else 0
@@ -1440,6 +1559,33 @@ class GincanaSlotsMixin:
                 spin_message = rendered
             await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
+        if bool(outcome.get("has_sete_solitario")):
+            sete_view = self._make_roleta2_effect_view(
+                title="7 solitário",
+                title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+                color_theme=SLOT_SEVEN,
+                summary=str(outcome.get("sete_solitario_summary") or "Veio apenas um 7"),
+                board=self._render_roleta2_board(final_grid),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=(
+                    int(outcome.get("normal_payout", 0) or 0) - int(entry_normal)
+                ),
+                bonus_delta=(
+                    int(outcome.get("bonus_payout", 0) or 0) - int(entry_bonus)
+                ),
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=sete_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
+
         return spin_message, final_grid
 
     async def _animate_roleta2_respin(
@@ -1598,6 +1744,214 @@ class GincanaSlotsMixin:
                 spin_message = rendered
             await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
+        if bool(outcome.get("has_sete_solitario")):
+            sete_view = self._make_roleta2_effect_view(
+                title="7 solitário",
+                title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+                color_theme=SLOT_SEVEN,
+                summary=str(outcome.get("sete_solitario_summary") or "Veio apenas um 7"),
+                board=self._render_roleta2_board(final_grid),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=normal_delta + int(outcome.get("normal_payout", 0) or 0),
+                bonus_delta=bonus_delta + int(outcome.get("bonus_payout", 0) or 0),
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=sete_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
+
+        return spin_message, final_grid
+
+    async def _animate_roleta2_sete_solitario_respin(
+        self,
+        source_message: discord.Message,
+        *,
+        current_grid: list[list[str]],
+        outcome: dict[str, object],
+        locked_column: int,
+        balance_text: str,
+        footer_text: str,
+        normal_delta: int,
+        bonus_delta: int,
+        spin_message: discord.Message | None = None,
+        skip_event: asyncio.Event | None = None,
+    ) -> tuple[discord.Message | None, list[list[str]]]:
+        final_grid = [list(row) for row in outcome.get("grid", [])]
+        preview_raw = outcome.get("preview_grid")
+        target_grid = [list(row) for row in preview_raw] if isinstance(preview_raw, list) else final_grid
+        if skip_event is not None and skip_event.is_set():
+            return spin_message, final_grid
+
+        locked = max(0, min(2, int(locked_column)))
+        reroll_columns = tuple(column for column in range(3) if column != locked)
+        stopped: set[int] = {locked}
+
+        # O 7 preserva sua coluna inteira. As outras duas voltam a girar juntas,
+        # então o jogador vê imediatamente qual parte do tabuleiro ficou travada.
+        frame = self._roleta2_display_grid(target_grid, stopped_columns=stopped)
+        spinning_view = self._make_roleta2_effect_view(
+            title="7 solitário...",
+            title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+            color_theme=SLOT_SEVEN,
+            summary="Veio apenas um 7",
+            board=self._render_roleta2_board(frame),
+            balance_text=balance_text,
+            footer_text=footer_text,
+            normal_delta=normal_delta,
+            bonus_delta=bonus_delta,
+        )
+        rendered = await self._render_or_replace_game_message(
+            source_message,
+            spin_message,
+            view=spinning_view,
+            final=False,
+            cancel_event=skip_event,
+        )
+        if rendered is not None:
+            spin_message = rendered
+
+        for column in reroll_columns:
+            if not await self._wait_game_animation_delay(
+                skip_event,
+                ROLETA2_COLUMN_DELAYS[column],
+            ):
+                return spin_message, final_grid
+            stopped.add(column)
+            frame = self._roleta2_display_grid(target_grid, stopped_columns=stopped)
+            stopping_view = self._make_roleta2_effect_view(
+                title="7 solitário...",
+                title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+                color_theme=SLOT_SEVEN,
+                summary="Veio apenas um 7",
+                board=self._render_roleta2_board(frame),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=normal_delta,
+                bonus_delta=bonus_delta,
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=stopping_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            if skip_event is not None and skip_event.is_set():
+                return spin_message, final_grid
+
+        slip_column = outcome.get("slip_column")
+        if isinstance(preview_raw, list) and isinstance(slip_column, int):
+            escorredio_normal_delta = normal_delta + int(
+                outcome.get("escorredio_normal_payout", 0) or 0
+            )
+            escorredio_bonus_delta = bonus_delta + int(
+                outcome.get("escorredio_bonus_payout", 0) or 0
+            )
+            preview_view = self._make_roleta2_effect_view(
+                title="Escorredio",
+                title_emoji=SLOT_EMOJIS[SLOT_BANANA],
+                color_theme=SLOT_BANANA,
+                summary=str(outcome.get("escorredio_summary") or ""),
+                board=self._render_roleta2_board(target_grid),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=escorredio_normal_delta,
+                bonus_delta=escorredio_bonus_delta,
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=preview_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            if not await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY):
+                return spin_message, final_grid
+            slipping = self._roleta2_display_grid(
+                target_grid,
+                stopped_columns={0, 1, 2},
+                spinning_column=max(0, min(2, int(slip_column))),
+            )
+            slipping_view = self._make_roleta2_effect_view(
+                title="Escorredio...",
+                title_emoji=SLOT_EMOJIS[SLOT_BANANA],
+                color_theme=SLOT_BANANA,
+                summary=str(outcome.get("escorredio_summary") or ""),
+                board=self._render_roleta2_board(slipping),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=escorredio_normal_delta,
+                bonus_delta=escorredio_bonus_delta,
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=slipping_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            if not await self._wait_game_animation_delay(skip_event, 0.76):
+                return spin_message, final_grid
+
+        if bool(outcome.get("has_deja_vu")):
+            deja_view = self._make_roleta2_effect_view(
+                title="Déjà vu",
+                title_emoji="🔁",
+                color_theme="deja_vu",
+                summary=str(outcome.get("deja_vu_summary") or ""),
+                board=self._render_roleta2_board(final_grid),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=normal_delta + int(outcome.get("normal_payout", 0) or 0),
+                bonus_delta=bonus_delta + int(outcome.get("bonus_payout", 0) or 0),
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=deja_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
+
+        if bool(outcome.get("has_sete_solitario")):
+            sete_view = self._make_roleta2_effect_view(
+                title="7 solitário",
+                title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+                color_theme=SLOT_SEVEN,
+                summary=str(outcome.get("sete_solitario_summary") or "Veio apenas um 7"),
+                board=self._render_roleta2_board(final_grid),
+                balance_text=balance_text,
+                footer_text=footer_text,
+                normal_delta=normal_delta + int(outcome.get("normal_payout", 0) or 0),
+                bonus_delta=bonus_delta + int(outcome.get("bonus_payout", 0) or 0),
+            )
+            rendered = await self._render_or_replace_game_message(
+                source_message,
+                spin_message,
+                view=sete_view,
+                final=False,
+                cancel_event=skip_event,
+            )
+            if rendered is not None:
+                spin_message = rendered
+            await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
+
         return spin_message, final_grid
 
     async def _execute_roleta2_round(
@@ -1619,23 +1973,105 @@ class GincanaSlotsMixin:
         deja_vu_count = 0
         forced_kind: str | None = None
         excluded_kinds: tuple[str, ...] = ()
+        followup_mode: str | None = None
+        effect_steps = 0
         while True:
             allow_deja_vu = deja_vu_count < ROLETA2_DEJA_VU_CHAIN_LIMIT
+            grid_override: list[list[str]] | None = None
+            locked_column: int | None = None
+            if followup_mode == "sete_solitario" and outcomes:
+                source_grid = [list(row) for row in outcomes[-1].get("grid", [])]
+                for _ in range(64):
+                    candidate_grid, candidate_locked = _slots_generate_sete_solitario_respin(
+                        random,
+                        source_grid,
+                    )
+                    if allow_deja_vu or "deja_vu" not in _slots_matching_kinds(candidate_grid):
+                        grid_override = candidate_grid
+                        locked_column = candidate_locked
+                        break
+                if grid_override is None:
+                    grid_override, locked_column = _slots_generate_sete_solitario_respin(
+                        random,
+                        source_grid,
+                    )
+                forced_kind = None
+                excluded_kinds = ()
+
             outcome = self._roll_roleta2_outcome(
                 deja_vu_index=deja_vu_count + 1,
                 allow_deja_vu=allow_deja_vu,
                 forced_kind=forced_kind,
                 excluded_kinds=excluded_kinds,
+                grid_override=grid_override,
             )
+            if followup_mode is not None:
+                outcome["respin_mode"] = followup_mode
+            if locked_column is not None:
+                outcome["locked_column"] = int(locked_column)
             outcomes.append(outcome)
-            if not bool(outcome.get("has_deja_vu")):
+            effect_steps += 1
+
+            has_deja_vu = bool(outcome.get("has_deja_vu"))
+            has_sete_solitario = bool(outcome.get("has_sete_solitario"))
+            if not has_deja_vu and not has_sete_solitario:
                 break
-            deja_vu_count += 1
-            if deja_vu_count >= ROLETA2_DEJA_VU_CHAIN_LIMIT:
-                forced_kind = None
-                excluded_kinds = ("deja_vu",)
+            if effect_steps >= ROLETA2_EFFECT_CHAIN_LIMIT:
+                # Failsafe técnico compartilhado: fecha a rodada com um estágio
+                # terminal de verdade, sem deixar um Déjà vu/7 solitário visual
+                # sem a animação que ele prometeu.
+                terminal_outcome: dict[str, object] | None = None
+                if has_sete_solitario:
+                    source_grid = [list(row) for row in outcome.get("grid", [])]
+                    for _ in range(512):
+                        terminal_grid, terminal_locked = _slots_generate_sete_solitario_respin(
+                            random,
+                            source_grid,
+                        )
+                        if "deja_vu" in _slots_matching_kinds(terminal_grid):
+                            continue
+                        if _slots_has_escorredio(terminal_grid):
+                            continue
+                        if _slots_is_sete_solitario(terminal_grid):
+                            continue
+                        terminal_outcome = self._roll_roleta2_outcome(
+                            deja_vu_index=deja_vu_count + 1,
+                            allow_deja_vu=False,
+                            grid_override=terminal_grid,
+                        )
+                        terminal_outcome["respin_mode"] = "sete_solitario"
+                        terminal_outcome["locked_column"] = int(terminal_locked)
+                        break
+                else:
+                    for _ in range(64):
+                        candidate_terminal = self._roll_roleta2_outcome(
+                            deja_vu_index=deja_vu_count + 1,
+                            allow_deja_vu=False,
+                            forced_kind="loss",
+                            excluded_kinds=("deja_vu", "escorredio"),
+                        )
+                        if bool(candidate_terminal.get("has_sete_solitario")):
+                            continue
+                        terminal_outcome = candidate_terminal
+                        terminal_outcome["respin_mode"] = "deja_vu"
+                        break
+                if terminal_outcome is not None:
+                    outcomes.append(terminal_outcome)
+                break
+
+            if has_deja_vu:
+                deja_vu_count += 1
+                followup_mode = "deja_vu"
+                if deja_vu_count >= ROLETA2_DEJA_VU_CHAIN_LIMIT:
+                    forced_kind = None
+                    excluded_kinds = ("deja_vu",)
+                else:
+                    forced_kind, excluded_kinds = _slots_deja_vu_followup_policy(random)
                 continue
-            forced_kind, excluded_kinds = _slots_deja_vu_followup_policy(random)
+
+            followup_mode = "sete_solitario"
+            forced_kind = None
+            excluded_kinds = ()
 
         paid_entry = self._entry_paid_amount(entry_spend, entry_cost)
         if isinstance(entry_spend, dict):
@@ -1665,19 +2101,43 @@ class GincanaSlotsMixin:
             running_normal_payout += max(0, int(first_outcome.get("normal_payout", 0) or 0))
             running_bonus_payout += max(0, int(first_outcome.get("bonus_payout", 0) or 0))
 
-            for respin_index, next_outcome in enumerate(outcomes[1:], start=1):
-                spin_message, final_grid = await self._animate_roleta2_respin(
-                    source_message,
-                    current_grid=final_grid,
-                    outcome=next_outcome,
-                    balance_text=balance_text,
-                    footer_text=footer_text,
-                    normal_delta=running_normal_payout - entry_normal,
-                    bonus_delta=running_bonus_payout - entry_bonus,
-                    respin_index=respin_index,
-                    spin_message=spin_message,
-                    skip_event=skip_event,
-                )
+            for outcome_index, next_outcome in enumerate(outcomes[1:], start=1):
+                previous_outcome = outcomes[outcome_index - 1]
+                if bool(previous_outcome.get("has_sete_solitario")):
+                    locked_column = previous_outcome.get("sete_solitario_column")
+                    if not isinstance(locked_column, int):
+                        locked_column = _slots_sete_solitario_column(final_grid)
+                    if not isinstance(locked_column, int):
+                        locked_column = 1
+                    spin_message, final_grid = await self._animate_roleta2_sete_solitario_respin(
+                        source_message,
+                        current_grid=final_grid,
+                        outcome=next_outcome,
+                        locked_column=locked_column,
+                        balance_text=balance_text,
+                        footer_text=footer_text,
+                        normal_delta=running_normal_payout - entry_normal,
+                        bonus_delta=running_bonus_payout - entry_bonus,
+                        spin_message=spin_message,
+                        skip_event=skip_event,
+                    )
+                else:
+                    deja_respin_index = max(
+                        1,
+                        int(previous_outcome.get("deja_vu_index", 0) or 1),
+                    )
+                    spin_message, final_grid = await self._animate_roleta2_respin(
+                        source_message,
+                        current_grid=final_grid,
+                        outcome=next_outcome,
+                        balance_text=balance_text,
+                        footer_text=footer_text,
+                        normal_delta=running_normal_payout - entry_normal,
+                        bonus_delta=running_bonus_payout - entry_bonus,
+                        respin_index=deja_respin_index,
+                        spin_message=spin_message,
+                        skip_event=skip_event,
+                    )
                 running_normal_payout += max(
                     0, int(next_outcome.get("normal_payout", 0) or 0)
                 )

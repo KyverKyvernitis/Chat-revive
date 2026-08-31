@@ -620,8 +620,9 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("for index, column in enumerate(column_order)", respin)
         self.assertIn("for column, delay in zip(column_order, ROLETA2_COLUMN_DELAYS)", respin)
         self.assertIn("ROLETA2_RESPIN_START_DELAYS[index]", respin)
-        self.assertIn("for respin_index, next_outcome in enumerate(outcomes[1:], start=1)", execution)
-        self.assertIn("respin_index=respin_index", execution)
+        self.assertIn("for outcome_index, next_outcome in enumerate(outcomes[1:], start=1)", execution)
+        self.assertIn("deja_respin_index = max(", execution)
+        self.assertIn("respin_index=deja_respin_index", execution)
         self.assertIn('"🔁 Déjà vu..."', respin_view_source)
         self.assertIn('f"**Resultado:**', respin_view_source)
         self.assertNotIn('f"**Entrada:**', respin_view_source)
@@ -695,7 +696,7 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn('elif kind == "escorredio":', roll_source)
         self.assertIn('components.append(result_details("escorredio"))', roll_source)
         self.assertIn('if "deja_vu" in matches:', roll_source)
-        self.assertIn('components = [result_details("escorredio")]', roll_source)
+        self.assertIn('components = [result_details("escorredio"), result_details("deja_vu")]', roll_source)
         self.assertIn('force_deja_vu=trigger_deja_vu', roll_source)
         self.assertIn('"escorredio_normal_payout"', roll_source)
         self.assertIn('title="Escorredio"', initial_animation)
@@ -737,6 +738,74 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             harness._roleta2_historical_modifier_lines([prior, terminal]),
             ["-# 🍌 Banana split · +10 <gain> · +10 <bonus>"],
         )
+
+
+    def test_sete_solitario_respin_locks_the_whole_seven_column(self) -> None:
+        is_solo = self.namespace["_slots_is_sete_solitario"]
+        column = self.namespace["_slots_sete_solitario_column"]
+        generate = self.namespace["_slots_generate_sete_solitario_respin"]
+        grid = [
+            ["banana", "seven", "cereja"],
+            ["framboesa", "bar", "banana"],
+            ["cereja", "framboesa", "bar"],
+        ]
+        self.assertTrue(is_solo(grid))
+        self.assertEqual(column(grid), 1)
+        for seed in range(20):
+            final, locked = generate(random.Random(seed), grid)
+            self.assertEqual(locked, 1)
+            self.assertEqual(
+                [final[row][1] for row in range(3)],
+                [grid[row][1] for row in range(3)],
+            )
+
+    def test_sete_solitario_can_be_triggered_after_escorredio(self) -> None:
+        generate = self.namespace["_slots_generate_escorredio"]
+        is_solo = self.namespace["_slots_is_sete_solitario"]
+        preview, final, _column = generate(random.Random(3), force_deja_vu=False)
+        self.assertTrue(self.namespace["_slots_has_escorredio"](preview))
+        self.assertTrue(is_solo(final), final)
+
+    def test_sete_solitario_followup_can_form_deja_vu_or_escorredio(self) -> None:
+        matching = self.namespace["_slots_matching_kinds"]
+        has_escorredio = self.namespace["_slots_has_escorredio"]
+        # Exemplo compatível com uma coluna central travada por um único 7:
+        # as externas podem parar iguais e formar Déjà vu.
+        deja_grid = [
+            ["banana", "seven", "banana"],
+            ["framboesa", "bar", "framboesa"],
+            ["cereja", "banana", "cereja"],
+        ]
+        self.assertIn("deja_vu", matching(deja_grid))
+        # Se o 7 estiver fora da célula usada pela diagonal, as duas colunas
+        # rerroladas também podem completar o Escorredio.
+        escorredio_grid = [
+            ["framboesa", "seven", "banana"],
+            ["cereja", "banana", "bar"],
+            ["banana", "framboesa", "cereja"],
+        ]
+        self.assertTrue(has_escorredio(escorredio_grid))
+
+    def test_sete_solitario_is_a_same_round_effect_with_read_pause(self) -> None:
+        execution = self._async_function_source("_execute_roleta2_round")
+        initial_animation = self._async_function_source("_animate_roleta2_spin")
+        deja_animation = self._async_function_source("_animate_roleta2_respin")
+        sete_animation = self._async_function_source("_animate_roleta2_sete_solitario_respin")
+        picker = self._class_method("_pick_roleta2_loss_copy")
+
+        self.assertEqual(self.namespace["ROLETA2_EFFECT_CHAIN_LIMIT"], 60)
+        self.assertIn('return "7 solitário", ROLETA2_LOSS_SUMMARIES["7 solitário"]', self.source)
+        self.assertIn('has_sete_solitario = bool(outcome.get("has_sete_solitario"))', execution)
+        self.assertIn('_slots_generate_sete_solitario_respin(', execution)
+        self.assertIn('_animate_roleta2_sete_solitario_respin(', execution)
+        self.assertIn('followup_mode = "sete_solitario"', execution)
+        self.assertIn('ROLETA2_EFFECT_READ_DELAY', initial_animation)
+        self.assertIn('ROLETA2_EFFECT_READ_DELAY', deja_animation)
+        self.assertNotIn('_reserve_roleta2_spin_state', sete_animation)
+        self.assertNotIn('_try_consume_chips', sete_animation)
+        self.assertIn('reroll_columns = tuple(column for column in range(3) if column != locked)', sete_animation)
+        self.assertIn('stopped: set[int] = {locked}', sete_animation)
+        self.assertIn('title="7 solitário..."', sete_animation)
 
     def test_roleta2_statistics_are_separate_but_visible_in_profile_totals(self) -> None:
         base = BASE_PATH.read_text(encoding="utf-8")

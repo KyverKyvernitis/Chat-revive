@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 
 import discord
 
@@ -11,6 +12,11 @@ from config import OFF_COLOR
 
 ROLETA2_COST = 15
 ROLETA2_MAX_PRIZE = 200
+ROLETA2_SPIN_LIMIT = 5
+ROLETA2_WINDOW_SECONDS = 6 * 60 * 60
+ROLETA2_DAILY_EXTRA_SPINS = 2
+ROLETA2_DAILY_EXTRA_CAP = 2
+ROLETA2_PROBABILITY_SCALE = 10_000
 
 SLOT_BANANA = "banana"
 SLOT_FRAMBOESA = "framboesa"
@@ -31,22 +37,52 @@ SLOT_EMOJIS = {
 SLOT_SYMBOLS = (SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA, SLOT_BAR, SLOT_SEVEN)
 SLOT_FRUITS = (SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA)
 SLOT_SYMBOL_WEIGHTS = (30, 27, 25, 12, 6)
+SLOT_SAFE_SYMBOL_WEIGHTS = (32, 29, 26, 13)
 
-# Mil partes deixam as probabilidades auditáveis e evitam que a grade sorteada
-# acidentalmente defina a raridade. Déjà vu mantém 10% absolutos por giro.
+# Pontos-base deixam todas as probabilidades auditáveis. O resultado principal
+# é sorteado antes da grade, então a aparência nunca redefine sua raridade.
 ROLETA2_OUTCOME_WEIGHTS = (
-    ("sete_pecados", 1),
-    ("jackpot", 19),
-    ("bar_triplo", 15),
-    ("bar_abriu_as_7", 30),
-    ("deja_vu", 100),
-    ("banana_split", 75),
-    ("escorredio", 60),
-    ("colheita", 90),
-    ("setes_espalhados", 50),
-    ("faltou_um_sete", 120),
-    ("loss", 440),
+    ("sete_pecados", 10),
+    ("jackpot", 190),
+    ("bar_triplo", 150),
+    ("bar_abriu_as_7", 300),
+    ("deja_vu", 1_000),
+    ("banana_split", 750),
+    ("escorredio", 600),
+    ("colheita", 900),
+    ("setes_espalhados", 500),
+    ("faltou_um_sete", 1_200),
+    ("loss", 4_400),
 )
+
+# Variações internas também têm chances próprias. Elas são sorteadas uma única
+# vez por giro e preservadas caso uma grade inválida precise ser refeita.
+ROLETA2_LINE_TYPE_WEIGHTS = (
+    ("horizontal", 7_500),
+    ("diagonal", 2_500),
+)
+ROLETA2_COLHEITA_FRUIT_WEIGHTS = (
+    (SLOT_BANANA, 4_500),
+    (SLOT_FRAMBOESA, 3_500),
+    (SLOT_CEREJA, 2_000),
+)
+ROLETA2_SCATTERED_SEVEN_WEIGHTS = (
+    (3, 7_500),
+    (4, 2_000),
+    (5, 500),
+)
+ROLETA2_LOSS_SEVEN_WEIGHTS = (
+    (0, 8_500),
+    (1, 1_500),
+)
+
+ROLETA2_LOSS_SUMMARIES = {
+    "Não veio nada": "Nenhum resultado foi formado",
+    "Nenhuma combinação": "Os símbolos pararam sem formar uma combinação",
+    "Você ganhou... nada!": "A máquina girou, mas o prêmio não veio",
+    "Foi quase hein": "Dois símbolos combinaram, mas o terceiro não acompanhou",
+    "7 solitário": "Um único 7 apareceu na máquina",
+}
 
 ROLETA2_PAYOUTS = {
     "sete_pecados": (200, 0),
@@ -73,6 +109,37 @@ _SLOT_LINES = (
 _SLOT_DIAGONALS = _SLOT_LINES[-2:]
 
 
+def _slots_validate_probability_table(name: str, table) -> None:
+    total = sum(int(weight) for _value, weight in table)
+    if total != ROLETA2_PROBABILITY_SCALE:
+        raise RuntimeError(
+            f"tabela de probabilidades inválida em {name}: "
+            f"{total}/{ROLETA2_PROBABILITY_SCALE}"
+        )
+    if any(int(weight) <= 0 for _value, weight in table):
+        raise RuntimeError(f"peso não positivo na tabela {name}")
+
+
+for _probability_name, _probability_table in (
+    ("resultados", ROLETA2_OUTCOME_WEIGHTS),
+    ("tipos de linha", ROLETA2_LINE_TYPE_WEIGHTS),
+    ("frutas da colheita", ROLETA2_COLHEITA_FRUIT_WEIGHTS),
+    ("setes espalhados", ROLETA2_SCATTERED_SEVEN_WEIGHTS),
+    ("setes em perdas", ROLETA2_LOSS_SEVEN_WEIGHTS),
+):
+    _slots_validate_probability_table(_probability_name, _probability_table)
+
+
+def _slot_weighted_choice(rng: random.Random, table):
+    values, weights = zip(*table)
+    return rng.choices(values, weights=weights, k=1)[0]
+
+
+def _slot_pick_result_line(rng: random.Random):
+    line_type = str(_slot_weighted_choice(rng, ROLETA2_LINE_TYPE_WEIGHTS))
+    return rng.choice(_SLOT_LINES[:3] if line_type == "horizontal" else _SLOT_DIAGONALS)
+
+
 def _slot_line_values(grid: list[list[str]], line) -> list[str]:
     return [grid[row][column] for row, column in line]
 
@@ -84,7 +151,7 @@ def _slot_set_line(grid: list[list[str]], line, values: list[str] | tuple[str, .
 
 def _slot_random_symbol(rng: random.Random, *, include_seven: bool = True) -> str:
     symbols = SLOT_SYMBOLS if include_seven else SLOT_SYMBOLS[:-1]
-    weights = SLOT_SYMBOL_WEIGHTS if include_seven else SLOT_SYMBOL_WEIGHTS[:-1]
+    weights = SLOT_SYMBOL_WEIGHTS if include_seven else SLOT_SAFE_SYMBOL_WEIGHTS
     return str(rng.choices(symbols, weights=weights, k=1)[0])
 
 
@@ -146,7 +213,14 @@ def _slots_detect_kind(grid: list[list[str]]) -> str:
     return "loss"
 
 
-def _slots_fallback_grid(kind: str) -> list[list[str]]:
+def _slots_fallback_grid(kind: str, variant: dict[str, object] | None = None) -> list[list[str]]:
+    selected_variant = dict(variant or {})
+    fallback_rng = random.Random(f"roleta2:{kind}:{selected_variant!r}")
+    for _ in range(4_096):
+        candidate = _slots_build_candidate(kind, fallback_rng, selected_variant)
+        if _slots_grid_matches_kind(kind, candidate, selected_variant):
+            return candidate
+
     fallbacks = {
         "loss": [
             [SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA],
@@ -202,15 +276,40 @@ def _slots_fallback_grid(kind: str) -> list[list[str]]:
     return [list(row) for row in fallbacks.get(kind, fallbacks["loss"])]
 
 
-def _slots_build_candidate(kind: str, rng: random.Random) -> list[list[str]]:
+def _slots_select_variant(kind: str, rng: random.Random) -> dict[str, object]:
+    if kind in {"jackpot", "bar_triplo", "banana_split"}:
+        return {"line": _slot_pick_result_line(rng)}
+    if kind == "colheita":
+        return {
+            "line": rng.choice(_SLOT_LINES[:3]),
+            "fruit": str(_slot_weighted_choice(rng, ROLETA2_COLHEITA_FRUIT_WEIGHTS)),
+        }
+    if kind == "setes_espalhados":
+        return {"seven_count": int(_slot_weighted_choice(rng, ROLETA2_SCATTERED_SEVEN_WEIGHTS))}
+    if kind == "loss":
+        return {"seven_count": int(_slot_weighted_choice(rng, ROLETA2_LOSS_SEVEN_WEIGHTS))}
     if kind == "sete_pecados":
-        flat = [SLOT_SEVEN] * 7 + [rng.choice(SLOT_FRUITS), SLOT_BAR]
+        return {"fruit": str(_slot_weighted_choice(rng, ROLETA2_COLHEITA_FRUIT_WEIGHTS))}
+    return {}
+
+
+def _slots_build_candidate(
+    kind: str,
+    rng: random.Random,
+    variant: dict[str, object] | None = None,
+) -> list[list[str]]:
+    selected = variant if variant is not None else _slots_select_variant(kind, rng)
+    if kind == "sete_pecados":
+        fruit = str(selected.get("fruit") or _slot_weighted_choice(rng, ROLETA2_COLHEITA_FRUIT_WEIGHTS))
+        flat = [SLOT_SEVEN] * 7 + [fruit, SLOT_BAR]
         rng.shuffle(flat)
         return [flat[index:index + 3] for index in range(0, 9, 3)]
 
     if kind in {"jackpot", "bar_triplo", "banana_split", "colheita"}:
         grid = _slot_random_grid(rng, include_seven=False)
-        line = rng.choice(_SLOT_LINES)
+        line = selected.get("line")
+        if line not in _SLOT_LINES:
+            line = rng.choice(_SLOT_LINES[:3]) if kind == "colheita" else _slot_pick_result_line(rng)
         if kind == "jackpot":
             values = [SLOT_SEVEN] * 3
         elif kind == "bar_triplo":
@@ -218,10 +317,8 @@ def _slots_build_candidate(kind: str, rng: random.Random) -> list[list[str]]:
         elif kind == "banana_split":
             values = [SLOT_BANANA, SLOT_CEREJA, SLOT_BANANA]
         else:
-            values = [rng.choice(SLOT_FRUITS)] * 3
-            # Colheita usa linhas horizontais; bananas diagonais pertencem ao
-            # resultado Escorredio.
-            line = rng.choice(_SLOT_LINES[:3])
+            fruit = str(selected.get("fruit") or _slot_weighted_choice(rng, ROLETA2_COLHEITA_FRUIT_WEIGHTS))
+            values = [fruit] * 3
         _slot_set_line(grid, line, values)
         return grid
 
@@ -235,40 +332,87 @@ def _slots_build_candidate(kind: str, rng: random.Random) -> list[list[str]]:
         middle = [_slot_random_symbol(rng, include_seven=False) for _ in range(3)]
         return [[left[row], middle[row], left[row]] for row in range(3)]
 
-    if kind in {"faltou_um_sete", "setes_espalhados"}:
-        count = 2 if kind == "faltou_um_sete" else rng.choice((3, 3, 3, 4))
+    if kind in {"faltou_um_sete", "setes_espalhados", "loss"}:
+        if kind == "faltou_um_sete":
+            count = 2
+        elif kind == "setes_espalhados":
+            count = int(selected.get("seven_count", 3) or 3)
+        else:
+            count = int(selected.get("seven_count", 0) or 0)
+        count = max(0, min(9, count))
         flat = [_slot_random_symbol(rng, include_seven=False) for _ in range(9)]
         for position in rng.sample(range(9), count):
             flat[position] = SLOT_SEVEN
         return [flat[index:index + 3] for index in range(0, 9, 3)]
 
-    return _slot_random_grid(rng, include_seven=True)
+    return _slot_random_grid(rng, include_seven=False)
 
 
-def _slots_generate_grid(kind: str, rng: random.Random) -> list[list[str]]:
+def _slots_grid_matches_kind(
+    kind: str,
+    grid: list[list[str]],
+    variant: dict[str, object] | None = None,
+) -> bool:
+    selected = variant or {}
+    expected_matches = set() if kind == "loss" else {kind}
+    if _slots_matching_kinds(grid) != expected_matches:
+        return False
+    if kind == "loss" and _slots_has_escorredio(grid):
+        return False
+
+    flat = [cell for row in grid for cell in row]
+    if kind in {"loss", "setes_espalhados"} and "seven_count" in selected:
+        if flat.count(SLOT_SEVEN) != int(selected["seven_count"]):
+            return False
+
+    line = selected.get("line")
+    if line in _SLOT_LINES:
+        values = _slot_line_values(grid, line)
+        expected_values = {
+            "jackpot": [SLOT_SEVEN] * 3,
+            "bar_triplo": [SLOT_BAR] * 3,
+            "banana_split": [SLOT_BANANA, SLOT_CEREJA, SLOT_BANANA],
+            "colheita": [str(selected.get("fruit") or SLOT_BANANA)] * 3,
+        }.get(kind)
+        if expected_values is not None and values != expected_values:
+            return False
+    return True
+
+
+def _slots_generate_grid(
+    kind: str,
+    rng: random.Random,
+    variant: dict[str, object] | None = None,
+) -> list[list[str]]:
+    selected_variant = dict(variant) if variant is not None else _slots_select_variant(kind, rng)
     for _ in range(512):
-        grid = _slots_build_candidate(kind, rng)
-        expected_matches = set() if kind == "loss" else {kind}
-        if _slots_matching_kinds(grid) != expected_matches:
-            continue
-        if kind == "loss" and _slots_has_escorredio(grid):
-            continue
-        return grid
-    return _slots_fallback_grid(kind)
+        grid = _slots_build_candidate(kind, rng, selected_variant)
+        if _slots_grid_matches_kind(kind, grid, selected_variant):
+            return grid
+    return _slots_fallback_grid(kind, selected_variant)
 
 
 def _slots_generate_escorredio(rng: random.Random) -> tuple[list[list[str]], list[list[str]], int]:
+    diagonal = rng.choice(_SLOT_DIAGONALS)
+    slip_column = rng.randrange(3)
     for _ in range(512):
         preview = _slot_random_grid(rng, include_seven=False)
-        _slot_set_line(preview, rng.choice(_SLOT_DIAGONALS), [SLOT_BANANA] * 3)
+        _slot_set_line(preview, diagonal, [SLOT_BANANA] * 3)
         if _slots_detect_kind(preview) == "loss" and _slots_has_escorredio(preview):
-            return preview, _slots_generate_grid("loss", rng), rng.randrange(3)
-    preview = [
-        [SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA],
-        [SLOT_BAR, SLOT_BANANA, SLOT_FRAMBOESA],
-        [SLOT_CEREJA, SLOT_BAR, SLOT_BANANA],
-    ]
-    return preview, _slots_generate_grid("loss", rng), 2
+            return preview, _slots_generate_grid("loss", rng), slip_column
+    if diagonal == _SLOT_DIAGONALS[0]:
+        preview = [
+            [SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA],
+            [SLOT_CEREJA, SLOT_BANANA, SLOT_FRAMBOESA],
+            [SLOT_FRAMBOESA, SLOT_CEREJA, SLOT_BANANA],
+        ]
+    else:
+        preview = [
+            [SLOT_FRAMBOESA, SLOT_CEREJA, SLOT_BANANA],
+            [SLOT_CEREJA, SLOT_BANANA, SLOT_FRAMBOESA],
+            [SLOT_BANANA, SLOT_FRAMBOESA, SLOT_CEREJA],
+        ]
+    return preview, _slots_generate_grid("loss", rng), slip_column
 
 
 def _slots_colheita_fruit(grid: list[list[str]]) -> str:
@@ -279,6 +423,32 @@ def _slots_colheita_fruit(grid: list[list[str]]) -> str:
 
 
 class GincanaSlotsMixin:
+    def _pick_roleta2_loss_copy(self, grid: list[list[str]]) -> tuple[str, str]:
+        self._ensure_game_animation_runtime()
+        flat = [cell for row in grid for cell in row]
+        contextual_title = ""
+        if flat.count(SLOT_SEVEN) == 1:
+            contextual_title = "7 solitário"
+        elif any(
+            any(values.count(symbol) == 2 for symbol in SLOT_SYMBOLS)
+            for values in (_slot_line_values(grid, line) for line in _SLOT_LINES)
+        ):
+            contextual_title = "Foi quase hein"
+
+        generic_titles = (
+            "Não veio nada",
+            "Nenhuma combinação",
+            "Você ganhou... nada!",
+        )
+        last_title = self._last_game_loss_titles.get("roleta2")
+        if contextual_title and contextual_title != last_title:
+            title = contextual_title
+        else:
+            available = [candidate for candidate in generic_titles if candidate != last_title]
+            title = random.choice(available or list(generic_titles))
+        self._last_game_loss_titles["roleta2"] = title
+        return title, ROLETA2_LOSS_SUMMARIES[title]
+
     def _roll_roleta2_outcome(self) -> dict[str, object]:
         kinds, weights = zip(*ROLETA2_OUTCOME_WEIGHTS)
         kind = str(random.choices(kinds, weights=weights, k=1)[0])
@@ -291,7 +461,10 @@ class GincanaSlotsMixin:
             grid = _slots_generate_grid(kind, rng)
 
         normal_payout, bonus_payout = ROLETA2_PAYOUTS.get(kind, (0, 0))
-        if kind == "colheita":
+        if kind == "loss":
+            title, summary = self._pick_roleta2_loss_copy(grid)
+        elif kind == "colheita":
+            title = "Colheita"
             fruit = _slots_colheita_fruit(grid)
             if fruit == SLOT_FRAMBOESA:
                 normal_payout, bonus_payout = 0, 15
@@ -313,26 +486,23 @@ class GincanaSlotsMixin:
                 "escorredio": "As bananas fizeram uma coluna escorregar e girar outra vez",
                 "setes_espalhados": "Os 7 apareceram espalhados pela máquina",
                 "faltou_um_sete": "Dois 7 apareceram, mas o terceiro não veio",
-                "loss": "Nenhum resultado foi formado",
             }
             summary = summaries.get(kind, "Resultado da roleta")
-
-        titles = {
-            "sete_pecados": "Sete pecados",
-            "jackpot": "Jackpot 777",
-            "bar_triplo": "BAR triplo",
-            "bar_abriu_as_7": "Bar abriu às 7",
-            "deja_vu": "Déjà vu",
-            "banana_split": "Banana split",
-            "escorredio": "Escorredio",
-            "colheita": "Colheita",
-            "setes_espalhados": "Setes espalhados",
-            "faltou_um_sete": "Faltou um sete",
-            "loss": "Não veio nada",
-        }
+            titles = {
+                "sete_pecados": "Sete pecados",
+                "jackpot": "Jackpot 777",
+                "bar_triplo": "BAR triplo",
+                "bar_abriu_as_7": "Bar abriu às 7",
+                "deja_vu": "Déjà vu",
+                "banana_split": "Banana split",
+                "escorredio": "Escorredio",
+                "setes_espalhados": "Setes espalhados",
+                "faltou_um_sete": "Faltou um sete",
+            }
+            title = titles.get(kind, "Roleta 2")
         return {
             "kind": kind,
-            "title": titles.get(kind, "Roleta 2"),
+            "title": title,
             "summary": summary,
             "grid": grid,
             "preview_grid": preview_grid,
@@ -373,21 +543,122 @@ class GincanaSlotsMixin:
             for row in range(3)
         ]
 
+    def _roleta2_window_total(self, bonus_spins: int = 0) -> int:
+        bonus = max(0, min(ROLETA2_DAILY_EXTRA_CAP, int(bonus_spins or 0)))
+        return ROLETA2_SPIN_LIMIT + bonus
+
+    async def _sync_roleta2_spin_window(self, guild_id: int, user_id: int) -> dict[str, float | int]:
+        now = time.time()
+        doc = self.db._get_user_doc(guild_id, user_id)
+        try:
+            started_at = float(doc.get("roleta2_window_started_at", 0) or 0.0)
+        except Exception:
+            started_at = 0.0
+        try:
+            used = max(0, int(doc.get("roleta2_spins_used", 0) or 0))
+        except Exception:
+            used = 0
+        try:
+            bonus = max(
+                0,
+                min(ROLETA2_DAILY_EXTRA_CAP, int(doc.get("roleta2_bonus_spins", 0) or 0)),
+            )
+        except Exception:
+            bonus = 0
+
+        changed = False
+        if started_at <= 0 or (started_at + ROLETA2_WINDOW_SECONDS) <= now:
+            started_at = now
+            used = 0
+            bonus = 0
+            doc["roleta2_window_started_at"] = float(started_at)
+            doc["roleta2_spins_used"] = 0
+            doc["roleta2_bonus_spins"] = 0
+            changed = True
+
+        total = self._roleta2_window_total(bonus)
+        available = max(0, total - used)
+        reset_in = max(0.0, (started_at + ROLETA2_WINDOW_SECONDS) - now)
+        if changed:
+            await self.db._save_user_doc(guild_id, user_id, doc)
+        return {
+            "started_at": float(started_at),
+            "used": int(used),
+            "bonus": int(bonus),
+            "total": int(total),
+            "available": int(available),
+            "reset_in": float(reset_in),
+        }
+
+    async def _consume_roleta2_spin(self, guild_id: int, user_id: int) -> dict[str, float | int]:
+        state = await self._sync_roleta2_spin_window(guild_id, user_id)
+        if int(state["available"]) <= 0:
+            return state
+        doc = self.db._get_user_doc(guild_id, user_id)
+        used = int(state["used"]) + 1
+        doc["roleta2_window_started_at"] = float(state["started_at"])
+        doc["roleta2_spins_used"] = used
+        doc["roleta2_bonus_spins"] = int(state["bonus"])
+        await self.db._save_user_doc(guild_id, user_id, doc)
+        total = int(state["total"])
+        return {
+            "started_at": float(state["started_at"]),
+            "used": used,
+            "bonus": int(state["bonus"]),
+            "total": total,
+            "available": max(0, total - used),
+            "reset_in": float(
+                max(0.0, (float(state["started_at"]) + ROLETA2_WINDOW_SECONDS) - time.time())
+            ),
+        }
+
+    async def _grant_daily_roleta2_spins(
+        self,
+        guild_id: int,
+        user_id: int,
+    ) -> tuple[int, dict[str, float | int]]:
+        state = await self._sync_roleta2_spin_window(guild_id, user_id)
+        current_bonus = int(state["bonus"])
+        granted = min(
+            ROLETA2_DAILY_EXTRA_SPINS,
+            max(0, ROLETA2_DAILY_EXTRA_CAP - current_bonus),
+        )
+        if granted <= 0:
+            return 0, state
+        doc = self.db._get_user_doc(guild_id, user_id)
+        doc["roleta2_window_started_at"] = float(state["started_at"])
+        doc["roleta2_spins_used"] = int(state["used"])
+        doc["roleta2_bonus_spins"] = current_bonus + granted
+        await self.db._save_user_doc(guild_id, user_id, doc)
+        return granted, await self._sync_roleta2_spin_window(guild_id, user_id)
+
+    async def _reserve_roleta2_spin_state(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        is_staff: bool,
+    ) -> tuple[bool, dict[str, float | int]]:
+        state = await self._sync_roleta2_spin_window(guild_id, user_id)
+        if int(state.get("available", 0) or 0) <= 0:
+            return bool(is_staff), state
+        return True, await self._consume_roleta2_spin(guild_id, user_id)
+
     def _roleta2_footer_text(self, *, state: dict[str, float | int], is_staff: bool) -> str:
         available = max(0, int(state.get("available", 0) or 0))
         if is_staff and available <= 0:
-            return "Os giros compartilhados com cartas acabaram, mas como você é staff ainda pode girar"
-        giro_text = "giro" if available == 1 else "giros"
+            return "Seus giros da roleta2 acabaram, mas como você é staff ainda pode girar"
+        giro_text = "giro da roleta2" if available == 1 else "giros da roleta2"
         verb = "Resta" if available == 1 else "Restam"
         reset = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
-        return f"{verb} {available} {giro_text} compartilhados com cartas • Reset em {reset}"
+        return f"{verb} {available} {giro_text} • Reset em {reset}"
 
     def _roleta2_spin_message_text(self, state: dict[str, float | int]) -> tuple[str, str]:
-        total = max(1, int(state.get("total", 1) or 1))
+        total = max(ROLETA2_SPIN_LIMIT, int(state.get("total", ROLETA2_SPIN_LIMIT) or ROLETA2_SPIN_LIMIT))
         wait_text = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
         return (
             "🎰 Sem giros por agora",
-            f"Seus {total} giros compartilhados com cartas acabaram\nReset em **{wait_text}**",
+            f"Seus {total} giros da roleta2 acabaram\nReset em **{wait_text}**",
         )
 
     def _make_roleta2_spin_view(
@@ -749,9 +1020,7 @@ class GincanaSlotsMixin:
             no_spin_state: dict[str, float | int] | None = None
             payment_error: str | None = None
             async with self._game_user_state_lock(guild.id, message.author.id):
-                # A versão experimental compartilha a janela da roleta de cartas
-                # para não duplicar giros e injetar fichas extras na economia.
-                spin_state = await self._sync_carta_spin_window(guild.id, message.author.id)
+                spin_state = await self._sync_roleta2_spin_window(guild.id, message.author.id)
                 if int(spin_state.get("available", 0) or 0) <= 0 and not is_staff:
                     no_spin_state = spin_state
                 else:
@@ -768,7 +1037,7 @@ class GincanaSlotsMixin:
                     if needs_negative_confirm and not debt_confirmed:
                         needs_confirmation = True
                     else:
-                        can_spin, spin_state = await self._reserve_carta_spin_state(
+                        can_spin, spin_state = await self._reserve_roleta2_spin_state(
                             guild.id,
                             message.author.id,
                             is_staff=is_staff,

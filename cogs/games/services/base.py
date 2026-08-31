@@ -904,6 +904,7 @@ class GincanaBase:
         bonus_bonus: int = 0,
         spin_granted: bool = False,
         carta_spin_granted: bool = False,
+        roleta2_spins_granted: int = 0,
         streak_transition: str = "continued",
         race_note: str = "",
     ) -> discord.ui.LayoutView:
@@ -947,6 +948,16 @@ class GincanaBase:
                 if carta_spin_granted
                 else "• 🎴 Giro extra de cartas **já disponível**"
             ),
+            (
+                "• <:slot_cereja:1543757610925162516> "
+                f"**+{int(roleta2_spins_granted)} "
+                f"{'giro' if int(roleta2_spins_granted) == 1 else 'giros'} de roleta2**"
+                if int(roleta2_spins_granted) > 0
+                else (
+                    "• <:slot_cereja:1543757610925162516> "
+                    "Giros extras de roleta2 **já disponíveis**"
+                )
+            ),
         ]
         extra_streak_bonus = max(0, int(bonus) - 10)
         if extra_streak_bonus > 0:
@@ -985,8 +996,15 @@ class GincanaBase:
             return self._make_daily_view(guild_id, user_id, claimed=False, streak=streak)
 
         await self._grant_weekly_points(guild_id, user_id, max(3, bonus // 2))
-        spin_granted, _spin_state = await self._grant_daily_roleta_spin(guild_id, user_id)
-        carta_spin_granted, _carta_spin_state = await self._grant_daily_carta_spin(guild_id, user_id)
+        # Evita que um giro simultâneo sobrescreva qualquer um dos três
+        # contadores enquanto o Daily acrescenta as cargas extras.
+        async with self._game_user_state_lock(guild_id, user_id):
+            spin_granted, _spin_state = await self._grant_daily_roleta_spin(guild_id, user_id)
+            carta_spin_granted, _carta_spin_state = await self._grant_daily_carta_spin(guild_id, user_id)
+            roleta2_spins_granted, _roleta2_spin_state = await self._grant_daily_roleta2_spins(
+                guild_id,
+                user_id,
+            )
         race_note = ""
         if self._race_is(guild_id, user_id, "sortudo") and int(bonus_bonus) > 10:
             extra = int(bonus_bonus) - 10
@@ -1005,6 +1023,7 @@ class GincanaBase:
             bonus_bonus=bonus_bonus,
             spin_granted=spin_granted,
             carta_spin_granted=carta_spin_granted,
+            roleta2_spins_granted=roleta2_spins_granted,
             streak_transition=streak_transition,
             race_note=race_note,
         )

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import random
+import time
 import unittest
 from pathlib import Path
 
@@ -20,7 +22,7 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = SLOTS_PATH.read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.source)
-        cls.namespace: dict[str, object] = {"random": random}
+        cls.namespace: dict[str, object] = {"random": random, "time": time}
         for node in cls.tree.body:
             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.FunctionDef)):
                 module = ast.Module(body=[node], type_ignores=[])
@@ -35,6 +37,16 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
                 return str(segment)
         self.fail(f"função não encontrada: {name}")
 
+    def _class_method(self, name: str):
+        for node in ast.walk(self.tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+                namespace = dict(self.namespace)
+                module = ast.Module(body=[node], type_ignores=[])
+                ast.fix_missing_locations(module)
+                exec(compile(module, str(SLOTS_PATH), "exec"), namespace)
+                return namespace[name]
+        self.fail(f"método não encontrado: {name}")
+
     def test_uses_the_exact_custom_emojis(self) -> None:
         emojis = self.namespace["SLOT_EMOJIS"]
         self.assertEqual(emojis["banana"], "<:slot_banana:1543757649911353404>")
@@ -46,9 +58,46 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
 
     def test_outcome_weights_are_total_and_deja_vu_is_ten_percent(self) -> None:
         weights = dict(self.namespace["ROLETA2_OUTCOME_WEIGHTS"])
-        self.assertEqual(sum(weights.values()), 1000)
-        self.assertEqual(weights["deja_vu"], 100)
-        self.assertEqual(weights["loss"], 440)
+        self.assertEqual(sum(weights.values()), 10_000)
+        self.assertEqual(weights["deja_vu"], 1_000)
+        self.assertEqual(weights["loss"], 4_400)
+
+    def test_internal_probabilities_are_fixed_and_total(self) -> None:
+        expected = {
+            "ROLETA2_LINE_TYPE_WEIGHTS": {"horizontal": 7_500, "diagonal": 2_500},
+            "ROLETA2_COLHEITA_FRUIT_WEIGHTS": {
+                "banana": 4_500,
+                "framboesa": 3_500,
+                "cereja": 2_000,
+            },
+            "ROLETA2_SCATTERED_SEVEN_WEIGHTS": {3: 7_500, 4: 2_000, 5: 500},
+            "ROLETA2_LOSS_SEVEN_WEIGHTS": {0: 8_500, 1: 1_500},
+        }
+        for name, values in expected.items():
+            configured = dict(self.namespace[name])
+            self.assertEqual(configured, values)
+            self.assertEqual(sum(configured.values()), 10_000)
+
+    def test_fixed_probabilities_keep_the_base_return_in_the_intended_band(self) -> None:
+        outcome_weights = dict(self.namespace["ROLETA2_OUTCOME_WEIGHTS"])
+        payouts = dict(self.namespace["ROLETA2_PAYOUTS"])
+        scale = int(self.namespace["ROLETA2_PROBABILITY_SCALE"])
+        expected_gross = 0.0
+        for kind, weight in outcome_weights.items():
+            if kind == "colheita":
+                continue
+            normal, bonus = payouts.get(kind, (0, 0))
+            expected_gross += (weight / scale) * (normal + bonus)
+        colheita_values = {"banana": 15, "framboesa": 15, "cereja": 20}
+        colheita_average = sum(
+            (weight / scale) * colheita_values[fruit]
+            for fruit, weight in self.namespace["ROLETA2_COLHEITA_FRUIT_WEIGHTS"]
+        )
+        expected_gross += (outcome_weights["colheita"] / scale) * colheita_average
+        return_rate = expected_gross / int(self.namespace["ROLETA2_COST"])
+        self.assertAlmostEqual(expected_gross, 10.87, places=2)
+        self.assertGreaterEqual(return_rate, 0.72)
+        self.assertLessEqual(return_rate, 0.73)
 
     def test_every_generated_grid_matches_its_selected_result(self) -> None:
         generate = self.namespace["_slots_generate_grid"]
@@ -73,6 +122,36 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
                 self.assertEqual(detect(grid), kind, (kind, grid))
                 if kind == "loss":
                     self.assertFalse(has_escorredio(grid), grid)
+                    self.assertIn(sum(cell == "seven" for row in grid for cell in row), {0, 1})
+                if kind == "setes_espalhados":
+                    self.assertIn(sum(cell == "seven" for row in grid for cell in row), {3, 4, 5})
+
+    def test_forced_internal_variants_survive_grid_validation(self) -> None:
+        generate = self.namespace["_slots_generate_grid"]
+        lines = self.namespace["_SLOT_LINES"]
+        rng = random.Random(31082026)
+
+        for kind, values in (
+            ("jackpot", ["seven"] * 3),
+            ("bar_triplo", ["bar"] * 3),
+            ("banana_split", ["banana", "cereja", "banana"]),
+        ):
+            for line in lines:
+                grid = generate(kind, rng, {"line": line})
+                actual = [grid[row][column] for row, column in line]
+                self.assertEqual(actual, values, (kind, line, grid))
+
+        for fruit in ("banana", "framboesa", "cereja"):
+            line = lines[1]
+            grid = generate("colheita", rng, {"line": line, "fruit": fruit})
+            self.assertEqual([grid[row][column] for row, column in line], [fruit] * 3)
+
+        for count in (3, 4, 5):
+            grid = generate("setes_espalhados", rng, {"seven_count": count})
+            self.assertEqual(sum(cell == "seven" for row in grid for cell in row), count)
+        for count in (0, 1):
+            grid = generate("loss", rng, {"seven_count": count})
+            self.assertEqual(sum(cell == "seven" for row in grid for cell in row), count)
 
     def test_escorredio_has_a_banana_diagonal_then_a_clean_final_grid(self) -> None:
         generate = self.namespace["_slots_generate_escorredio"]
@@ -96,12 +175,24 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn('"_handle_roleta2_trigger"', router)
         self.assertIn("GincanaSlotsMixin", cog)
 
-    def test_experiment_shares_card_limits_and_safe_spam_flow(self) -> None:
+    def test_roleta2_has_independent_limits_daily_bonus_and_safe_spam_flow(self) -> None:
         trigger = self._async_function_source("_run_roleta2_trigger_locked")
         animation = self._async_function_source("_animate_roleta2_spin")
         execution = self._async_function_source("_execute_roleta2_round")
-        self.assertIn("_sync_carta_spin_window", trigger)
-        self.assertIn("_reserve_carta_spin_state", trigger)
+        daily_grant = self._async_function_source("_grant_daily_roleta2_spins")
+        base = BASE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(self.namespace["ROLETA2_SPIN_LIMIT"], 5)
+        self.assertEqual(self.namespace["ROLETA2_WINDOW_SECONDS"], 6 * 60 * 60)
+        self.assertEqual(self.namespace["ROLETA2_DAILY_EXTRA_SPINS"], 2)
+        self.assertEqual(self.namespace["ROLETA2_DAILY_EXTRA_CAP"], 2)
+        self.assertIn("_sync_roleta2_spin_window", trigger)
+        self.assertIn("_reserve_roleta2_spin_state", trigger)
+        self.assertNotIn("_sync_carta_spin_window", trigger)
+        self.assertNotIn("_reserve_carta_spin_state", trigger)
+        self.assertIn('doc["roleta2_bonus_spins"]', daily_grant)
+        self.assertIn("_grant_daily_roleta2_spins", base)
+        self.assertIn("<:slot_cereja:1543757610925162516>", base)
+        self.assertIn("roleta2_spins_granted", base)
         self.assertIn("_confirm_game_negative_from_message", trigger)
         self.assertIn("_issue_game_round_sequence", trigger)
         self.assertIn("_activate_game_animation_session", trigger)
@@ -109,6 +200,81 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("_wait_for_game_round_commit_turn", execution)
         self.assertIn("_deliver_game_result", execution)
         self.assertIn("_complete_game_round_delivery_sequence", execution)
+
+    def test_independent_window_grants_two_daily_spins_and_resets_to_five(self) -> None:
+        method_names = (
+            "_roleta2_window_total",
+            "_sync_roleta2_spin_window",
+            "_consume_roleta2_spin",
+            "_grant_daily_roleta2_spins",
+            "_reserve_roleta2_spin_state",
+        )
+        harness_type = type(
+            "Roleta2WindowHarness",
+            (),
+            {name: self._class_method(name) for name in method_names},
+        )
+
+        class FakeDB:
+            def __init__(self) -> None:
+                self.doc: dict[str, object] = {}
+
+            def _get_user_doc(self, _guild_id: int, _user_id: int) -> dict[str, object]:
+                return dict(self.doc)
+
+            async def _save_user_doc(
+                self,
+                _guild_id: int,
+                _user_id: int,
+                doc: dict[str, object],
+            ) -> None:
+                self.doc = dict(doc)
+
+        async def scenario() -> None:
+            harness = harness_type()
+            harness.db = FakeDB()
+            initial = await harness._sync_roleta2_spin_window(1, 2)
+            self.assertEqual((initial["total"], initial["available"]), (5, 5))
+
+            granted, boosted = await harness._grant_daily_roleta2_spins(1, 2)
+            self.assertEqual(granted, 2)
+            self.assertEqual((boosted["total"], boosted["available"]), (7, 7))
+
+            allowed, consumed = await harness._reserve_roleta2_spin_state(1, 2, is_staff=False)
+            self.assertTrue(allowed)
+            self.assertEqual((consumed["used"], consumed["available"]), (1, 6))
+
+            duplicate_grant, unchanged = await harness._grant_daily_roleta2_spins(1, 2)
+            self.assertEqual((duplicate_grant, unchanged["bonus"]), (0, 2))
+
+            harness.db.doc["roleta2_window_started_at"] = (
+                time.time() - int(self.namespace["ROLETA2_WINDOW_SECONDS"]) - 1
+            )
+            reset = await harness._sync_roleta2_spin_window(1, 2)
+            self.assertEqual(
+                (reset["used"], reset["bonus"], reset["total"], reset["available"]),
+                (0, 0, 5, 5),
+            )
+
+        asyncio.run(scenario())
+
+    def test_loss_copy_contains_only_the_five_approved_titles(self) -> None:
+        self.assertEqual(
+            set(self.namespace["ROLETA2_LOSS_SUMMARIES"]),
+            {
+                "Você ganhou... nada!",
+                "Foi quase hein",
+                "Nenhuma combinação",
+                "7 solitário",
+                "Não veio nada",
+            },
+        )
+        picker = next(
+            node for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_pick_roleta2_loss_copy"
+        )
+        picker_source = str(ast.get_source_segment(self.source, picker))
+        self.assertIn('_last_game_loss_titles["roleta2"]', picker_source)
 
     def test_roleta2_statistics_are_separate_but_visible_in_profile_totals(self) -> None:
         base = BASE_PATH.read_text(encoding="utf-8")

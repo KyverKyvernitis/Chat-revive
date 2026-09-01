@@ -818,6 +818,50 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("stats.get('roleta2_spins'", base)
         self.assertIn("stats.get('roleta2_jackpots'", base)
 
+    def test_setes_espalhados_uses_the_new_compact_copy(self) -> None:
+        roll = self._class_method("_roll_roleta2_outcome")
+        source = ast.get_source_segment(
+            self.source,
+            next(
+                node
+                for node in ast.walk(self.tree)
+                if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
+            ),
+        )
+        self.assertIsNotNone(roll)
+        self.assertIn('"setes_espalhados": "Vieram vários 7, só que espalhados"', str(source))
+
+    def test_roleta2_explicitly_blocks_apostador_race_effects(self) -> None:
+        allowed = self._class_method("_roleta2_race_effects_allowed")
+
+        class Dummy:
+            def __init__(self, race: str) -> None:
+                self.race = race
+
+            def _race_is(self, guild_id: int, user_id: int, race_key: str) -> bool:
+                return self.race == race_key
+
+        self.assertFalse(allowed(Dummy("apostador"), 1, 2))
+        for race in ("fenix", "glitch", "coringa", "sortudo", "preto"):
+            self.assertTrue(allowed(Dummy(race), 1, 2), race)
+
+    def test_race_resolution_uses_only_the_terminal_roleta2_stage(self) -> None:
+        execution = self._async_function_source("_execute_roleta2_round")
+        self.assertIn("terminal_outcome = outcomes[-1] if outcomes else {}", execution)
+        self.assertIn('round_success = bool(terminal_outcome.get("success"))', execution)
+        self.assertIn(
+            'round_partial = round_success and bool(terminal_outcome.get("partial"))',
+            execution,
+        )
+        self.assertNotIn("successful_outcomes =", execution)
+        self.assertIn(
+            "race_effects_allowed = self._roleta2_race_effects_allowed(guild.id, actor.id)",
+            execution,
+        )
+        self.assertIn("if not round_success and race_effects_allowed:", execution)
+        self.assertIn("if race_effects_allowed:", execution)
+        self.assertIn("valid=not round_partial", execution)
+
 
 if __name__ == "__main__":
     unittest.main()

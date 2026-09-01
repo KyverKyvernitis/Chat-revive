@@ -772,6 +772,16 @@ def _slots_result_presentation(
 
 
 class GincanaSlotsMixin:
+    def _roleta2_race_effects_allowed(self, guild_id: int, user_id: int) -> bool:
+        """Permite efeitos genéricos de raça na roleta2, exceto Apostador.
+
+        Apostador é exclusivo da roleta clássica: custo maior, 999/777,
+        Marca da Besta e bônus de ``_coinflip`` não podem vazar para a roleta2.
+        A regra fica explícita aqui para novos hooks compartilhados não criarem
+        regressões no futuro.
+        """
+        return not self._race_is(guild_id, user_id, "apostador")
+
     def _pick_roleta2_loss_copy(self, grid: list[list[str]]) -> tuple[str, str]:
         self._ensure_game_animation_runtime()
         flat = [cell for row in grid for cell in row]
@@ -893,7 +903,7 @@ class GincanaSlotsMixin:
                     "deja_vu": "A primeira e a terceira coluna repetiram o mesmo resultado",
                     "banana_split": _slots_banana_split_summary(grid),
                     "escorredio": "As bananas fizeram uma coluna escorregar e girar outra vez",
-                    "setes_espalhados": "Os 7 vieram espalhados pelo resultado",
+                    "setes_espalhados": "Vieram vários 7, só que espalhados",
                     "faltou_um_sete": "Se tivesse mais 1 hein",
                 }
                 titles = {
@@ -2157,7 +2167,7 @@ class GincanaSlotsMixin:
             await self._wait_for_game_round_commit_turn(guild.id, actor.id, round_sequence)
         async with self._game_user_state_lock(guild.id, actor.id):
             commit_start_normal, commit_start_bonus = self._current_game_chip_balances(guild.id, actor.id)
-            successful_outcomes = [item for item in outcomes if bool(item.get("success"))]
+            terminal_outcome = outcomes[-1] if outcomes else {}
             display_outcome, display_color_theme = _slots_final_presentation(outcomes)
             normal_payout = sum(
                 max(0, int(item.get("normal_payout", 0) or 0)) for item in outcomes
@@ -2169,13 +2179,16 @@ class GincanaSlotsMixin:
                 max(0, int(item.get("free_spins", 0) or 0)) for item in outcomes
             )
             gross_payout = normal_payout + bonus_payout
-            round_success = bool(successful_outcomes)
+            # Efeitos intermediários (Déjà vu e 7 solitário) pertencem à mesma
+            # rodada e não podem transformar uma derrota terminal em vitória
+            # para conquistas, Coringa, Fênix ou Glitch.
+            round_success = bool(terminal_outcome.get("success"))
             round_jackpot = any(bool(item.get("jackpot")) for item in outcomes)
             round_premium = any(bool(item.get("premium")) for item in outcomes)
-            round_partial = round_success and not any(
-                bool(item.get("success")) and not bool(item.get("partial"))
-                for item in outcomes
-            )
+            # A regra antiga continua valendo: resultado parcial paga, mas não
+            # progride efeitos de raça. Só o estágio terminal decide isso; um
+            # Déjà vu histórico não torna a rodada inteira "parcial".
+            round_partial = round_success and bool(terminal_outcome.get("partial"))
             summary_lines: list[str] = [str(display_outcome.get("summary") or "").strip()]
             summary_lines.extend(self._roleta2_historical_modifier_lines(outcomes))
             deja_vu_total = sum(int(item.get("deja_vu_payout", 0) or 0) for item in outcomes)
@@ -2226,9 +2239,10 @@ class GincanaSlotsMixin:
             elif round_premium:
                 await self._grant_weekly_points(guild.id, actor.id, 6)
 
+            race_effects_allowed = self._roleta2_race_effects_allowed(guild.id, actor.id)
             race_won: bool | None = round_success
             race_payout = gross_payout
-            if not round_success:
+            if not round_success and race_effects_allowed:
                 race_won = False
                 race_payout = 0
                 refund, refund_mode = await self._maybe_apply_coringa_loss_refund(
@@ -2260,15 +2274,17 @@ class GincanaSlotsMixin:
                         )
                         summary_lines.insert(0, effect_note or f"Você recuperou {self._chip_text(refund, kind='gain')}")
 
-            race_notes = await self._apply_new_race_result(
-                guild.id,
-                actor.id,
-                won=race_won,
-                entry_spend=entry_spend,
-                payout=race_payout,
-                valid=not round_partial,
-                glitch_progress=True,
-            )
+            race_notes = []
+            if race_effects_allowed:
+                race_notes = await self._apply_new_race_result(
+                    guild.id,
+                    actor.id,
+                    won=race_won,
+                    entry_spend=entry_spend,
+                    payout=race_payout,
+                    valid=not round_partial,
+                    glitch_progress=True,
+                )
             if race_notes:
                 summary_lines = [*race_notes, *summary_lines]
             if chip_note:

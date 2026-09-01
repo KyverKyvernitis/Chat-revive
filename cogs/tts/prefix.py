@@ -79,6 +79,8 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
     if not raw:
         return None
 
+    if matches_prefixed_command(raw, bot_prefix, kind="ping"):
+        return PrefixControlCommand("ping")
     if matches_prefixed_command(raw, bot_prefix, kind="help"):
         return PrefixControlCommand("help")
     if matches_prefixed_command(raw, bot_prefix, kind="clear"):
@@ -155,12 +157,12 @@ def match_engine_prefix(
 
 
 async def dispatch_prefix_control_command(cog: Any, message: Any, command: PrefixControlCommand) -> bool:
-    # Despacho 1-1 do comando casado pra o handler do cog. `help` é tratado
-    # à parte (pelo Utility.on_message), aqui só absorve o evento pra não
-    # cair no path de TTS.
+    # Despacho 1-1 do comando casado pra o handler do cog. `help` e `ping` são
+    # tratados à parte pelo Utility; aqui só absorvemos o evento para ele não
+    # cair no caminho de síntese do TTS.
     kind = command.kind
 
-    if kind == "help":
+    if kind in {"help", "ping"}:
         return True
     if kind == "clear":
         await cog._prefix_clear(message)

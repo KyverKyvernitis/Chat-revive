@@ -1072,11 +1072,14 @@
       "category": null,
       "group": "",
       "description": "Mostra latência e estado do bot.",
-      "usage": "/ping",
+      "usage": "{bot_prefix}ping",
       "search_terms": [
         "latencia",
         "latência",
         "status bot"
+      ],
+      "aliases": [
+        "ping"
       ],
       "slash_root": "ping",
       "slash_path": "ping"

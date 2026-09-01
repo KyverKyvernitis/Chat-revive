@@ -4,6 +4,11 @@ from typing import Iterable
 
 
 _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
+    "ping": {
+        "aliases": ("ping",),
+        "display": ("ping",),
+        "accepts_argument": False,
+    },
     "help": {
         "aliases": ("help",),
         "display": ("help",),

@@ -838,6 +838,82 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("As outras colunas vão girar até vir um resultado decente", initial_animation)
         self.assertIn("As outras colunas vão girar até vir um resultado decente", sete_animation)
 
+    def test_respin_live_effect_counters_accumulate_in_real_time(self) -> None:
+        record = self._class_method("_roleta2_record_live_respin_effect")
+        lines = self._class_method("_roleta2_live_respin_modifier_lines")
+
+        class Dummy:
+            _CHIP_GAIN_EMOJI = "<gain>"
+            _CHIP_BONUS_EMOJI = "<bonus>"
+
+        dummy = Dummy()
+        state: dict[str, object] = {"order": []}
+        record(dummy, state, "sete_solitario", bonus_payout=7)
+        self.assertEqual(
+            lines(dummy, state),
+            ["-# <:slot_7:1543757577496821800> 7 solitário ×1 · +7 <bonus>"],
+        )
+        record(dummy, state, "sete_solitario", bonus_payout=5)
+        record(dummy, state, "deja_vu", bonus_payout=10)
+        record(dummy, state, "escorredio", normal_payout=18)
+        self.assertEqual(
+            lines(dummy, state),
+            [
+                "-# <:slot_7:1543757577496821800> 7 solitário ×2 · +12 <bonus>",
+                "-# 🔁 Déjà vu ×1 · +10 <bonus>",
+                "-# <:slot_banana:1543757649911353404> Escorredio ×1 · +18 <gain>",
+            ],
+        )
+
+    def test_respin_projected_balance_tracks_uncommitted_payouts(self) -> None:
+        formatter = self._class_method("_format_roleta2_projected_balance")
+
+        class Dummy:
+            _CHIP_EMOJI = "<chip>"
+            _CHIP_LOSS_EMOJI = "<loss>"
+            _CHIP_BONUS_EMOJI = "<bonus>"
+
+        dummy = Dummy()
+        self.assertEqual(
+            formatter(
+                dummy,
+                base_normal=358,
+                base_bonus=0,
+                normal_payout=0,
+                bonus_payout=7,
+            ),
+            "**358** <chip> • **7** <bonus>",
+        )
+        self.assertEqual(
+            formatter(
+                dummy,
+                base_normal=-5,
+                base_bonus=10,
+                normal_payout=18,
+                bonus_payout=12,
+            ),
+            "**13** <chip> • **22** <bonus>",
+        )
+
+    def test_respin_animation_refreshes_result_balance_and_effect_lines(self) -> None:
+        execution = self._async_function_source("_execute_roleta2_round")
+        initial = self._async_function_source("_animate_roleta2_spin")
+        deja = self._async_function_source("_animate_roleta2_respin")
+        sete = self._async_function_source("_animate_roleta2_sete_solitario_respin")
+
+        self.assertIn("live_effect_state = self._new_roleta2_live_effect_state()", execution)
+        self.assertIn("running_normal_payout=running_normal_payout", execution)
+        self.assertIn("running_bonus_payout=running_bonus_payout", execution)
+        self.assertIn("live_effect_state=live_effect_state", execution)
+        for source in (initial, deja, sete):
+            self.assertIn("_format_roleta2_projected_balance", source)
+            self.assertIn("_roleta2_record_live_respin_effect", source)
+            self.assertIn("_roleta2_live_effect_summary", source)
+            self.assertNotIn("_change_user_chips", source)
+            self.assertNotIn("_change_user_bonus_chips", source)
+        self.assertIn("summary=modifier_summary", deja)
+        self.assertIn("summary=live_summary", sete)
+
     def test_roleta2_statistics_are_separate_but_visible_in_profile_totals(self) -> None:
         base = BASE_PATH.read_text(encoding="utf-8")
         database = DB_PATH.read_text(encoding="utf-8")

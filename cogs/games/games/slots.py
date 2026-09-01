@@ -1290,9 +1290,11 @@ class GincanaSlotsMixin:
         footer_text: str,
         normal_delta: int,
         bonus_delta: int,
+        summary: str = "",
     ) -> discord.ui.LayoutView:
         return self._make_game_layout_view(
             "🔁 Déjà vu...",
+            summary=summary,
             details=[
                 f"**Resultado:** {self._format_game_result_breakdown(normal_delta, bonus_delta)}",
                 f"**Saldo atual:** {balance_text}",
@@ -1343,6 +1345,92 @@ class GincanaSlotsMixin:
         if parts:
             return " · ".join(parts)
         return self._format_game_result_breakdown(normal_delta, bonus_delta)
+
+    def _format_roleta2_projected_balance(
+        self,
+        *,
+        base_normal: int,
+        base_bonus: int,
+        normal_payout: int = 0,
+        bonus_payout: int = 0,
+        temporary_bonus: int = 0,
+    ) -> str:
+        normal = int(base_normal) + int(normal_payout)
+        bonus = int(base_bonus) + int(bonus_payout)
+        temporary = max(0, int(temporary_bonus or 0))
+        if normal < 0:
+            text = f"**{normal}** {self._CHIP_LOSS_EMOJI}"
+        else:
+            text = f"**{normal}** {self._CHIP_EMOJI}"
+        if bonus + temporary > 0:
+            text += f" • **{bonus + temporary}** {self._CHIP_BONUS_EMOJI}"
+        if temporary > 0:
+            text += f" _({temporary} temporárias)_"
+        return text
+
+    def _new_roleta2_live_effect_state(self) -> dict[str, object]:
+        return {"order": []}
+
+    def _roleta2_record_live_respin_effect(
+        self,
+        state: dict[str, object],
+        kind: str,
+        *,
+        normal_payout: int = 0,
+        bonus_payout: int = 0,
+    ) -> None:
+        effect = str(kind or "")
+        if effect not in {"deja_vu", "sete_solitario", "escorredio"}:
+            return
+        order = state.setdefault("order", [])
+        if isinstance(order, list) and effect not in order:
+            order.append(effect)
+        state[f"{effect}_count"] = int(state.get(f"{effect}_count", 0) or 0) + 1
+        state[f"{effect}_normal"] = int(state.get(f"{effect}_normal", 0) or 0) + max(
+            0, int(normal_payout or 0)
+        )
+        state[f"{effect}_bonus"] = int(state.get(f"{effect}_bonus", 0) or 0) + max(
+            0, int(bonus_payout or 0)
+        )
+
+    def _roleta2_live_respin_modifier_lines(
+        self,
+        state: dict[str, object],
+    ) -> list[str]:
+        metadata = {
+            "deja_vu": ("🔁", "Déjà vu"),
+            "sete_solitario": (SLOT_EMOJIS[SLOT_SEVEN], "7 solitário"),
+            "escorredio": (SLOT_EMOJIS[SLOT_BANANA], "Escorredio"),
+        }
+        raw_order = state.get("order")
+        order = list(raw_order) if isinstance(raw_order, list) else []
+        lines: list[str] = []
+        for kind in order:
+            if kind not in metadata:
+                continue
+            count = max(0, int(state.get(f"{kind}_count", 0) or 0))
+            if count <= 0:
+                continue
+            emoji, label = metadata[kind]
+            rewards: list[str] = []
+            normal = max(0, int(state.get(f"{kind}_normal", 0) or 0))
+            bonus = max(0, int(state.get(f"{kind}_bonus", 0) or 0))
+            if normal > 0:
+                rewards.append(f"+{normal} {self._CHIP_GAIN_EMOJI}")
+            if bonus > 0:
+                rewards.append(f"+{bonus} {self._CHIP_BONUS_EMOJI}")
+            reward_text = f" · {' · '.join(rewards)}" if rewards else ""
+            lines.append(f"-# {emoji} {label} ×{count}{reward_text}")
+        return lines
+
+    def _roleta2_live_effect_summary(
+        self,
+        summary: str,
+        state: dict[str, object],
+    ) -> str:
+        lines = [str(summary or "").strip()]
+        lines.extend(self._roleta2_live_respin_modifier_lines(state))
+        return "\n".join(line for line in lines if line)
 
     def _make_roleta2_result_view(
         self,
@@ -1455,6 +1543,10 @@ class GincanaSlotsMixin:
         paid_entry: int,
         entry_normal: int,
         entry_bonus: int,
+        base_normal_balance: int,
+        base_bonus_balance: int,
+        temporary_bonus: int,
+        live_effect_state: dict[str, object],
         spin_message: discord.Message | None = None,
         skip_event: asyncio.Event | None = None,
     ) -> tuple[discord.Message | None, list[list[str]]]:
@@ -1510,19 +1602,34 @@ class GincanaSlotsMixin:
         slip_column = outcome.get("slip_column")
         if isinstance(preview_raw, list) and isinstance(slip_column, int):
             stopped = {0, 1, 2}
-            escorredio_normal_delta = (
-                int(outcome.get("escorredio_normal_payout", 0) or 0) - int(entry_normal)
+            escorredio_normal_payout = int(outcome.get("escorredio_normal_payout", 0) or 0)
+            escorredio_bonus_payout = int(outcome.get("escorredio_bonus_payout", 0) or 0)
+            self._roleta2_record_live_respin_effect(
+                live_effect_state,
+                "escorredio",
+                normal_payout=escorredio_normal_payout,
+                bonus_payout=escorredio_bonus_payout,
             )
-            escorredio_bonus_delta = (
-                int(outcome.get("escorredio_bonus_payout", 0) or 0) - int(entry_bonus)
+            escorredio_normal_delta = escorredio_normal_payout - int(entry_normal)
+            escorredio_bonus_delta = escorredio_bonus_payout - int(entry_bonus)
+            escorredio_balance_text = self._format_roleta2_projected_balance(
+                base_normal=base_normal_balance,
+                base_bonus=base_bonus_balance,
+                normal_payout=escorredio_normal_payout,
+                bonus_payout=escorredio_bonus_payout,
+                temporary_bonus=temporary_bonus,
+            )
+            escorredio_summary = self._roleta2_live_effect_summary(
+                str(outcome.get("escorredio_summary") or ""),
+                live_effect_state,
             )
             preview_view = self._make_roleta2_effect_view(
                 title="Escorredio",
                 title_emoji=SLOT_EMOJIS[SLOT_BANANA],
                 color_theme=SLOT_BANANA,
-                summary=str(outcome.get("escorredio_summary") or ""),
+                summary=escorredio_summary,
                 board=self._render_roleta2_board(target_grid),
-                balance_text=balance_text,
+                balance_text=escorredio_balance_text,
                 footer_text=footer_text,
                 normal_delta=escorredio_normal_delta,
                 bonus_delta=escorredio_bonus_delta,
@@ -1547,9 +1654,9 @@ class GincanaSlotsMixin:
                 title="Escorredio...",
                 title_emoji=SLOT_EMOJIS[SLOT_BANANA],
                 color_theme=SLOT_BANANA,
-                summary=str(outcome.get("escorredio_summary") or ""),
+                summary=escorredio_summary,
                 board=self._render_roleta2_board(slipping),
-                balance_text=balance_text,
+                balance_text=escorredio_balance_text,
                 footer_text=footer_text,
                 normal_delta=escorredio_normal_delta,
                 bonus_delta=escorredio_bonus_delta,
@@ -1567,20 +1674,32 @@ class GincanaSlotsMixin:
                 return spin_message, final_grid
 
         if bool(outcome.get("has_deja_vu")):
+            self._roleta2_record_live_respin_effect(
+                live_effect_state,
+                "deja_vu",
+                bonus_payout=int(outcome.get("deja_vu_payout", 0) or 0),
+            )
+            total_normal_payout = int(outcome.get("normal_payout", 0) or 0)
+            total_bonus_payout = int(outcome.get("bonus_payout", 0) or 0)
             deja_view = self._make_roleta2_effect_view(
                 title="Déjà vu",
                 title_emoji="🔁",
                 color_theme="deja_vu",
-                summary=str(outcome.get("deja_vu_summary") or ""),
+                summary=self._roleta2_live_effect_summary(
+                    str(outcome.get("deja_vu_summary") or ""),
+                    live_effect_state,
+                ),
                 board=self._render_roleta2_board(final_grid),
-                balance_text=balance_text,
+                balance_text=self._format_roleta2_projected_balance(
+                    base_normal=base_normal_balance,
+                    base_bonus=base_bonus_balance,
+                    normal_payout=total_normal_payout,
+                    bonus_payout=total_bonus_payout,
+                    temporary_bonus=temporary_bonus,
+                ),
                 footer_text=footer_text,
-                normal_delta=(
-                    int(outcome.get("normal_payout", 0) or 0) - int(entry_normal)
-                ),
-                bonus_delta=(
-                    int(outcome.get("bonus_payout", 0) or 0) - int(entry_bonus)
-                ),
+                normal_delta=total_normal_payout - int(entry_normal),
+                bonus_delta=total_bonus_payout - int(entry_bonus),
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -1594,20 +1713,35 @@ class GincanaSlotsMixin:
             await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
         if bool(outcome.get("has_sete_solitario")):
+            self._roleta2_record_live_respin_effect(
+                live_effect_state,
+                "sete_solitario",
+                bonus_payout=int(outcome.get("sete_solitario_payout", 0) or 0),
+            )
+            total_normal_payout = int(outcome.get("normal_payout", 0) or 0)
+            total_bonus_payout = int(outcome.get("bonus_payout", 0) or 0)
             sete_view = self._make_roleta2_effect_view(
                 title="7 solitário",
                 title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
                 color_theme=SLOT_SEVEN,
-                summary=str(outcome.get("sete_solitario_summary") or "As outras colunas vão girar até vir um resultado decente"),
+                summary=self._roleta2_live_effect_summary(
+                    str(
+                        outcome.get("sete_solitario_summary")
+                        or "As outras colunas vão girar até vir um resultado decente"
+                    ),
+                    live_effect_state,
+                ),
                 board=self._render_roleta2_board(final_grid),
-                balance_text=balance_text,
+                balance_text=self._format_roleta2_projected_balance(
+                    base_normal=base_normal_balance,
+                    base_bonus=base_bonus_balance,
+                    normal_payout=total_normal_payout,
+                    bonus_payout=total_bonus_payout,
+                    temporary_bonus=temporary_bonus,
+                ),
                 footer_text=footer_text,
-                normal_delta=(
-                    int(outcome.get("normal_payout", 0) or 0) - int(entry_normal)
-                ),
-                bonus_delta=(
-                    int(outcome.get("bonus_payout", 0) or 0) - int(entry_bonus)
-                ),
+                normal_delta=total_normal_payout - int(entry_normal),
+                bonus_delta=total_bonus_payout - int(entry_bonus),
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -1628,10 +1762,15 @@ class GincanaSlotsMixin:
         *,
         current_grid: list[list[str]],
         outcome: dict[str, object],
-        balance_text: str,
         footer_text: str,
-        normal_delta: int,
-        bonus_delta: int,
+        entry_normal: int,
+        entry_bonus: int,
+        base_normal_balance: int,
+        base_bonus_balance: int,
+        temporary_bonus: int,
+        running_normal_payout: int,
+        running_bonus_payout: int,
+        live_effect_state: dict[str, object],
         respin_index: int,
         spin_message: discord.Message | None = None,
         skip_event: asyncio.Event | None = None,
@@ -1641,6 +1780,17 @@ class GincanaSlotsMixin:
         target_grid = [list(row) for row in preview_raw] if isinstance(preview_raw, list) else final_grid
         if skip_event is not None and skip_event.is_set():
             return spin_message, final_grid
+
+        normal_delta = int(running_normal_payout) - int(entry_normal)
+        bonus_delta = int(running_bonus_payout) - int(entry_bonus)
+        balance_text = self._format_roleta2_projected_balance(
+            base_normal=base_normal_balance,
+            base_bonus=base_bonus_balance,
+            normal_payout=running_normal_payout,
+            bonus_payout=running_bonus_payout,
+            temporary_bonus=temporary_bonus,
+        )
+        modifier_summary = "\n".join(self._roleta2_live_respin_modifier_lines(live_effect_state))
 
         column_order = _slots_respin_column_order(respin_index)
         spinning_columns: set[int] = set()
@@ -1656,6 +1806,7 @@ class GincanaSlotsMixin:
                 footer_text=footer_text,
                 normal_delta=normal_delta,
                 bonus_delta=bonus_delta,
+                summary=modifier_summary,
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -1684,6 +1835,7 @@ class GincanaSlotsMixin:
                 footer_text=footer_text,
                 normal_delta=normal_delta,
                 bonus_delta=bonus_delta,
+                summary=modifier_summary,
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -1699,19 +1851,36 @@ class GincanaSlotsMixin:
 
         slip_column = outcome.get("slip_column")
         if isinstance(preview_raw, list) and isinstance(slip_column, int):
-            escorredio_normal_delta = normal_delta + int(
-                outcome.get("escorredio_normal_payout", 0) or 0
+            escorredio_normal_payout = int(outcome.get("escorredio_normal_payout", 0) or 0)
+            escorredio_bonus_payout = int(outcome.get("escorredio_bonus_payout", 0) or 0)
+            self._roleta2_record_live_respin_effect(
+                live_effect_state,
+                "escorredio",
+                normal_payout=escorredio_normal_payout,
+                bonus_payout=escorredio_bonus_payout,
             )
-            escorredio_bonus_delta = bonus_delta + int(
-                outcome.get("escorredio_bonus_payout", 0) or 0
+            effect_normal_payout = int(running_normal_payout) + escorredio_normal_payout
+            effect_bonus_payout = int(running_bonus_payout) + escorredio_bonus_payout
+            escorredio_normal_delta = effect_normal_payout - int(entry_normal)
+            escorredio_bonus_delta = effect_bonus_payout - int(entry_bonus)
+            escorredio_balance_text = self._format_roleta2_projected_balance(
+                base_normal=base_normal_balance,
+                base_bonus=base_bonus_balance,
+                normal_payout=effect_normal_payout,
+                bonus_payout=effect_bonus_payout,
+                temporary_bonus=temporary_bonus,
+            )
+            escorredio_summary = self._roleta2_live_effect_summary(
+                str(outcome.get("escorredio_summary") or ""),
+                live_effect_state,
             )
             preview_view = self._make_roleta2_effect_view(
                 title="Escorredio",
                 title_emoji=SLOT_EMOJIS[SLOT_BANANA],
                 color_theme=SLOT_BANANA,
-                summary=str(outcome.get("escorredio_summary") or ""),
+                summary=escorredio_summary,
                 board=self._render_roleta2_board(target_grid),
-                balance_text=balance_text,
+                balance_text=escorredio_balance_text,
                 footer_text=footer_text,
                 normal_delta=escorredio_normal_delta,
                 bonus_delta=escorredio_bonus_delta,
@@ -1736,9 +1905,9 @@ class GincanaSlotsMixin:
                 title="Escorredio...",
                 title_emoji=SLOT_EMOJIS[SLOT_BANANA],
                 color_theme=SLOT_BANANA,
-                summary=str(outcome.get("escorredio_summary") or ""),
+                summary=escorredio_summary,
                 board=self._render_roleta2_board(slipping),
-                balance_text=balance_text,
+                balance_text=escorredio_balance_text,
                 footer_text=footer_text,
                 normal_delta=escorredio_normal_delta,
                 bonus_delta=escorredio_bonus_delta,
@@ -1756,16 +1925,32 @@ class GincanaSlotsMixin:
                 return spin_message, final_grid
 
         if bool(outcome.get("has_deja_vu")):
+            self._roleta2_record_live_respin_effect(
+                live_effect_state,
+                "deja_vu",
+                bonus_payout=int(outcome.get("deja_vu_payout", 0) or 0),
+            )
+            total_normal_payout = int(running_normal_payout) + int(outcome.get("normal_payout", 0) or 0)
+            total_bonus_payout = int(running_bonus_payout) + int(outcome.get("bonus_payout", 0) or 0)
             deja_view = self._make_roleta2_effect_view(
                 title="Déjà vu",
                 title_emoji="🔁",
                 color_theme="deja_vu",
-                summary=str(outcome.get("deja_vu_summary") or ""),
+                summary=self._roleta2_live_effect_summary(
+                    str(outcome.get("deja_vu_summary") or ""),
+                    live_effect_state,
+                ),
                 board=self._render_roleta2_board(final_grid),
-                balance_text=balance_text,
+                balance_text=self._format_roleta2_projected_balance(
+                    base_normal=base_normal_balance,
+                    base_bonus=base_bonus_balance,
+                    normal_payout=total_normal_payout,
+                    bonus_payout=total_bonus_payout,
+                    temporary_bonus=temporary_bonus,
+                ),
                 footer_text=footer_text,
-                normal_delta=normal_delta + int(outcome.get("normal_payout", 0) or 0),
-                bonus_delta=bonus_delta + int(outcome.get("bonus_payout", 0) or 0),
+                normal_delta=total_normal_payout - int(entry_normal),
+                bonus_delta=total_bonus_payout - int(entry_bonus),
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -1779,16 +1964,35 @@ class GincanaSlotsMixin:
             await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
         if bool(outcome.get("has_sete_solitario")):
+            self._roleta2_record_live_respin_effect(
+                live_effect_state,
+                "sete_solitario",
+                bonus_payout=int(outcome.get("sete_solitario_payout", 0) or 0),
+            )
+            total_normal_payout = int(running_normal_payout) + int(outcome.get("normal_payout", 0) or 0)
+            total_bonus_payout = int(running_bonus_payout) + int(outcome.get("bonus_payout", 0) or 0)
             sete_view = self._make_roleta2_effect_view(
                 title="7 solitário",
                 title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
                 color_theme=SLOT_SEVEN,
-                summary=str(outcome.get("sete_solitario_summary") or "As outras colunas vão girar até vir um resultado decente"),
+                summary=self._roleta2_live_effect_summary(
+                    str(
+                        outcome.get("sete_solitario_summary")
+                        or "As outras colunas vão girar até vir um resultado decente"
+                    ),
+                    live_effect_state,
+                ),
                 board=self._render_roleta2_board(final_grid),
-                balance_text=balance_text,
+                balance_text=self._format_roleta2_projected_balance(
+                    base_normal=base_normal_balance,
+                    base_bonus=base_bonus_balance,
+                    normal_payout=total_normal_payout,
+                    bonus_payout=total_bonus_payout,
+                    temporary_bonus=temporary_bonus,
+                ),
                 footer_text=footer_text,
-                normal_delta=normal_delta + int(outcome.get("normal_payout", 0) or 0),
-                bonus_delta=bonus_delta + int(outcome.get("bonus_payout", 0) or 0),
+                normal_delta=total_normal_payout - int(entry_normal),
+                bonus_delta=total_bonus_payout - int(entry_bonus),
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -1810,10 +2014,15 @@ class GincanaSlotsMixin:
         current_grid: list[list[str]],
         outcome: dict[str, object],
         locked_column: int,
-        balance_text: str,
         footer_text: str,
-        normal_delta: int,
-        bonus_delta: int,
+        entry_normal: int,
+        entry_bonus: int,
+        base_normal_balance: int,
+        base_bonus_balance: int,
+        temporary_bonus: int,
+        running_normal_payout: int,
+        running_bonus_payout: int,
+        live_effect_state: dict[str, object],
         spin_message: discord.Message | None = None,
         skip_event: asyncio.Event | None = None,
     ) -> tuple[discord.Message | None, list[list[str]]]:
@@ -1823,18 +2032,32 @@ class GincanaSlotsMixin:
         if skip_event is not None and skip_event.is_set():
             return spin_message, final_grid
 
+        normal_delta = int(running_normal_payout) - int(entry_normal)
+        bonus_delta = int(running_bonus_payout) - int(entry_bonus)
+        balance_text = self._format_roleta2_projected_balance(
+            base_normal=base_normal_balance,
+            base_bonus=base_bonus_balance,
+            normal_payout=running_normal_payout,
+            bonus_payout=running_bonus_payout,
+            temporary_bonus=temporary_bonus,
+        )
+        live_summary = self._roleta2_live_effect_summary(
+            "As outras colunas vão girar até vir um resultado decente",
+            live_effect_state,
+        )
+
         locked = max(0, min(2, int(locked_column)))
         reroll_columns = tuple(column for column in range(3) if column != locked)
         stopped: set[int] = {locked}
 
         # O 7 preserva sua coluna inteira. As outras duas voltam a girar juntas,
-        # então o jogador vê imediatamente qual parte do tabuleiro ficou travada.
+        # mantendo resultado, saldo e contadores já conquistados visíveis.
         frame = self._roleta2_display_grid(target_grid, stopped_columns=stopped)
         spinning_view = self._make_roleta2_effect_view(
             title="7 solitário...",
             title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
             color_theme=SLOT_SEVEN,
-            summary="As outras colunas vão girar até vir um resultado decente",
+            summary=live_summary,
             board=self._render_roleta2_board(frame),
             balance_text=balance_text,
             footer_text=footer_text,
@@ -1863,7 +2086,7 @@ class GincanaSlotsMixin:
                 title="7 solitário...",
                 title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
                 color_theme=SLOT_SEVEN,
-                summary="As outras colunas vão girar até vir um resultado decente",
+                summary=live_summary,
                 board=self._render_roleta2_board(frame),
                 balance_text=balance_text,
                 footer_text=footer_text,
@@ -1884,19 +2107,36 @@ class GincanaSlotsMixin:
 
         slip_column = outcome.get("slip_column")
         if isinstance(preview_raw, list) and isinstance(slip_column, int):
-            escorredio_normal_delta = normal_delta + int(
-                outcome.get("escorredio_normal_payout", 0) or 0
+            escorredio_normal_payout = int(outcome.get("escorredio_normal_payout", 0) or 0)
+            escorredio_bonus_payout = int(outcome.get("escorredio_bonus_payout", 0) or 0)
+            self._roleta2_record_live_respin_effect(
+                live_effect_state,
+                "escorredio",
+                normal_payout=escorredio_normal_payout,
+                bonus_payout=escorredio_bonus_payout,
             )
-            escorredio_bonus_delta = bonus_delta + int(
-                outcome.get("escorredio_bonus_payout", 0) or 0
+            effect_normal_payout = int(running_normal_payout) + escorredio_normal_payout
+            effect_bonus_payout = int(running_bonus_payout) + escorredio_bonus_payout
+            escorredio_normal_delta = effect_normal_payout - int(entry_normal)
+            escorredio_bonus_delta = effect_bonus_payout - int(entry_bonus)
+            escorredio_balance_text = self._format_roleta2_projected_balance(
+                base_normal=base_normal_balance,
+                base_bonus=base_bonus_balance,
+                normal_payout=effect_normal_payout,
+                bonus_payout=effect_bonus_payout,
+                temporary_bonus=temporary_bonus,
+            )
+            escorredio_summary = self._roleta2_live_effect_summary(
+                str(outcome.get("escorredio_summary") or ""),
+                live_effect_state,
             )
             preview_view = self._make_roleta2_effect_view(
                 title="Escorredio",
                 title_emoji=SLOT_EMOJIS[SLOT_BANANA],
                 color_theme=SLOT_BANANA,
-                summary=str(outcome.get("escorredio_summary") or ""),
+                summary=escorredio_summary,
                 board=self._render_roleta2_board(target_grid),
-                balance_text=balance_text,
+                balance_text=escorredio_balance_text,
                 footer_text=footer_text,
                 normal_delta=escorredio_normal_delta,
                 bonus_delta=escorredio_bonus_delta,
@@ -1921,9 +2161,9 @@ class GincanaSlotsMixin:
                 title="Escorredio...",
                 title_emoji=SLOT_EMOJIS[SLOT_BANANA],
                 color_theme=SLOT_BANANA,
-                summary=str(outcome.get("escorredio_summary") or ""),
+                summary=escorredio_summary,
                 board=self._render_roleta2_board(slipping),
-                balance_text=balance_text,
+                balance_text=escorredio_balance_text,
                 footer_text=footer_text,
                 normal_delta=escorredio_normal_delta,
                 bonus_delta=escorredio_bonus_delta,
@@ -1941,16 +2181,32 @@ class GincanaSlotsMixin:
                 return spin_message, final_grid
 
         if bool(outcome.get("has_deja_vu")):
+            self._roleta2_record_live_respin_effect(
+                live_effect_state,
+                "deja_vu",
+                bonus_payout=int(outcome.get("deja_vu_payout", 0) or 0),
+            )
+            total_normal_payout = int(running_normal_payout) + int(outcome.get("normal_payout", 0) or 0)
+            total_bonus_payout = int(running_bonus_payout) + int(outcome.get("bonus_payout", 0) or 0)
             deja_view = self._make_roleta2_effect_view(
                 title="Déjà vu",
                 title_emoji="🔁",
                 color_theme="deja_vu",
-                summary=str(outcome.get("deja_vu_summary") or ""),
+                summary=self._roleta2_live_effect_summary(
+                    str(outcome.get("deja_vu_summary") or ""),
+                    live_effect_state,
+                ),
                 board=self._render_roleta2_board(final_grid),
-                balance_text=balance_text,
+                balance_text=self._format_roleta2_projected_balance(
+                    base_normal=base_normal_balance,
+                    base_bonus=base_bonus_balance,
+                    normal_payout=total_normal_payout,
+                    bonus_payout=total_bonus_payout,
+                    temporary_bonus=temporary_bonus,
+                ),
                 footer_text=footer_text,
-                normal_delta=normal_delta + int(outcome.get("normal_payout", 0) or 0),
-                bonus_delta=bonus_delta + int(outcome.get("bonus_payout", 0) or 0),
+                normal_delta=total_normal_payout - int(entry_normal),
+                bonus_delta=total_bonus_payout - int(entry_bonus),
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -1964,16 +2220,35 @@ class GincanaSlotsMixin:
             await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
         if bool(outcome.get("has_sete_solitario")):
+            self._roleta2_record_live_respin_effect(
+                live_effect_state,
+                "sete_solitario",
+                bonus_payout=int(outcome.get("sete_solitario_payout", 0) or 0),
+            )
+            total_normal_payout = int(running_normal_payout) + int(outcome.get("normal_payout", 0) or 0)
+            total_bonus_payout = int(running_bonus_payout) + int(outcome.get("bonus_payout", 0) or 0)
             sete_view = self._make_roleta2_effect_view(
                 title="7 solitário",
                 title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
                 color_theme=SLOT_SEVEN,
-                summary=str(outcome.get("sete_solitario_summary") or "As outras colunas vão girar até vir um resultado decente"),
+                summary=self._roleta2_live_effect_summary(
+                    str(
+                        outcome.get("sete_solitario_summary")
+                        or "As outras colunas vão girar até vir um resultado decente"
+                    ),
+                    live_effect_state,
+                ),
                 board=self._render_roleta2_board(final_grid),
-                balance_text=balance_text,
+                balance_text=self._format_roleta2_projected_balance(
+                    base_normal=base_normal_balance,
+                    base_bonus=base_bonus_balance,
+                    normal_payout=total_normal_payout,
+                    bonus_payout=total_bonus_payout,
+                    temporary_bonus=temporary_bonus,
+                ),
                 footer_text=footer_text,
-                normal_delta=normal_delta + int(outcome.get("normal_payout", 0) or 0),
-                bonus_delta=bonus_delta + int(outcome.get("bonus_payout", 0) or 0),
+                normal_delta=total_normal_payout - int(entry_normal),
+                bonus_delta=total_bonus_payout - int(entry_bonus),
             )
             rendered = await self._render_or_replace_game_message(
                 source_message,
@@ -2121,7 +2396,18 @@ class GincanaSlotsMixin:
             entry_normal = paid_entry
             entry_bonus = 0
 
-        balance_text = self._format_compact_chip_balance(guild.id, actor.id)
+        base_normal_balance, base_bonus_balance = self._current_game_chip_balances(
+            guild.id, actor.id
+        )
+        temporary_bonus = max(
+            0, int(self._coinflip_temp_bonus_available(guild.id, actor.id) or 0)
+        )
+        balance_text = self._format_roleta2_projected_balance(
+            base_normal=base_normal_balance,
+            base_bonus=base_bonus_balance,
+            temporary_bonus=temporary_bonus,
+        )
+        live_effect_state = self._new_roleta2_live_effect_state()
         running_normal_payout = 0
         running_bonus_payout = 0
         final_grid = [list(row) for row in outcomes[-1].get("grid", [])]
@@ -2135,6 +2421,10 @@ class GincanaSlotsMixin:
                 paid_entry=paid_entry,
                 entry_normal=entry_normal,
                 entry_bonus=entry_bonus,
+                base_normal_balance=base_normal_balance,
+                base_bonus_balance=base_bonus_balance,
+                temporary_bonus=temporary_bonus,
+                live_effect_state=live_effect_state,
                 spin_message=spin_message,
                 skip_event=skip_event,
             )
@@ -2154,10 +2444,15 @@ class GincanaSlotsMixin:
                         current_grid=final_grid,
                         outcome=next_outcome,
                         locked_column=locked_column,
-                        balance_text=balance_text,
                         footer_text=footer_text,
-                        normal_delta=running_normal_payout - entry_normal,
-                        bonus_delta=running_bonus_payout - entry_bonus,
+                        entry_normal=entry_normal,
+                        entry_bonus=entry_bonus,
+                        base_normal_balance=base_normal_balance,
+                        base_bonus_balance=base_bonus_balance,
+                        temporary_bonus=temporary_bonus,
+                        running_normal_payout=running_normal_payout,
+                        running_bonus_payout=running_bonus_payout,
+                        live_effect_state=live_effect_state,
                         spin_message=spin_message,
                         skip_event=skip_event,
                     )
@@ -2170,10 +2465,15 @@ class GincanaSlotsMixin:
                         source_message,
                         current_grid=final_grid,
                         outcome=next_outcome,
-                        balance_text=balance_text,
                         footer_text=footer_text,
-                        normal_delta=running_normal_payout - entry_normal,
-                        bonus_delta=running_bonus_payout - entry_bonus,
+                        entry_normal=entry_normal,
+                        entry_bonus=entry_bonus,
+                        base_normal_balance=base_normal_balance,
+                        base_bonus_balance=base_bonus_balance,
+                        temporary_bonus=temporary_bonus,
+                        running_normal_payout=running_normal_payout,
+                        running_bonus_payout=running_bonus_payout,
+                        live_effect_state=live_effect_state,
                         respin_index=deja_respin_index,
                         spin_message=spin_message,
                         skip_event=skip_event,

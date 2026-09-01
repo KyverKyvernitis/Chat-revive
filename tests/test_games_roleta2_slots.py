@@ -330,7 +330,10 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
                 "Não veio nada",
             },
         )
-        self.assertEqual(self.namespace["ROLETA2_LOSS_SUMMARIES"]["7 solitário"], "Veio apenas um 7")
+        self.assertEqual(
+            self.namespace["ROLETA2_LOSS_SUMMARIES"]["7 solitário"],
+            "As outras colunas vão girar até vir um resultado decente",
+        )
         self.assertEqual(
             self.namespace["ROLETA2_LOSS_SUMMARIES"]["Você ganhou... nada!"],
             "Uau parece que não veio nada, incrível",
@@ -740,6 +743,32 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         )
 
 
+    def test_sete_solitario_bonus_scales_seven_five_three_one_and_stays_one(self) -> None:
+        payout = self.namespace["_slots_sete_solitario_payout"]
+        self.assertEqual([payout(index) for index in range(1, 8)], [7, 5, 3, 1, 1, 1, 1])
+        self.assertEqual(self.namespace["ROLETA2_SETE_SOLITARIO_PAYOUTS"], (7, 5, 3, 1))
+
+        roll_source = ast.get_source_segment(
+            self.source,
+            next(
+                node
+                for node in ast.walk(self.tree)
+                if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
+            ),
+        )
+        self.assertIsNotNone(roll_source)
+        self.assertIn("bonus_payout += int(sete_solitario_payout)", str(roll_source))
+        self.assertIn('"sete_solitario_payout": int(sete_solitario_payout)', str(roll_source))
+
+    def test_sete_solitario_result_tracks_chain_index_and_compact_bonus_line(self) -> None:
+        execution = self._async_function_source("_execute_roleta2_round")
+        self.assertIn("sete_solitario_count = 0", execution)
+        self.assertIn("sete_solitario_index=sete_solitario_count + 1", execution)
+        self.assertIn("sete_solitario_count += 1", execution)
+        self.assertIn('int(item.get("sete_solitario_payout", 0) or 0)', execution)
+        self.assertIn("7 solitário ×{sete_solitario_count}", execution)
+        self.assertIn("+{sete_solitario_total} {self._CHIP_BONUS_EMOJI}", execution)
+
     def test_sete_solitario_respin_locks_the_whole_seven_column(self) -> None:
         is_solo = self.namespace["_slots_is_sete_solitario"]
         column = self.namespace["_slots_sete_solitario_column"]
@@ -806,6 +835,8 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn('reroll_columns = tuple(column for column in range(3) if column != locked)', sete_animation)
         self.assertIn('stopped: set[int] = {locked}', sete_animation)
         self.assertIn('title="7 solitário..."', sete_animation)
+        self.assertIn("As outras colunas vão girar até vir um resultado decente", initial_animation)
+        self.assertIn("As outras colunas vão girar até vir um resultado decente", sete_animation)
 
     def test_roleta2_statistics_are_separate_but_visible_in_profile_totals(self) -> None:
         base = BASE_PATH.read_text(encoding="utf-8")

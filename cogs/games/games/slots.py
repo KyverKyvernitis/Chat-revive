@@ -19,6 +19,7 @@ ROLETA2_PROBABILITY_SCALE = 10_000
 ROLETA2_DEJA_VU_CHAIN_LIMIT = 20
 ROLETA2_EFFECT_CHAIN_LIMIT = 60
 ROLETA2_DEJA_VU_BASE_PAYOUT = 10
+ROLETA2_SETE_SOLITARIO_PAYOUTS = (7, 5, 3, 1)
 ROLETA2_DEJA_VU_TO_ESCORREDIO_CHANCE = 0.25
 ROLETA2_ESCORREDIO_TO_DEJA_VU_CHANCE = 0.35
 ROLETA2_RESPIN_START_DELAYS = (0.66, 0.67, 0.67)
@@ -117,7 +118,7 @@ ROLETA2_LOSS_SUMMARIES = {
     "Nenhuma combinação": "Os símbolos pararam sem formar uma combinação",
     "Você ganhou... nada!": "Uau parece que não veio nada, incrível",
     "Foi quase hein": "Dois símbolos combinaram",
-    "7 solitário": "Veio apenas um 7",
+    "7 solitário": "As outras colunas vão girar até vir um resultado decente",
 }
 
 ROLETA2_PAYOUTS = {
@@ -684,6 +685,13 @@ def _slots_deja_vu_payout(chain_index: int) -> int:
     return ROLETA2_DEJA_VU_BASE_PAYOUT * max(1, int(chain_index or 1))
 
 
+def _slots_sete_solitario_payout(chain_index: int) -> int:
+    index = max(1, int(chain_index or 1))
+    if index <= len(ROLETA2_SETE_SOLITARIO_PAYOUTS):
+        return int(ROLETA2_SETE_SOLITARIO_PAYOUTS[index - 1])
+    return int(ROLETA2_SETE_SOLITARIO_PAYOUTS[-1])
+
+
 def _slots_effect_triggers_followup(
     source_kind: str,
     rng: random.Random,
@@ -818,6 +826,7 @@ class GincanaSlotsMixin:
         self,
         *,
         deja_vu_index: int = 1,
+        sete_solitario_index: int = 1,
         allow_deja_vu: bool = True,
         forced_kind: str | None = None,
         excluded_kinds: tuple[str, ...] = (),
@@ -1009,6 +1018,13 @@ class GincanaSlotsMixin:
         sete_solitario_column = (
             _slots_sete_solitario_column(grid) if has_sete_solitario else None
         )
+        sete_solitario_payout = (
+            _slots_sete_solitario_payout(sete_solitario_index)
+            if has_sete_solitario
+            else 0
+        )
+        if sete_solitario_payout > 0:
+            bonus_payout += int(sete_solitario_payout)
         escorredio_normal_payout = sum(
             int(component["normal_payout"])
             for component in components
@@ -1028,7 +1044,15 @@ class GincanaSlotsMixin:
             "has_escorredio": has_escorredio,
             "has_sete_solitario": has_sete_solitario,
             "sete_solitario_column": sete_solitario_column,
-            "sete_solitario_summary": ("Veio apenas um 7" if has_sete_solitario else ""),
+            "sete_solitario_index": (
+                int(sete_solitario_index) if has_sete_solitario else 0
+            ),
+            "sete_solitario_payout": int(sete_solitario_payout),
+            "sete_solitario_summary": (
+                "As outras colunas vão girar até vir um resultado decente"
+                if has_sete_solitario
+                else ""
+            ),
             "deja_vu_index": int(deja_vu_index) if has_deja_vu else 0,
             "deja_vu_payout": (
                 _slots_deja_vu_payout(deja_vu_index) if has_deja_vu else 0
@@ -1574,7 +1598,7 @@ class GincanaSlotsMixin:
                 title="7 solitário",
                 title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
                 color_theme=SLOT_SEVEN,
-                summary=str(outcome.get("sete_solitario_summary") or "Veio apenas um 7"),
+                summary=str(outcome.get("sete_solitario_summary") or "As outras colunas vão girar até vir um resultado decente"),
                 board=self._render_roleta2_board(final_grid),
                 balance_text=balance_text,
                 footer_text=footer_text,
@@ -1759,7 +1783,7 @@ class GincanaSlotsMixin:
                 title="7 solitário",
                 title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
                 color_theme=SLOT_SEVEN,
-                summary=str(outcome.get("sete_solitario_summary") or "Veio apenas um 7"),
+                summary=str(outcome.get("sete_solitario_summary") or "As outras colunas vão girar até vir um resultado decente"),
                 board=self._render_roleta2_board(final_grid),
                 balance_text=balance_text,
                 footer_text=footer_text,
@@ -1810,7 +1834,7 @@ class GincanaSlotsMixin:
             title="7 solitário...",
             title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
             color_theme=SLOT_SEVEN,
-            summary="Veio apenas um 7",
+            summary="As outras colunas vão girar até vir um resultado decente",
             board=self._render_roleta2_board(frame),
             balance_text=balance_text,
             footer_text=footer_text,
@@ -1839,7 +1863,7 @@ class GincanaSlotsMixin:
                 title="7 solitário...",
                 title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
                 color_theme=SLOT_SEVEN,
-                summary="Veio apenas um 7",
+                summary="As outras colunas vão girar até vir um resultado decente",
                 board=self._render_roleta2_board(frame),
                 balance_text=balance_text,
                 footer_text=footer_text,
@@ -1944,7 +1968,7 @@ class GincanaSlotsMixin:
                 title="7 solitário",
                 title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
                 color_theme=SLOT_SEVEN,
-                summary=str(outcome.get("sete_solitario_summary") or "Veio apenas um 7"),
+                summary=str(outcome.get("sete_solitario_summary") or "As outras colunas vão girar até vir um resultado decente"),
                 board=self._render_roleta2_board(final_grid),
                 balance_text=balance_text,
                 footer_text=footer_text,
@@ -1981,6 +2005,7 @@ class GincanaSlotsMixin:
     ) -> bool:
         outcomes: list[dict[str, object]] = []
         deja_vu_count = 0
+        sete_solitario_count = 0
         forced_kind: str | None = None
         excluded_kinds: tuple[str, ...] = ()
         followup_mode: str | None = None
@@ -2010,6 +2035,7 @@ class GincanaSlotsMixin:
 
             outcome = self._roll_roleta2_outcome(
                 deja_vu_index=deja_vu_count + 1,
+                sete_solitario_index=sete_solitario_count + 1,
                 allow_deja_vu=allow_deja_vu,
                 forced_kind=forced_kind,
                 excluded_kinds=excluded_kinds,
@@ -2024,6 +2050,8 @@ class GincanaSlotsMixin:
 
             has_deja_vu = bool(outcome.get("has_deja_vu"))
             has_sete_solitario = bool(outcome.get("has_sete_solitario"))
+            if has_sete_solitario:
+                sete_solitario_count += 1
             if not has_deja_vu and not has_sete_solitario:
                 break
             if effect_steps >= ROLETA2_EFFECT_CHAIN_LIMIT:
@@ -2046,6 +2074,7 @@ class GincanaSlotsMixin:
                             continue
                         terminal_outcome = self._roll_roleta2_outcome(
                             deja_vu_index=deja_vu_count + 1,
+                            sete_solitario_index=sete_solitario_count + 1,
                             allow_deja_vu=False,
                             grid_override=terminal_grid,
                         )
@@ -2056,6 +2085,7 @@ class GincanaSlotsMixin:
                     for _ in range(64):
                         candidate_terminal = self._roll_roleta2_outcome(
                             deja_vu_index=deja_vu_count + 1,
+                            sete_solitario_index=sete_solitario_count + 1,
                             allow_deja_vu=False,
                             forced_kind="loss",
                             excluded_kinds=("deja_vu", "escorredio"),
@@ -2192,9 +2222,17 @@ class GincanaSlotsMixin:
             summary_lines: list[str] = [str(display_outcome.get("summary") or "").strip()]
             summary_lines.extend(self._roleta2_historical_modifier_lines(outcomes))
             deja_vu_total = sum(int(item.get("deja_vu_payout", 0) or 0) for item in outcomes)
+            sete_solitario_total = sum(
+                int(item.get("sete_solitario_payout", 0) or 0) for item in outcomes
+            )
             if deja_vu_count > 0:
                 summary_lines.append(
                     f"-# 🔁 Déjà vu ×{deja_vu_count} · +{deja_vu_total} {self._CHIP_BONUS_EMOJI}"
+                )
+            if sete_solitario_count > 0:
+                summary_lines.append(
+                    f"-# {SLOT_EMOJIS[SLOT_SEVEN]} 7 solitário ×{sete_solitario_count} · "
+                    f"+{sete_solitario_total} {self._CHIP_BONUS_EMOJI}"
                 )
 
             await self.db.add_user_game_stat(guild.id, actor.id, "roleta2_spins", 1)

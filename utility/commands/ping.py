@@ -39,9 +39,9 @@ if psutil is not None:
 
 _SEVERITY_STYLES: dict[int, tuple[str, str, discord.Color]] = {
     0: ("🟢", "Tudo normal por aqui", discord.Color.green()),
-    1: ("🟡", "Pequena oscilação", discord.Color.gold()),
-    2: ("🟠", "Desempenho degradado", discord.Color.orange()),
-    3: ("🔴", "Instabilidade detectada", discord.Color.red()),
+    1: ("🟡", "Meio Instável", discord.Color.gold()),
+    2: ("🟠", "Instável", discord.Color.orange()),
+    3: ("🔴", "Instável", discord.Color.red()),
 }
 
 _WEBSOCKET_THRESHOLDS = (180.0, 350.0, 700.0)
@@ -141,6 +141,35 @@ def _overall_severity(snapshot: PingSnapshot) -> int:
     return max(severities, default=0)
 
 
+def _status_detail(snapshot: PingSnapshot, severity: int) -> str | None:
+    if severity <= 0:
+        return None
+    if snapshot.database_ok is False:
+        return "DB off"
+    if snapshot.bot_healthy is False:
+        return "Falha interna detectada"
+
+    metric_levels = [
+        (
+            _latency_severity(snapshot.response_ms, _RESPONSE_THRESHOLDS),
+            "Tempo de resposta",
+        ),
+        (
+            _latency_severity(snapshot.websocket_ms, _WEBSOCKET_THRESHOLDS),
+            "Ping",
+        ),
+        (
+            _latency_severity(snapshot.event_loop_ms, _EVENT_LOOP_THRESHOLDS),
+            "EventLoop",
+        ),
+    ]
+    metric_severity, metric_name = max(metric_levels, key=lambda item: item[0])
+    if metric_severity <= 0:
+        return "Oscilação detectada"
+    intensity = "um pouco alto" if metric_severity == 1 else "alto"
+    return f"{metric_name} {intensity}"
+
+
 class PingLoadingView(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
@@ -159,6 +188,9 @@ class PingPanelView(discord.ui.LayoutView):
         severity = _overall_severity(snapshot)
         status_icon, status_text, accent = _SEVERITY_STYLES[severity]
         header_text = f"## 🏓 Pong!\n{status_icon} **{status_text}**"
+        status_detail = _status_detail(snapshot, severity)
+        if status_detail:
+            header_text += f"\n-# {status_detail}"
         header: discord.ui.Item[Any] = discord.ui.TextDisplay(header_text)
         if thumbnail_url:
             header = discord.ui.Section(

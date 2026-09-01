@@ -29,6 +29,7 @@ class PingCommandTests(unittest.TestCase):
             "_latency_severity",
             "_database_display",
             "_overall_severity",
+            "_status_detail",
         }
         threshold_names = {
             "_WEBSOCKET_THRESHOLDS",
@@ -72,6 +73,7 @@ class PingCommandTests(unittest.TestCase):
     def test_response_status_ignores_normal_discord_api_variation(self) -> None:
         latency_severity = self.helpers["_latency_severity"]
         overall_severity = self.helpers["_overall_severity"]
+        status_detail = self.helpers["_status_detail"]
         response_thresholds = self.helpers["_RESPONSE_THRESHOLDS"]
         self.assertEqual(latency_severity(444.0, response_thresholds), 0)
         self.assertEqual(latency_severity(699.9, response_thresholds), 0)
@@ -86,8 +88,51 @@ class PingCommandTests(unittest.TestCase):
             bot_healthy=True,
         )
         self.assertEqual(overall_severity(normal), 0)
+        self.assertIsNone(status_detail(normal, 0))
         normal.database_ok = False
         self.assertEqual(overall_severity(normal), 3)
+
+    def test_status_copy_identifies_the_metric_causing_lag(self) -> None:
+        overall_severity = self.helpers["_overall_severity"]
+        status_detail = self.helpers["_status_detail"]
+
+        yellow_response = SimpleNamespace(
+            websocket_ms=120.0,
+            response_ms=843.0,
+            event_loop_ms=1.0,
+            database_ok=True,
+            bot_healthy=True,
+        )
+        yellow_severity = overall_severity(yellow_response)
+        self.assertEqual(yellow_severity, 1)
+        self.assertEqual(
+            status_detail(yellow_response, yellow_severity),
+            "Tempo de resposta um pouco alto",
+        )
+
+        red_response = SimpleNamespace(
+            websocket_ms=120.0,
+            response_ms=2_896.0,
+            event_loop_ms=1.0,
+            database_ok=True,
+            bot_healthy=True,
+        )
+        red_severity = overall_severity(red_response)
+        self.assertEqual(red_severity, 3)
+        self.assertEqual(
+            status_detail(red_response, red_severity),
+            "Tempo de resposta alto",
+        )
+
+        high_ping = SimpleNamespace(
+            websocket_ms=400.0,
+            response_ms=250.0,
+            event_loop_ms=1.0,
+            database_ok=True,
+            bot_healthy=True,
+        )
+        ping_severity = overall_severity(high_ping)
+        self.assertEqual(status_detail(high_ping, ping_severity), "Ping alto")
 
     def test_slash_and_dynamic_prefix_entries_share_the_panel(self) -> None:
         self.assertIn('@app_commands.command(name="ping"', self.source)
@@ -128,6 +173,10 @@ class PingCommandTests(unittest.TestCase):
         self.assertIn('"**Conexão**"', self.source)
         self.assertIn('"**Sistema & TTS**"', self.source)
         self.assertIn('"Tudo normal por aqui"', self.source)
+        self.assertIn('"Meio Instável"', self.source)
+        self.assertIn('"Instável"', self.source)
+        self.assertNotIn("Pequena oscilação", self.source)
+        self.assertNotIn("Instabilidade detectada", self.source)
         self.assertIn('f"📡 **Ping**', self.source)
         self.assertIn('f"🔄 **EventLoop**', self.source)
         self.assertIn('f"🗄️ **DB**', self.source)

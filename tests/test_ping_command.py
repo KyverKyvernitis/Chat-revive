@@ -27,6 +27,7 @@ class PingCommandTests(unittest.TestCase):
             "_safe_float",
             "_format_duration",
             "_latency_severity",
+            "_database_display",
             "_overall_severity",
         }
         threshold_names = {
@@ -110,6 +111,9 @@ class PingCommandTests(unittest.TestCase):
         self.assertIn("safe_send_interaction_message", self.source)
 
     def test_database_uses_monitored_health_instead_of_object_presence(self) -> None:
+        database_display = self.helpers["_database_display"]
+        self.assertEqual(database_display(True), ("", "on", 0))
+        self.assertEqual(database_display(False), (" 🔴", "off", 3))
         self.assertIn('"mongo_ok" in health', self.source)
         self.assertIn('getattr(self.bot, "health_state", {})', self.source)
         self.assertNotIn("client.admin.command", self.source)
@@ -120,12 +124,19 @@ class PingCommandTests(unittest.TestCase):
         self.assertNotIn("cpu_percent(interval=1", self.source)
         self.assertNotIn("await asyncio.sleep", self.source)
 
-    def test_panel_is_compact_and_includes_tts_activity(self) -> None:
+    def test_panel_uses_requested_compact_labels_and_voice_summary(self) -> None:
         self.assertIn('"**Conexão**"', self.source)
         self.assertIn('"**Sistema & TTS**"', self.source)
+        self.assertIn('"Tudo normal por aqui"', self.source)
+        self.assertIn('f"📡 **Ping**', self.source)
+        self.assertIn('f"🔄 **EventLoop**', self.source)
+        self.assertIn('f"🗄️ **DB**', self.source)
         self.assertIn("voice_connections", self.source)
-        self.assertIn("tts_queue_size", self.source)
-        self.assertIn('get_cog("TTSVoice")', self.source)
+        self.assertIn('f"🌐 **Servidores:**', self.source)
+        self.assertIn("usando o bot em call", self.source)
+        self.assertNotIn("tts_queue_size", self.source)
+        self.assertNotIn("Fila TTS", self.source)
+        self.assertNotIn('get_cog("TTSVoice")', self.source)
         self.assertNotIn('"## Conexão"', self.source)
         self.assertNotIn('"## Processo"', self.source)
         self.assertNotIn("WebSocket mede a conexão", self.source)

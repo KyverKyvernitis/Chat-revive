@@ -38,7 +38,7 @@ if psutil is not None:
 
 
 _SEVERITY_STYLES: dict[int, tuple[str, str, discord.Color]] = {
-    0: ("🟢", "Operando normalmente", discord.Color.green()),
+    0: ("🟢", "Tudo normal por aqui", discord.Color.green()),
     1: ("🟡", "Pequena oscilação", discord.Color.gold()),
     2: ("🟠", "Desempenho degradado", discord.Color.orange()),
     3: ("🔴", "Instabilidade detectada", discord.Color.red()),
@@ -61,7 +61,6 @@ class PingSnapshot:
     guild_count: int
     shard_text: str | None
     voice_connections: int
-    tts_queue_size: int
     bot_healthy: bool | None
 
 
@@ -118,10 +117,10 @@ def _warning_marker(severity: int) -> str:
 
 def _database_display(database_ok: bool | None) -> tuple[str, str, int]:
     if database_ok is True:
-        return "", "Online", 0
+        return "", "on", 0
     if database_ok is False:
-        return " 🔴", "Indisponível", 3
-    return " ⚪", "Sem leitura", 0
+        return " 🔴", "off", 3
+    return " ⚪", "n/a", 0
 
 
 def _overall_severity(snapshot: PingSnapshot) -> int:
@@ -186,15 +185,15 @@ class PingPanelView(discord.ui.LayoutView):
         connection_lines = [
             "**Conexão**",
             (
-                f"📡 **Discord** `{_format_ms(snapshot.websocket_ms)}`"
+                f"📡 **Ping** `{_format_ms(snapshot.websocket_ms)}`"
                 f"{_warning_marker(websocket_severity)} · "
                 f"⚡ **Resposta** `{_format_ms(snapshot.response_ms)}`"
                 f"{_warning_marker(response_severity)}"
             ),
             (
-                f"🔄 **Loop** `{_format_ms(snapshot.event_loop_ms)}`"
+                f"🔄 **EventLoop** `{_format_ms(snapshot.event_loop_ms)}`"
                 f"{_warning_marker(loop_severity)} · "
-                f"🗄️ **Banco** `{database_text}`{database_marker}"
+                f"🗄️ **DB** `{database_text}`{database_marker}"
             ),
         ]
 
@@ -211,14 +210,14 @@ class PingPanelView(discord.ui.LayoutView):
         system_lines = [
             "**Sistema & TTS**",
             f"⏱️ **Ativo** `{snapshot.uptime_text}` · 🧠 **RAM** `{memory_text}`",
-            f"🖥️ **CPU** `{cpu_text}` · 🌐 **Servidores** `{snapshot.guild_count}`",
+            f"🖥️ **CPU** `{cpu_text}`",
             (
-                f"🔊 **Voz** `{snapshot.voice_connections}` · "
-                f"📥 **Fila TTS** `{snapshot.tts_queue_size}`"
+                f"🌐 **Servidores:** `{snapshot.guild_count}` • "
+                f"`{snapshot.voice_connections}` usando o bot em call"
             ),
         ]
         if snapshot.shard_text is not None:
-            system_lines[2] += f" · 🧩 **Shard** `{snapshot.shard_text}`"
+            system_lines[3] += f" • 🧩 **Shard** `{snapshot.shard_text}`"
 
         self.add_item(
             discord.ui.Container(
@@ -306,20 +305,6 @@ class PingCommandMixin:
             except Exception:
                 continue
 
-        tts_queue_size = 0
-        get_cog = getattr(self.bot, "get_cog", None)
-        tts_cog = get_cog("TTSVoice") if callable(get_cog) else None
-        guild_states = getattr(tts_cog, "guild_states", {})
-        if isinstance(guild_states, dict):
-            for state in guild_states.values():
-                qsize = getattr(getattr(state, "queue", None), "qsize", None)
-                if not callable(qsize):
-                    continue
-                try:
-                    tts_queue_size += max(0, int(qsize()))
-                except Exception:
-                    continue
-
         bot_healthy: bool | None = None
         ready_check = getattr(self.bot, "is_ready", None)
         closed_check = getattr(self.bot, "is_closed", None)
@@ -356,7 +341,6 @@ class PingCommandMixin:
             guild_count=guild_count,
             shard_text=shard_text,
             voice_connections=voice_connections,
-            tts_queue_size=tts_queue_size,
             bot_healthy=bot_healthy,
         )
 

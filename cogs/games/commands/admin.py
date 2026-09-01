@@ -318,7 +318,7 @@ class _EconomyPanelView(discord.ui.LayoutView):
         )
         adjust_button.callback = self._adjust_user
         race_button = discord.ui.Button(
-            label="Gerenciar raça",
+            label="Gerenciar habilidades",
             emoji="🧬",
             style=discord.ButtonStyle.secondary,
         )
@@ -355,7 +355,7 @@ class _EconomyPanelView(discord.ui.LayoutView):
             )
 
         config_items: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("# ⚙️ Economia\nGerencie jogos, fichas e raças neste servidor"),
+            discord.ui.TextDisplay("# ⚙️ Economia\nGerencie jogos, fichas e habilidades neste servidor"),
         ]
         if notice:
             config_items.append(discord.ui.TextDisplay(f"{cog._EFFECT_EMOJI} {notice}"))
@@ -389,7 +389,7 @@ class _EconomyPanelView(discord.ui.LayoutView):
         self.add_item(
             discord.ui.Container(
                 discord.ui.TextDisplay(
-                    "## Fichas e raças\nAjuste saldos, raças e resets de usuários"
+                    "## Fichas e habilidades\nAjuste saldos, habilidades e resets de usuários"
                 ),
                 discord.ui.ActionRow(adjust_button, race_button),
                 discord.ui.ActionRow(reset_user_button, reset_server_button),

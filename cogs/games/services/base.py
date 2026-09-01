@@ -25,6 +25,9 @@ from ..constants import (
     RACE_SPECIAL_DEFAULT_CHANCE,
     RACE_SPECIAL_SORTUDO_CHANCE,
     ROLETA_APOSTADOR_COST,
+    ROLETA_APOSTADOR_STANDARD_JACKPOT_CHANCE,
+    ROLETA_APOSTADOR_MEGA_JACKPOT_CHANCE,
+    ROLETA_APOSTADOR_BEAST_CHANCE,
     ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS,
     ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS,
     ROLETA_COST,
@@ -2237,7 +2240,6 @@ class GincanaBase:
                         ),
                     },
                     {"key": "mao_negra", "emoji": "💲", "title": "Pilantra", "desc": "Você pode roubar **2 vezes** a cada **4h**"},
-                    {"key": "labia", "emoji": "🗣️", "title": "Lábia", "desc": "Você pode pedir esmola **2 vezes** a cada **3h**"},
                     {"key": "sangue_frio", "emoji": "🧊", "title": "Sangue Frio", "desc": f"Quando um roubo dá errado, você perde apenas **5** {self._CHIP_LOSS_EMOJI}"},
                     {"key": "mao_grande", "emoji": "💰", "title": "Cariocagem", "desc": f"Quando o roubo dá certo, você pode levar até **40** {self._CHIP_EMOJI}"},
                 ],
@@ -2256,9 +2258,9 @@ class GincanaBase:
                             "-# 1 uso por dia"
                         ),
                     },
-                    {"key": "jackpot", "emoji": "🎰", "title": "Jackpot 999", "desc": f"Na Roleta, você tem **{self._format_percent_text(0.15)} de chance** de acertar **999** e ganhar **100** {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "all_in", "emoji": "🎲", "title": "All-in 777", "desc": f"Há **{self._format_percent_text(0.05)} de chance** de acertar **777** e ganhar **200** {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "666", "emoji": "😈", "title": "Marca da Besta", "desc": f"Sem jackpot, há **{self._format_percent_text(0.25)} de chance** de **666** devolver toda a entrada"},
+                    {"key": "jackpot", "emoji": "🎰", "title": "Jackpot 999", "desc": f"Na Roleta, você tem **{self._format_percent_text(ROLETA_APOSTADOR_STANDARD_JACKPOT_CHANCE)} de chance** de acertar **999** e ganhar **100** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "all_in", "emoji": "🎲", "title": "All-in 777", "desc": f"Há **{self._format_percent_text(ROLETA_APOSTADOR_MEGA_JACKPOT_CHANCE)} de chance** de acertar **777** e ganhar **200** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "666", "emoji": "😈", "title": "Marca da Besta", "desc": f"Sem jackpot, há **{self._format_percent_text(ROLETA_APOSTADOR_BEAST_CHANCE)} de chance** de **666** devolver toda a entrada"},
                     {"key": "mesa_alta", "emoji": "💸", "title": "Mesa Alta", "desc": f"Você joga mais alto: cada giro da Roleta custa **25** {self._CHIP_LOSS_EMOJI}"},
                 ],
             },
@@ -2413,7 +2415,6 @@ class GincanaBase:
         if not title:
             return ""
         detail_map = {
-            "labia": "2º pedido de esmola do período",
             "bencao": "uma carga pagou esta jogada",
             "mao_negra": "2º roubo do período",
             "mao_grande": "roubo acima do limite comum",
@@ -3978,8 +3979,6 @@ class GincanaBase:
                 return 2, float(4 * 60 * 60)
             return 1, float(6 * 60 * 60)
         if action == "mendigar":
-            if self._race_is(guild_id, user_id, "preto"):
-                return 2, float(CHIPS_MENDIGAR_COOLDOWN_SECONDS)
             return 1, float(CHIPS_MENDIGAR_COOLDOWN_SECONDS)
         return 1, 0.0
 

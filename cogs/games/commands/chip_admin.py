@@ -139,12 +139,12 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
             custom_id="games_chip_admin_reset_user_confirm",
             default=False,
         )
-        self.add_item(_modal_label("Usuário", self.target_select, "Fichas, bônus, raça e conquistas serão reiniciados"))
+        self.add_item(_modal_label("Usuário", self.target_select, "Fichas, bônus, habilidades e conquistas serão reiniciados"))
         self.add_item(
             _modal_label(
                 "Confirmar reset",
                 self.confirm_checkbox,
-                "Restaura fichas, bônus, raça e conquistas do usuário",
+                "Restaura fichas, bônus, habilidades e conquistas do usuário",
             )
         )
 
@@ -187,7 +187,7 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
         )
 
 
-class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
+class _AdminRaceModal(discord.ui.Modal, title="Gerenciar habilidades"):
     def __init__(self, cog: "GincanaChipAdminMixin", opener_id: int):
         super().__init__(timeout=300)
         self.cog = cog
@@ -203,7 +203,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
         )
         self.race_select = string_select_cls(
             custom_id="games_chip_admin_race_key",
-            placeholder="Selecione uma raça",
+            placeholder="Selecione um conjunto",
             min_values=1,
             max_values=1,
             required=True,
@@ -218,8 +218,8 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
                 description=f"{effects} habilidade{'s' if effects != 1 else ''}",
             )
 
-        self.add_item(_modal_label("Usuário", self.target_select, "Selecione quem receberá a raça"))
-        self.add_item(_modal_label("Raça", self.race_select, "A alteração não consome fichas"))
+        self.add_item(_modal_label("Usuário", self.target_select, "Selecione quem receberá as habilidades"))
+        self.add_item(_modal_label("Habilidades", self.race_select, "A alteração não consome fichas"))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._chip_admin_validate_interaction(
@@ -249,7 +249,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
         catalog = self.cog._race_catalog()
         if selected_race not in catalog:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Raça inválida", ["Selecione uma raça disponível"], ok=False),
+                view=self.cog._make_v2_notice("Habilidades inválidas", ["Selecione um conjunto disponível"], ok=False),
                 ephemeral=True,
             )
             return
@@ -273,7 +273,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
                 selected_race,
             )
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Falha ao alterar", ["A raça não foi alterada"], ok=False),
+                view=self.cog._make_v2_notice("Falha ao alterar", ["As habilidades não foram alteradas"], ok=False),
                 ephemeral=True,
             )
             return
@@ -290,7 +290,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
         )
         await interaction.response.send_message(
             view=self.cog._make_v2_notice(
-                "Raça atualizada",
+                "Habilidades atualizadas",
                 [f"{member_name} agora é {new_label}"],
                 ok=True,
             ),
@@ -312,7 +312,7 @@ class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
             _modal_label(
                 "Confirmar reset do servidor",
                 self.confirm_checkbox,
-                "Apaga fichas, raças, conquistas e progresso de todos os perfis ativos",
+                "Apaga fichas, habilidades, conquistas e progresso de todos os perfis ativos",
             )
         )
 
@@ -414,7 +414,7 @@ class GincanaChipAdminMixin:
     def _chip_admin_race_label(self, race_key: str, *, active: bool) -> str:
         info = self._get_race_info_by_key(race_key) if race_key else None
         if not info:
-            return "Sem raça"
+            return "Sem habilidades"
         emoji = str(info.get("emoji") or "").strip()
         name = str(info.get("name") or race_key).strip()
         label = f"{emoji} {name}".strip()

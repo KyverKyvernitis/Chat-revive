@@ -26,7 +26,7 @@ from .constants import (
 _CALL_COMMAND_NAME = str(TRIGGER_WORD or "pinto").strip().casefold()
 if not re.fullmatch(r"[a-z0-9_-]{1,32}", _CALL_COMMAND_NAME) or _CALL_COMMAND_NAME in {
     "ficha", "fichas", "perfil", "saldo", "daily", "recarga", "economia", "rank", "poker", "truco", "roubar",
-    "pay", "race", "roleta", "roleta2", "carta", "corrida", "alvo", "buckshot", "mendigar",
+    "pay", "race", "habilidades", "roleta", "roleta2", "carta", "corrida", "alvo", "buckshot", "mendigar",
     "focus", "pica", "rola", "dj", "coinflip", "0to1", "reborn", "changefate",
     "forcerob", "joker",
 }:
@@ -103,9 +103,6 @@ class _MendigarRequestView(discord.ui.LayoutView):
             lines.append(f"**Convocado para ajudar:** {self.target_mention}")
         else:
             lines.append("Qualquer alma bondosa com fichas normais suficientes pode ajudar no botão abaixo")
-        marker = self.cog._race_effect_message(self.guild_id, self.author_id, "labia")
-        if marker:
-            lines.append(marker)
         lines.append(f"A esmola expira em **{int(CHIPS_MENDIGAR_TIMEOUT_SECONDS // 60)} minutos**")
         return lines
 
@@ -395,9 +392,9 @@ class _RacePanelView(discord.ui.LayoutView):
         race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
         info = self.cog._get_race_info_by_key(race_key) or {}
         emoji = str(info.get("emoji") or "🍀")
-        race_name = str(info.get("name") or "Sem raça")
+        race_name = str(info.get("name") or "Sem habilidades")
 
-        show_races = discord.ui.Button(label="Ver raças", style=discord.ButtonStyle.secondary)
+        show_races = discord.ui.Button(label="Ver habilidades", style=discord.ButtonStyle.secondary)
         show_races.callback = self._show_races
         reroll = discord.ui.Button(
             label="Reroll",
@@ -407,10 +404,10 @@ class _RacePanelView(discord.ui.LayoutView):
         reroll.callback = self._reroll
         row_children = [reroll]
         if self.cog._is_user_race_active(self.guild_id, self.user_id):
-            toggle = discord.ui.Button(label="Desativar raça", style=discord.ButtonStyle.secondary)
+            toggle = discord.ui.Button(label="Desativar habilidades", style=discord.ButtonStyle.secondary)
             toggle.callback = self._toggle_race
         else:
-            toggle = discord.ui.Button(label="Ativar raça", style=discord.ButtonStyle.success)
+            toggle = discord.ui.Button(label="Ativar habilidades", style=discord.ButtonStyle.success)
             toggle.callback = self._toggle_race
         row_children.append(toggle)
         row = discord.ui.ActionRow(*row_children)
@@ -428,7 +425,7 @@ class _RacePanelView(discord.ui.LayoutView):
 
     async def _ensure_owner(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None or int(interaction.guild.id) != self.guild_id or int(interaction.user.id) != self.user_id:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", ["Esse painel pertence a outra pessoa"], ok=False), ephemeral=True)
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Habilidades", ["Esse painel pertence a outra pessoa"], ok=False), ephemeral=True)
             return False
         return True
 
@@ -446,7 +443,7 @@ class _RacePanelView(discord.ui.LayoutView):
         reroll_key = (self.guild_id, self.user_id)
         if reroll_key in self.cog._race_rerolls_in_progress:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("🍀 Reroll em andamento", ["Aguarde a nova raça ser definida"], ok=False),
+                view=self.cog._make_v2_notice("🍀 Reroll em andamento", ["Aguarde as novas habilidades serem definidas"], ok=False),
                 ephemeral=True,
             )
             return
@@ -618,7 +615,7 @@ class _RacePanelView(discord.ui.LayoutView):
             await interaction.response.edit_message(
                 view=self.cog._make_v2_notice(
                     "🍀 Reroll em andamento",
-                    ["Aguarde a nova raça ser definida"],
+                    ["Aguarde as novas habilidades serem definidas"],
                     ok=False,
                 )
             )
@@ -634,7 +631,7 @@ class _RacePanelView(discord.ui.LayoutView):
             await interaction.response.edit_message(
                 view=self.cog._make_v2_notice(
                     "🎲 Confirmando reroll",
-                    ["Conferindo saldo e sorteando sua nova raça"],
+                    ["Conferindo saldo e sorteando novas habilidades"],
                     ok=True,
                     accent_color=discord.Color.orange(),
                 )
@@ -649,7 +646,7 @@ class _RacePanelView(discord.ui.LayoutView):
                 if target_message is not None:
                     try:
                         await target_message.edit(
-                            view=self.cog._make_race_spinner_view("Sorteando sua nova raça")
+                            view=self.cog._make_race_spinner_view("Sorteando novas habilidades")
                         )
                     except Exception:
                         pass
@@ -671,7 +668,7 @@ class _RacePanelView(discord.ui.LayoutView):
                         interaction,
                         self.cog._make_v2_notice(
                             "🍀 Reroll não concluído",
-                            ["Sua raça e suas fichas não foram alteradas"],
+                            ["Suas habilidades e suas fichas não foram alteradas"],
                             ok=False,
                         ),
                     )
@@ -693,9 +690,9 @@ class _RacePanelView(discord.ui.LayoutView):
                     return
 
                 for text_line in (
-                    "Sorteando sua nova raça..",
-                    "Sorteando sua nova raça...",
-                    "Definindo sua nova raça...",
+                    "Sorteando novas habilidades..",
+                    "Sorteando novas habilidades...",
+                    "Definindo novas habilidades...",
                 ):
                     await asyncio.sleep(0.35)
                     if target_message is None:
@@ -725,13 +722,13 @@ class _RacePanelView(discord.ui.LayoutView):
 
                 info = self.cog._get_race_info_by_key(race_key) or {}
                 race_emoji = str(info.get("emoji") or "🍀")
-                race_name = str(info.get("name") or "Nova raça")
+                race_name = str(info.get("name") or "Novo conjunto")
                 result_lines = [
-                    f"Sua nova raça é {race_emoji} **{race_name}**",
+                    f"Novo conjunto: {race_emoji} **{race_name}**",
                     f"Saldo normal: **{normal_balance}** {self.cog._CHIP_EMOJI}",
                 ]
                 if not panel_updated:
-                    result_lines.append("Use o comando de raça novamente para abrir o painel")
+                    result_lines.append("Use o comando de habilidades novamente para abrir o painel")
                 await self._edit_reroll_confirmation_result(
                     interaction,
                     self.cog._make_v2_notice(
@@ -748,7 +745,7 @@ class _RacePanelView(discord.ui.LayoutView):
             return
         if self._toggle_in_progress:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("🍀 Raça", ["Aguarde a atualização atual terminar"], ok=False),
+                view=self.cog._make_v2_notice("🍀 Habilidades", ["Aguarde a atualização atual terminar"], ok=False),
                 ephemeral=True,
             )
             return
@@ -759,7 +756,7 @@ class _RacePanelView(discord.ui.LayoutView):
                 race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
                 if not race_key:
                     await interaction.followup.send(
-                        view=self.cog._make_v2_notice("🍀 Raça", ["Você ainda não tem uma raça definida"], ok=False),
+                        view=self.cog._make_v2_notice("🍀 Habilidades", ["Você ainda não tem habilidades definidas"], ok=False),
                         ephemeral=True,
                     )
                     return
@@ -774,7 +771,7 @@ class _RacePanelView(discord.ui.LayoutView):
                         self.user_id,
                     )
                     await interaction.followup.send(
-                        view=self.cog._make_v2_notice("🍀 Raça", ["Não foi possível atualizar sua raça agora"], ok=False),
+                        view=self.cog._make_v2_notice("🍀 Habilidades", ["Não foi possível atualizar suas habilidades agora"], ok=False),
                         ephemeral=True,
                     )
                     return
@@ -788,8 +785,8 @@ class _RacePanelView(discord.ui.LayoutView):
                 state_text = "ativada" if new_active else "desativada"
                 await interaction.followup.send(
                     view=self.cog._make_v2_notice(
-                        "🍀 Raça atualizada",
-                        [f"Sua raça foi {state_text}; use o comando novamente para abrir o painel"],
+                        "🍀 Habilidades atualizadas",
+                        [f"Suas habilidades foram {state_text}s; use o comando novamente para abrir o painel"],
                         ok=True,
                     ),
                     ephemeral=True,
@@ -901,7 +898,7 @@ class _RebornConfirmView(discord.ui.LayoutView):
                 else self.cog._CHIP_EMOJI
             )
             lines, state = {
-                "race": (["Requer a raça **Fênix** ativa"], "error"),
+                "race": (["Requer **Fênix** ativa"], "error"),
                 "night": (["Disponível apenas de dia", "-# 06:00–17:59"], "neutral"),
                 "cooldown": (
                     [
@@ -974,14 +971,14 @@ class GamesCog(dcommands.Cog, GamesCore):
             chunks.append(current_chunk)
 
         children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("# 🧬 Raças"),
+            discord.ui.TextDisplay("# 🧬 Habilidades"),
             discord.ui.Separator(),
         ]
         children.extend(discord.ui.TextDisplay(chunk) for chunk in chunks)
         children.extend([
             discord.ui.Separator(),
             discord.ui.TextDisplay(
-                f"-# O reroll custa {RACE_REROLL_COST} {self._CHIP_EMOJI} e sempre sorteia outra raça"
+                f"-# O reroll custa {RACE_REROLL_COST} {self._CHIP_EMOJI} e sempre sorteia outro conjunto"
             ),
         ])
         view = discord.ui.LayoutView(timeout=None)
@@ -992,7 +989,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(
             discord.ui.Container(
-                discord.ui.TextDisplay("\n".join(["# 🍀 Raça", str(text_line)])),
+                discord.ui.TextDisplay("\n".join(["# 🍀 Habilidades", str(text_line)])),
                 accent_color=discord.Color.green(),
             )
         )
@@ -1096,7 +1093,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         content = str(message.content or "").strip().casefold()
         if content.startswith("_"):
             return False
-        if content not in {"race", "raça"}:
+        if content not in {"race", "raça", "habilidades"}:
             return False
         if message.guild is None:
             return True
@@ -1108,7 +1105,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             await self._delete_previous_race_panel_message(guild_id, user_id, channel=message.channel)
             race_key = self._get_user_race_key(guild_id, user_id)
             if not race_key:
-                spinner = await message.channel.send(view=self._make_race_spinner_view("Sorteando sua raça"))
+                spinner = await message.channel.send(view=self._make_race_spinner_view("Sorteando suas habilidades"))
                 try:
                     async with self._race_progress_lock(guild_id, user_id):
                         race_key = self._get_user_race_key(guild_id, user_id)
@@ -1119,7 +1116,7 @@ class GamesCog(dcommands.Cog, GamesCore):
                     try:
                         await spinner.edit(
                             view=self._make_v2_notice(
-                                "🍀 Raça não definida",
+                                "🍀 Habilidades não definidas",
                                 ["Não foi possível concluir o sorteio agora"],
                                 ok=False,
                             )
@@ -1128,7 +1125,7 @@ class GamesCog(dcommands.Cog, GamesCore):
                         pass
                     return True
 
-                for text_line in ("Sorteando sua raça..", "Sorteando sua raça...", "Definindo sua raça..."):
+                for text_line in ("Sorteando suas habilidades..", "Sorteando suas habilidades...", "Definindo suas habilidades..."):
                     await asyncio.sleep(0.35)
                     try:
                         await spinner.edit(view=self._make_race_spinner_view(text_line))
@@ -1191,7 +1188,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         return handled
 
     @_guild_scoped()
-    @app_commands.command(name="economia", description="Gerencia jogos, fichas e raças neste servidor")
+    @app_commands.command(name="economia", description="Gerencia jogos, fichas e habilidades neste servidor")
     async def economia(self, interaction: discord.Interaction):
         await self._run_gincana_command(interaction)
 
@@ -1245,14 +1242,14 @@ class GamesCog(dcommands.Cog, GamesCore):
             mention_author=False,
         )
 
-    @dcommands.command(name="race", aliases=["raça"])
+    @dcommands.command(name="race", aliases=["raça", "habilidades"])
     async def race_command(self, ctx: dcommands.Context):
         await self._dispatch_prefix_trigger(
             ctx,
             handler_name="_handle_race_trigger",
             content="race",
             trigger_hint="race",
-            failure_title="🍀 Raça",
+            failure_title="🍀 Habilidades",
         )
 
     @dcommands.command(name="coinflip")
@@ -1263,7 +1260,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         if not bool(result.get("ok")):
             code = str(result.get("code") or "failed")
             lines, state = (
-                (["Requer a raça **Apostador** ativa"], "error")
+                (["Requer **Apostador** ativo"], "error")
                 if code == "race"
                 else ([f"Disponível em **{self._race_skill_daily_wait_text()}**"], "neutral")
                 if code == "cooldown"
@@ -1294,7 +1291,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         if not bool(result.get("ok")):
             code = str(result.get("code") or "empty")
             lines, state = {
-                "race": (["Requer a raça **Glitch** ativa"], "error"),
+                "race": (["Requer **Glitch** ativo"], "error"),
                 "empty_balance": (["Esse bônus já não está no saldo"], "neutral"),
             }.get(code, (["Nada para inverter no extrato"], "neutral"))
             await ctx.reply(
@@ -1352,7 +1349,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             return
         if not self._race_is(ctx.guild.id, ctx.author.id, "fenix"):
             await ctx.reply(
-                view=self._make_skill_notice("🐦‍🔥 Reborn", ["Requer a raça **Fênix** ativa"], state="error"),
+                view=self._make_skill_notice("🐦‍🔥 Reborn", ["Requer **Fênix** ativa"], state="error"),
                 mention_author=False,
             )
             return
@@ -1412,7 +1409,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         if not bool(result.get("ok")):
             code = str(result.get("code") or "failed")
             lines, state = (
-                (["Requer a raça **Sortudo** ativa"], "error")
+                (["Requer **Sortudo** ativo"], "error")
                 if code == "race"
                 else ([f"Disponível em **{self._race_skill_daily_wait_text()}**"], "neutral")
                 if code == "cooldown"
@@ -1480,7 +1477,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         if not bool(result.get("ok")):
             code = str(result.get("code") or "failed")
             lines, state = {
-                "race": (["Requer a raça **Preto** ativa"], "error"),
+                "race": (["Requer **Preto** ativo"], "error"),
                 "cooldown": ([f"Disponível em **{self._race_skill_daily_wait_text()}**"], "neutral"),
                 "self": (["Escolha outra pessoa"], "error"),
                 "poor": ([f"{target.mention} precisa ter **20 fichas permanentes**"], "neutral"),
@@ -1514,7 +1511,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         if not bool(result.get("ok")):
             code = str(result.get("code") or "failed")
             lines, state = (
-                (["Requer a raça **Coringa** ativa"], "error")
+                (["Requer **Coringa** ativo"], "error")
                 if code == "race"
                 else ([f"Disponível em **{self._race_skill_daily_wait_text()}**"], "neutral")
                 if code == "cooldown"

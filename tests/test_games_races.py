@@ -38,7 +38,7 @@ class GamesRaceSystemTests(unittest.TestCase):
     def test_panel_has_requested_order_and_copy(self) -> None:
         panel = self._node_source(self.games_init, "_RacePanelView", ast.ClassDef)
         builder = self._node_source(panel, "_build_layout", ast.FunctionDef)
-        self.assertIn('label="Ver raças"', builder)
+        self.assertIn('label="Ver habilidades"', builder)
         self.assertIn('label="Reroll"', builder)
         self.assertNotIn('label=f"Reroll {RACE_REROLL_COST}"', builder)
         self.assertIn("emoji=self.cog._CHIP_EMOJI", builder)
@@ -57,6 +57,24 @@ class GamesRaceSystemTests(unittest.TestCase):
         self.assertIn('current_marker = " · atual"', catalog)
         self.assertIn("_make_race_catalog_view", show)
         self.assertIn("ephemeral=True", show)
+        self.assertIn('TextDisplay("# 🧬 Habilidades")', catalog)
+
+    def test_habilidades_alias_and_trigger_keep_legacy_race_commands(self) -> None:
+        handler = self._node_source(self.games_init, "_handle_race_trigger", ast.AsyncFunctionDef)
+        command = self._node_source(self.games_init, "race_command", ast.AsyncFunctionDef)
+        self.assertIn('{"race", "raça", "habilidades"}', handler)
+        decorator_area = self.games_init[max(0, self.games_init.index("async def race_command") - 120):self.games_init.index("async def race_command") + 80]
+        self.assertIn('aliases=["raça", "habilidades"]', decorator_area)
+        self.assertIn('failure_title="🍀 Habilidades"', command)
+
+    def test_preto_no_longer_has_labia_or_extra_begging_use(self) -> None:
+        catalog = self._node_source(self.base, "_race_catalog", ast.FunctionDef)
+        limited = self._node_source(self.base, "_limited_action_config", ast.FunctionDef)
+        self.assertNotIn('"key": "labia"', catalog)
+        self.assertNotIn('"title": "Lábia"', catalog)
+        mendigar_branch = limited[limited.index('if action == "mendigar":'):]
+        self.assertIn('return 1, float(CHIPS_MENDIGAR_COOLDOWN_SECONDS)', mendigar_branch)
+        self.assertNotIn('_race_is(guild_id, user_id, "preto")', mendigar_branch.split('return 1, 0.0')[0])
 
     def test_reroll_confirmation_is_private_components_v2_with_only_continue(self) -> None:
         confirmation = self._node_source(

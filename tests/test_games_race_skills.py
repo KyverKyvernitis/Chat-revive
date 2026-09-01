@@ -193,24 +193,28 @@ class RaceSkillTests(unittest.TestCase):
         self.assertNotIn("_halve_apostador_pair_outcome", ROLETA)
 
         catalog = node_source(BASE, "_race_catalog", ast.FunctionDef)
-        for probability in ("0.15", "0.05", "0.25"):
-            self.assertIn(f"_format_percent_text({probability})", catalog)
+        self.assertIn("ROLETA_APOSTADOR_STANDARD_JACKPOT_CHANCE", catalog)
+        self.assertIn("ROLETA_APOSTADOR_MEGA_JACKPOT_CHANCE", catalog)
+        self.assertIn("ROLETA_APOSTADOR_BEAST_CHANCE", catalog)
 
     def test_equal_number_pairs_are_10_percent_for_every_race(self) -> None:
         self.assertIn("ROLETA_EQUAL_NUMBER_PAIR_CHANCE = 0.10", ROLETA)
         self.assertIn("ROLETA_STANDARD_FALLBACK_CHANCE = 0.90", ROLETA)
-        self.assertIn("ROLETA_APOSTADOR_FALLBACK_CHANCE = 0.60", ROLETA)
+        self.assertIn("ROLETA_APOSTADOR_FALLBACK_CHANCE = (", ROLETA)
         outcome_source = node_source(ROLETA, "_roleta_outcome_for_user", ast.FunctionDef)
-        self.assertIn("if roll < 0.40", outcome_source)
+        self.assertIn("beast_limit = jackpot_limit + (1.0 - jackpot_limit) * ROLETA_APOSTADOR_BEAST_CHANCE", outcome_source)
         self.assertNotIn("if random.random() < 0.25", outcome_source)
 
         namespace: dict[str, object] = {
             "ROLETA_APOSTADOR_COST": 25,
+            "ROLETA_APOSTADOR_MEGA_JACKPOT_CHANCE": 0.05,
+            "ROLETA_APOSTADOR_STANDARD_JACKPOT_CHANCE": 0.10,
+            "ROLETA_APOSTADOR_BEAST_CHANCE": 0.20,
             "ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS": 200,
             "ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS": 100,
             "ROLETA_EQUAL_NUMBER_PAIR_CHANCE": 0.10,
             "ROLETA_STANDARD_FALLBACK_CHANCE": 0.90,
-            "ROLETA_APOSTADOR_FALLBACK_CHANCE": 0.60,
+            "ROLETA_APOSTADOR_FALLBACK_CHANCE": 0.68,
             "ROLETA_FALLBACK_JOKER_CHANCE": 0.05,
             "ROLETA_FALLBACK_TRIPLE_CHANCE": 0.049512,
         }
@@ -223,7 +227,7 @@ class RaceSkillTests(unittest.TestCase):
 
         fallback_pair_chance = namespace["_roleta_pair_chance_in_fallback"]
         self.assertAlmostEqual(fallback_pair_chance(0.90) * 0.90, 0.10)
-        self.assertAlmostEqual(fallback_pair_chance(0.60) * 0.60, 0.10)
+        self.assertAlmostEqual(fallback_pair_chance(0.68) * 0.68, 0.10)
 
         class Dummy:
             def __init__(self, engine: random.Random, *, apostador: bool) -> None:
@@ -273,8 +277,10 @@ class RaceSkillTests(unittest.TestCase):
         self.assertAlmostEqual(apostador_pair_rate, 0.10, delta=0.004)
         self.assertAlmostEqual(standard_forced["jackpot"], 0.10, delta=0.005)
         self.assertAlmostEqual(apostador_forced["jackpot_mega"], 0.05, delta=0.005)
-        self.assertAlmostEqual(apostador_forced["jackpot"], 0.15, delta=0.005)
-        self.assertAlmostEqual(apostador_forced["beast"], 0.20, delta=0.005)
+        self.assertAlmostEqual(apostador_forced["jackpot"], 0.10, delta=0.005)
+        self.assertAlmostEqual(apostador_forced["beast"], 0.17, delta=0.005)
+        non_jackpot_rate = 1.0 - apostador_forced["jackpot_mega"] - apostador_forced["jackpot"]
+        self.assertAlmostEqual(apostador_forced["beast"] / non_jackpot_rate, 0.20, delta=0.006)
 
     def test_equal_pair_and_beast_result_copy_is_compact(self) -> None:
         partial_copy = node_source(ROLETA, "_roleta_partial_result_copy", ast.FunctionDef)

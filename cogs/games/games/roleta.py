@@ -20,6 +20,9 @@ from ..constants import (
     BUCKSHOT_STAKE,
     CHIPS_INITIAL,
     ROLETA_APOSTADOR_COST,
+    ROLETA_APOSTADOR_STANDARD_JACKPOT_CHANCE,
+    ROLETA_APOSTADOR_MEGA_JACKPOT_CHANCE,
+    ROLETA_APOSTADOR_BEAST_CHANCE,
     ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS,
     ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS,
     ROLETA_COST,
@@ -46,7 +49,9 @@ ROLETA_CYCLE_BONUS_CHIPS = 10
 ROLETA_APOSTADOR_PAIR_REFUND = 10
 ROLETA_EQUAL_NUMBER_PAIR_CHANCE = 0.10
 ROLETA_STANDARD_FALLBACK_CHANCE = 0.90
-ROLETA_APOSTADOR_FALLBACK_CHANCE = 0.60
+ROLETA_APOSTADOR_FALLBACK_CHANCE = (
+    1.0 - ROLETA_APOSTADOR_MEGA_JACKPOT_CHANCE - ROLETA_APOSTADOR_STANDARD_JACKPOT_CHANCE
+) * (1.0 - ROLETA_APOSTADOR_BEAST_CHANCE)
 ROLETA_FALLBACK_JOKER_CHANCE = 0.05
 # Preserva a taxa histórica dos trios comuns: (46,26% - 5%) × 12%.
 ROLETA_FALLBACK_TRIPLE_CHANCE = 0.049512
@@ -418,12 +423,15 @@ class GincanaRoletaMixin:
         def _roleta_outcome_for_user(self, guild_id: int, user_id: int) -> dict[str, object]:
             if self._race_is(guild_id, user_id, "apostador"):
                 roll = random.random()
-                if roll < 0.05:
+                mega_limit = ROLETA_APOSTADOR_MEGA_JACKPOT_CHANCE
+                jackpot_limit = mega_limit + ROLETA_APOSTADOR_STANDARD_JACKPOT_CHANCE
+                # A Marca da Besta é condicional: só concorre quando nenhum jackpot saiu.
+                beast_limit = jackpot_limit + (1.0 - jackpot_limit) * ROLETA_APOSTADOR_BEAST_CHANCE
+                if roll < mega_limit:
                     return {"target_middle": [7, 7, 7], "forced_kind": "jackpot_mega", "forced_amount": ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS}
-                if roll < 0.20:
+                if roll < jackpot_limit:
                     return {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS}
-                # 20% absolutos equivalem aos 25% após os 20% de jackpots.
-                if roll < 0.40:
+                if roll < beast_limit:
                     return {"target_middle": [6, 6, 6], "forced_kind": "beast", "forced_amount": ROLETA_APOSTADOR_COST}
                 return {
                     "target_middle": self._roll_roleta_target_middle(

@@ -100,7 +100,7 @@ class GamesChipProfileRendererTests(unittest.TestCase):
         self.assertEqual(
             build_profile_badges(complete),
             (
-                "RAÇA · Sortudo",
+                "HABILIDADES · Sortudo",
                 "Conquistas • 2 de 6",
                 "_daily disponível",
                 "_recarga disponível",

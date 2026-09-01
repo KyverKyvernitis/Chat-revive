@@ -38,11 +38,15 @@ if psutil is not None:
 
 
 _SEVERITY_STYLES: dict[int, tuple[str, str, discord.Color]] = {
-    0: ("🟢", "Tudo funcionando normalmente", discord.Color.green()),
-    1: ("🟡", "Funcionando com pequena variação", discord.Color.gold()),
-    2: ("🟠", "Oscilação detectada", discord.Color.orange()),
+    0: ("🟢", "Operando normalmente", discord.Color.green()),
+    1: ("🟡", "Pequena oscilação", discord.Color.gold()),
+    2: ("🟠", "Desempenho degradado", discord.Color.orange()),
     3: ("🔴", "Instabilidade detectada", discord.Color.red()),
 }
+
+_WEBSOCKET_THRESHOLDS = (180.0, 350.0, 700.0)
+_RESPONSE_THRESHOLDS = (700.0, 1_300.0, 2_500.0)
+_EVENT_LOOP_THRESHOLDS = (80.0, 200.0, 750.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +60,8 @@ class PingSnapshot:
     cpu_percent: float | None
     guild_count: int
     shard_text: str | None
+    voice_connections: int
+    tts_queue_size: int
     bot_healthy: bool | None
 
 
@@ -94,7 +100,7 @@ def _format_ms(value: float | None) -> str:
 
 def _latency_severity(value: float | None, thresholds: tuple[float, float, float]) -> int:
     if value is None:
-        return 1
+        return 0
     if value < thresholds[0]:
         return 0
     if value < thresholds[1]:
@@ -104,28 +110,36 @@ def _latency_severity(value: float | None, thresholds: tuple[float, float, float
     return 3
 
 
-def _metric_icon(severity: int) -> str:
-    return _SEVERITY_STYLES[max(0, min(3, int(severity)))][0]
+def _warning_marker(severity: int) -> str:
+    if severity <= 0:
+        return ""
+    return f" {_SEVERITY_STYLES[min(3, int(severity))][0]}"
 
 
 def _database_display(database_ok: bool | None) -> tuple[str, str, int]:
     if database_ok is True:
-        return "🟢", "Online", 0
+        return "", "Online", 0
     if database_ok is False:
-        return "🔴", "Indisponível", 3
-    return "🟡", "Verificando", 1
+        return " 🔴", "Indisponível", 3
+    return " ⚪", "Sem leitura", 0
 
 
 def _overall_severity(snapshot: PingSnapshot) -> int:
+    if snapshot.database_ok is False or snapshot.bot_healthy is False:
+        return 3
+
     severities = [
-        _latency_severity(snapshot.websocket_ms, (150.0, 300.0, 600.0)),
-        _latency_severity(snapshot.response_ms, (350.0, 900.0, 1_800.0)),
-        _latency_severity(snapshot.event_loop_ms, (100.0, 350.0, 1_000.0)),
-        _database_display(snapshot.database_ok)[2],
+        _latency_severity(snapshot.response_ms, _RESPONSE_THRESHOLDS),
     ]
-    if snapshot.bot_healthy is False:
-        severities.append(3)
-    return max(severities)
+    if snapshot.websocket_ms is not None:
+        severities.append(
+            _latency_severity(snapshot.websocket_ms, _WEBSOCKET_THRESHOLDS)
+        )
+    if snapshot.event_loop_ms is not None:
+        severities.append(
+            _latency_severity(snapshot.event_loop_ms, _EVENT_LOOP_THRESHOLDS)
+        )
+    return max(severities, default=0)
 
 
 class PingLoadingView(discord.ui.LayoutView):
@@ -133,7 +147,7 @@ class PingLoadingView(discord.ui.LayoutView):
         super().__init__(timeout=None)
         self.add_item(
             discord.ui.Container(
-                discord.ui.TextDisplay("# 🏓 Medindo…\n-# Consultando o estado atual do bot"),
+                discord.ui.TextDisplay("## 🏓 Medindo…"),
                 accent_color=discord.Color.blurple(),
             )
         )
@@ -145,11 +159,7 @@ class PingPanelView(discord.ui.LayoutView):
 
         severity = _overall_severity(snapshot)
         status_icon, status_text, accent = _SEVERITY_STYLES[severity]
-        header_text = (
-            "# 🏓 Pong!\n"
-            f"{status_icon} **{status_text}**\n"
-            "-# Status do bot medido em tempo real"
-        )
+        header_text = f"## 🏓 Pong!\n{status_icon} **{status_text}**"
         header: discord.ui.Item[Any] = discord.ui.TextDisplay(header_text)
         if thumbnail_url:
             header = discord.ui.Section(
@@ -160,39 +170,62 @@ class PingPanelView(discord.ui.LayoutView):
                 ),
             )
 
-        websocket_severity = _latency_severity(snapshot.websocket_ms, (150.0, 300.0, 600.0))
-        response_severity = _latency_severity(snapshot.response_ms, (350.0, 900.0, 1_800.0))
-        loop_severity = _latency_severity(snapshot.event_loop_ms, (100.0, 350.0, 1_000.0))
-        database_icon, database_text, _ = _database_display(snapshot.database_ok)
+        websocket_severity = _latency_severity(
+            snapshot.websocket_ms,
+            _WEBSOCKET_THRESHOLDS,
+        )
+        response_severity = _latency_severity(
+            snapshot.response_ms,
+            _RESPONSE_THRESHOLDS,
+        )
+        loop_severity = _latency_severity(
+            snapshot.event_loop_ms,
+            _EVENT_LOOP_THRESHOLDS,
+        )
+        database_marker, database_text, _ = _database_display(snapshot.database_ok)
         connection_lines = [
-            "## Conexão",
-            f"{_metric_icon(websocket_severity)} **WebSocket** `{_format_ms(snapshot.websocket_ms)}`",
-            f"{_metric_icon(response_severity)} **Resposta do comando** `{_format_ms(snapshot.response_ms)}`",
-            f"{_metric_icon(loop_severity)} **Event loop** `{_format_ms(snapshot.event_loop_ms)}`",
-            f"{database_icon} **Banco de dados** `{database_text}`",
+            "**Conexão**",
+            (
+                f"📡 **Discord** `{_format_ms(snapshot.websocket_ms)}`"
+                f"{_warning_marker(websocket_severity)} · "
+                f"⚡ **Resposta** `{_format_ms(snapshot.response_ms)}`"
+                f"{_warning_marker(response_severity)}"
+            ),
+            (
+                f"🔄 **Loop** `{_format_ms(snapshot.event_loop_ms)}`"
+                f"{_warning_marker(loop_severity)} · "
+                f"🗄️ **Banco** `{database_text}`{database_marker}"
+            ),
         ]
 
-        memory_text = "indisponível" if snapshot.memory_mb is None else f"{snapshot.memory_mb:.1f} MB"
-        cpu_text = "indisponível" if snapshot.cpu_percent is None else f"{snapshot.cpu_percent:.1f}%"
-        process_lines = [
-            "## Processo",
-            f"⏱️ **Ativo há** `{snapshot.uptime_text}`",
-            f"🧠 **Memória** `{memory_text}` · **CPU** `{cpu_text}`",
-            f"🌐 **Servidores** `{snapshot.guild_count}`",
+        memory_text = (
+            "indisponível"
+            if snapshot.memory_mb is None
+            else f"{snapshot.memory_mb:.1f} MB"
+        )
+        cpu_text = (
+            "indisponível"
+            if snapshot.cpu_percent is None
+            else f"{snapshot.cpu_percent:.1f}%"
+        )
+        system_lines = [
+            "**Sistema & TTS**",
+            f"⏱️ **Ativo** `{snapshot.uptime_text}` · 🧠 **RAM** `{memory_text}`",
+            f"🖥️ **CPU** `{cpu_text}` · 🌐 **Servidores** `{snapshot.guild_count}`",
+            (
+                f"🔊 **Voz** `{snapshot.voice_connections}` · "
+                f"📥 **Fila TTS** `{snapshot.tts_queue_size}`"
+            ),
         ]
         if snapshot.shard_text is not None:
-            process_lines[-1] += f" · **Shard** `{snapshot.shard_text}`"
+            system_lines[2] += f" · 🧩 **Shard** `{snapshot.shard_text}`"
 
         self.add_item(
             discord.ui.Container(
                 header,
                 discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
-                discord.ui.TextDisplay("\n".join(connection_lines)),
-                discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
-                discord.ui.TextDisplay("\n".join(process_lines)),
-                discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
                 discord.ui.TextDisplay(
-                    "-# WebSocket mede a conexão com o Discord · Event loop mede o atraso interno"
+                    "\n".join(connection_lines + [""] + system_lines)
                 ),
                 accent_color=accent,
             )
@@ -264,6 +297,29 @@ class PingCommandMixin:
                 shard_number = 1
             shard_text = f"{shard_number}/{shard_count}"
 
+        voice_connections = 0
+        for voice_client in getattr(self.bot, "voice_clients", ()) or ():
+            connected_check = getattr(voice_client, "is_connected", None)
+            try:
+                if not callable(connected_check) or bool(connected_check()):
+                    voice_connections += 1
+            except Exception:
+                continue
+
+        tts_queue_size = 0
+        get_cog = getattr(self.bot, "get_cog", None)
+        tts_cog = get_cog("TTSVoice") if callable(get_cog) else None
+        guild_states = getattr(tts_cog, "guild_states", {})
+        if isinstance(guild_states, dict):
+            for state in guild_states.values():
+                qsize = getattr(getattr(state, "queue", None), "qsize", None)
+                if not callable(qsize):
+                    continue
+                try:
+                    tts_queue_size += max(0, int(qsize()))
+                except Exception:
+                    continue
+
         bot_healthy: bool | None = None
         ready_check = getattr(self.bot, "is_ready", None)
         closed_check = getattr(self.bot, "is_closed", None)
@@ -299,6 +355,8 @@ class PingCommandMixin:
             cpu_percent=cpu_percent,
             guild_count=guild_count,
             shard_text=shard_text,
+            voice_connections=voice_connections,
+            tts_queue_size=tts_queue_size,
             bot_healthy=bot_healthy,
         )
 

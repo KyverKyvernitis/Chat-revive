@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 import unittest
 
@@ -22,17 +23,36 @@ class PingCommandTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = PING_PATH.read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.source)
-        helper_names = {"_safe_float", "_format_duration", "_latency_severity"}
+        helper_names = {
+            "_safe_float",
+            "_format_duration",
+            "_latency_severity",
+            "_overall_severity",
+        }
+        threshold_names = {
+            "_WEBSOCKET_THRESHOLDS",
+            "_RESPONSE_THRESHOLDS",
+            "_EVENT_LOOP_THRESHOLDS",
+        }
         helper_tree = ast.Module(
             body=[
                 node
                 for node in cls.tree.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name in helper_names
+                if (
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name in helper_names
+                )
+                or (
+                    isinstance(node, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id in threshold_names
+                        for target in node.targets
+                    )
+                )
             ],
             type_ignores=[],
         )
-        cls.helpers: dict[str, object] = {"Any": Any}
+        cls.helpers: dict[str, object] = {"Any": Any, "PingSnapshot": Any}
         exec(compile(helper_tree, str(PING_PATH), "exec"), cls.helpers)
 
     def test_ping_module_is_valid_python(self) -> None:
@@ -46,6 +66,27 @@ class PingCommandTests(unittest.TestCase):
         self.assertEqual(latency_severity(149.9, (150.0, 300.0, 600.0)), 0)
         self.assertEqual(latency_severity(150.0, (150.0, 300.0, 600.0)), 1)
         self.assertEqual(latency_severity(600.0, (150.0, 300.0, 600.0)), 3)
+        self.assertEqual(latency_severity(None, (150.0, 300.0, 600.0)), 0)
+
+    def test_response_status_ignores_normal_discord_api_variation(self) -> None:
+        latency_severity = self.helpers["_latency_severity"]
+        overall_severity = self.helpers["_overall_severity"]
+        response_thresholds = self.helpers["_RESPONSE_THRESHOLDS"]
+        self.assertEqual(latency_severity(444.0, response_thresholds), 0)
+        self.assertEqual(latency_severity(699.9, response_thresholds), 0)
+        self.assertEqual(latency_severity(700.0, response_thresholds), 1)
+        self.assertEqual(latency_severity(2_500.0, response_thresholds), 3)
+
+        normal = SimpleNamespace(
+            websocket_ms=120.0,
+            response_ms=444.0,
+            event_loop_ms=1.0,
+            database_ok=True,
+            bot_healthy=True,
+        )
+        self.assertEqual(overall_severity(normal), 0)
+        normal.database_ok = False
+        self.assertEqual(overall_severity(normal), 3)
 
     def test_slash_and_dynamic_prefix_entries_share_the_panel(self) -> None:
         self.assertIn('@app_commands.command(name="ping"', self.source)
@@ -78,6 +119,16 @@ class PingCommandTests(unittest.TestCase):
         self.assertIn("_PROCESS.cpu_percent(interval=None)", self.source)
         self.assertNotIn("cpu_percent(interval=1", self.source)
         self.assertNotIn("await asyncio.sleep", self.source)
+
+    def test_panel_is_compact_and_includes_tts_activity(self) -> None:
+        self.assertIn('"**Conexão**"', self.source)
+        self.assertIn('"**Sistema & TTS**"', self.source)
+        self.assertIn("voice_connections", self.source)
+        self.assertIn("tts_queue_size", self.source)
+        self.assertIn('get_cog("TTSVoice")', self.source)
+        self.assertNotIn('"## Conexão"', self.source)
+        self.assertNotIn('"## Processo"', self.source)
+        self.assertNotIn("WebSocket mede a conexão", self.source)
 
     def test_ping_prefix_is_registered_and_documented(self) -> None:
         aliases = ALIASES_PATH.read_text(encoding="utf-8")

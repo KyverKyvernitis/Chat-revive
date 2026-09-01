@@ -27,7 +27,7 @@ _CALL_COMMAND_NAME = str(TRIGGER_WORD or "pinto").strip().casefold()
 if not re.fullmatch(r"[a-z0-9_-]{1,32}", _CALL_COMMAND_NAME) or _CALL_COMMAND_NAME in {
     "ficha", "fichas", "perfil", "saldo", "daily", "recarga", "economia", "rank", "poker", "truco", "roubar",
     "pay", "race", "habilidades", "roleta", "roleta2", "carta", "corrida", "alvo", "buckshot", "mendigar",
-    "focus", "pica", "rola", "dj", "coinflip", "0to1", "reborn", "changefate",
+    "focus", "pica", "rola", "dj", "coinflip", "0to1", "reborn", "re", "changefate",
     "forcerob", "joker",
 }:
     _CALL_COMMAND_NAME = "pinto"
@@ -1343,7 +1343,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             mention_author=False,
         )
 
-    @dcommands.command(name="reborn")
+    @dcommands.command(name="reborn", aliases=["re"])
     async def reborn_command(self, ctx: dcommands.Context):
         if not await self._ensure_games_command_entry(ctx, trigger_hint="reborn"):
             return

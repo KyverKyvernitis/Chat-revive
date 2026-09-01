@@ -36,10 +36,14 @@ class RaceSkillTests(unittest.TestCase):
             ast.parse(source)
 
     def test_only_final_command_names_are_registered(self) -> None:
-        for command in ("coinflip", "0to1", "reborn", "changefate", "forcerob", "joker"):
+        for command in ("coinflip", "0to1", "changefate", "forcerob", "joker"):
             self.assertIn(f'@dcommands.command(name="{command}")', GAMES_INIT)
+        self.assertIn('@dcommands.command(name="reborn", aliases=["re"])', GAMES_INIT)
         for removed in ("error", "1to0", "lucky", "blackout"):
             self.assertNotIn(f'@dcommands.command(name="{removed}")', GAMES_INIT)
+
+    def test_reborn_has_re_alias(self) -> None:
+        self.assertIn('@dcommands.command(name="reborn", aliases=["re"])', GAMES_INIT)
 
     def test_reborn_confirmation_is_components_v2_and_continue_only(self) -> None:
         view = node_source(GAMES_INIT, "_RebornConfirmView", ast.ClassDef)

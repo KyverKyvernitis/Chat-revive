@@ -450,12 +450,51 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         )
         roll_source = str(ast.get_source_segment(self.source, roll))
         self.assertIn("normal_payout, bonus_payout = 0, 30", roll_source)
-        self.assertIn('summary = f"3 {fruit_emoji} renderam +30 {self._CHIP_BONUS_EMOJI}"', roll_source)
+        self.assertIn('fruit, row_index = _slots_colheita_location(grid)', roll_source)
+        self.assertIn('row_ordinal = ("1ª", "2ª", "3ª")[int(row_index)]', roll_source)
+        self.assertIn('f"Vieram 3 {fruit_emoji} na {row_ordinal} linha e "', roll_source)
+        self.assertIn('f"renderam +30 {self._CHIP_BONUS_EMOJI}"', roll_source)
         self.assertIn('free_spins = 1', roll_source)
-        self.assertIn(
-            'summary = f"3 {fruit_emoji} fecharam uma Colheita e devolveram a entrada"',
-            roll_source,
+        self.assertIn('"devolveram a entrada"', roll_source)
+
+    def test_colheita_copy_reports_actual_row_and_reward(self) -> None:
+        roll = self._class_method("_roll_roleta2_outcome")
+        harness = type(
+            "Roleta2HarvestHarness",
+            (),
+            {
+                "_roll_roleta2_outcome": roll,
+                "_CHIP_BONUS_EMOJI": "<bonus>",
+                "_CHIP_GAIN_EMOJI": "<gain>",
+            },
+        )()
+
+        raspberry = harness._roll_roleta2_outcome(
+            grid_override=[
+                ["banana", "bar", "cereja"],
+                ["framboesa", "framboesa", "framboesa"],
+                ["cereja", "banana", "bar"],
+            ],
+            allow_deja_vu=False,
         )
+        self.assertEqual(
+            raspberry["summary"],
+            "Vieram 3 <:slot_framboesa:1543757628520271964> na 2ª linha e renderam +30 <bonus>",
+        )
+
+        banana = harness._roll_roleta2_outcome(
+            grid_override=[
+                ["framboesa", "bar", "cereja"],
+                ["cereja", "framboesa", "bar"],
+                ["banana", "banana", "banana"],
+            ],
+            allow_deja_vu=False,
+        )
+        self.assertEqual(
+            banana["summary"],
+            "Vieram 3 <:slot_banana:1543757649911353404> na 3ª linha e devolveram a entrada",
+        )
+        self.assertEqual(banana["free_spins"], 1)
 
     def test_bar_abriu_as_7_copy_uses_the_actual_slot_emojis(self) -> None:
         summary = self.namespace["_slots_bar_abriu_as_7_summary"]
@@ -534,10 +573,10 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
                 "_format_game_result_breakdown": lambda self, normal, bonus: f"money:{normal}:{bonus}",
             },
         )()
-        self.assertEqual(harness._format_roleta2_result_value(0, 0, 1), "+1 giro grátis")
+        self.assertEqual(harness._format_roleta2_result_value(0, 0, 1), "+1 giro devolvido")
         self.assertEqual(
             harness._format_roleta2_result_value(0, 10, 1),
-            "money:0:10 · +1 giro grátis",
+            "money:0:10 · +1 giro devolvido",
         )
         execution = self._async_function_source("_execute_roleta2_round")
         self.assertIn('free_spins_awarded = sum(', execution)

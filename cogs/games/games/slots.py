@@ -674,11 +674,16 @@ def _slots_jackpot_summary(grid: list[list[str]]) -> str:
     return f"Três {SLOT_EMOJIS[SLOT_SEVEN]} combinaram"
 
 
-def _slots_colheita_fruit(grid: list[list[str]]) -> str:
-    for row in grid:
+def _slots_colheita_location(grid: list[list[str]]) -> tuple[str, int]:
+    for row_index, row in enumerate(grid):
         if len(set(row)) == 1 and row[0] in SLOT_FRUITS:
-            return str(row[0])
-    return SLOT_BANANA
+            return str(row[0]), int(row_index)
+    return SLOT_BANANA, 0
+
+
+def _slots_colheita_fruit(grid: list[list[str]]) -> str:
+    fruit, _row_index = _slots_colheita_location(grid)
+    return fruit
 
 
 def _slots_deja_vu_payout(chain_index: int) -> int:
@@ -891,18 +896,28 @@ class GincanaSlotsMixin:
             free_spins = 0
             if component_kind == "colheita":
                 title = "Colheita"
-                fruit = _slots_colheita_fruit(grid)
+                fruit, row_index = _slots_colheita_location(grid)
                 fruit_emoji = SLOT_EMOJIS.get(fruit, "🎰")
+                row_ordinal = ("1ª", "2ª", "3ª")[int(row_index)]
                 if fruit == SLOT_FRAMBOESA:
                     normal_payout, bonus_payout = 0, 30
-                    summary = f"3 {fruit_emoji} renderam +30 {self._CHIP_BONUS_EMOJI}"
+                    summary = (
+                        f"Vieram 3 {fruit_emoji} na {row_ordinal} linha e "
+                        f"renderam +30 {self._CHIP_BONUS_EMOJI}"
+                    )
                 elif fruit == SLOT_CEREJA:
                     normal_payout, bonus_payout = 20, 0
-                    summary = "As cerejas duplicaram o valor base da Colheita"
+                    summary = (
+                        f"Vieram 3 {fruit_emoji} na {row_ordinal} linha e "
+                        f"renderam +20 {self._CHIP_GAIN_EMOJI}"
+                    )
                 else:
                     normal_payout, bonus_payout = 15, 0
                     free_spins = 1
-                    summary = f"3 {fruit_emoji} fecharam uma Colheita e devolveram a entrada"
+                    summary = (
+                        f"Vieram 3 {fruit_emoji} na {row_ordinal} linha e "
+                        "devolveram a entrada"
+                    )
             else:
                 summaries = {
                     "sete_pecados": "Sete dos nove espaços vieram com 7",
@@ -1340,7 +1355,7 @@ class GincanaSlotsMixin:
             parts.append(self._format_game_result_breakdown(normal_delta, bonus_delta))
         free_count = max(0, int(free_spins or 0))
         if free_count > 0:
-            spin_label = "giro grátis" if free_count == 1 else "giros grátis"
+            spin_label = "giro devolvido" if free_count == 1 else "giros devolvidos"
             parts.append(f"+{free_count} {spin_label}")
         if parts:
             return " · ".join(parts)
@@ -1527,7 +1542,7 @@ class GincanaSlotsMixin:
             if bonus > 0:
                 rewards.append(f"+{bonus} {self._CHIP_BONUS_EMOJI}")
             if free_spins > 0:
-                spin_label = "giro grátis" if free_spins == 1 else "giros grátis"
+                spin_label = "giro devolvido" if free_spins == 1 else "giros devolvidos"
                 rewards.append(f"+{free_spins} {spin_label}")
             if rewards:
                 lines.append(f"-# {emoji} {title}{count_text} · " + " · ".join(rewards))

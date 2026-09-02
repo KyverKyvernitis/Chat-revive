@@ -345,7 +345,8 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         )
         picker_source = str(ast.get_source_segment(self.source, picker))
         self.assertIn('_last_game_loss_titles["roleta2"]', picker_source)
-        self.assertIn('f"Duas {pair_emoji} combinaram na {line_number} linha"', picker_source)
+        self.assertIn("ROLETA2_NEAR_MISS_TITLE_VARIANTS", picker_source)
+        self.assertIn("ROLETA2_NEAR_MISS_SUMMARY_VARIANTS", picker_source)
 
     def test_almost_copy_uses_the_actual_horizontal_line(self) -> None:
         matching_pair = self.namespace["_slots_matching_pair"]
@@ -383,10 +384,28 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             ["banana", "framboesa", "bar"],
         ]
         title, summary = harness._pick_roleta2_loss_copy(grid)
-        self.assertEqual(title, "Foi quase hein")
-        self.assertEqual(
+        self.assertIn(title, self.namespace["ROLETA2_NEAR_MISS_TITLE_VARIANTS"])
+        self.assertIn(
             summary,
-            "Duas <:slot_cereja:1543757610925162516> combinaram na 1ª linha",
+            {
+                "Duas <:slot_cereja:1543757610925162516> combinaram na 1ª linha",
+                "Quase fechou: duas <:slot_cereja:1543757610925162516> na 1ª linha",
+                "A 1ª linha ficou a uma <:slot_cereja:1543757610925162516> de combinar",
+            },
+        )
+
+    def test_almost_copy_has_the_three_approved_title_and_description_variants(self) -> None:
+        self.assertEqual(
+            self.namespace["ROLETA2_NEAR_MISS_TITLE_VARIANTS"],
+            ("Foi quase hein", "Quase!", "Por pouco"),
+        )
+        self.assertEqual(
+            self.namespace["ROLETA2_NEAR_MISS_SUMMARY_VARIANTS"],
+            (
+                "Duas {emoji} combinaram na {line} linha",
+                "Quase fechou: duas {emoji} na {line} linha",
+                "A {line} linha ficou a uma {emoji} de combinar",
+            ),
         )
 
     def test_jackpot_copy_has_compact_title_and_actual_position(self) -> None:
@@ -527,13 +546,22 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertEqual(location(column_grid), ("coluna", 1))
         self.assertEqual(summary(column_grid), "Duas bananas ao redor da cereja na coluna 2")
 
-    def test_faltou_um_sete_uses_the_new_compact_copy(self) -> None:
+    def test_faltou_um_sete_has_the_three_approved_title_and_description_variants(self) -> None:
+        self.assertEqual(
+            self.namespace["ROLETA2_FALTOU_UM_SETE_TITLE_VARIANTS"],
+            ("Faltou um sete", "Quase 777", "Só mais um 7"),
+        )
+        self.assertEqual(
+            self.namespace["ROLETA2_FALTOU_UM_SETE_SUMMARY_VARIANTS"],
+            ("Se tivesse mais 1 hein", "Só faltou mais um 7", "Tão perto dos três 7"),
+        )
         roll = next(
             node for node in ast.walk(self.tree)
             if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
         )
         roll_source = str(ast.get_source_segment(self.source, roll))
-        self.assertIn('"faltou_um_sete": "Se tivesse mais 1 hein"', roll_source)
+        self.assertIn("ROLETA2_FALTOU_UM_SETE_TITLE_VARIANTS", roll_source)
+        self.assertIn("ROLETA2_FALTOU_UM_SETE_SUMMARY_VARIANTS", roll_source)
 
     def test_result_title_emoji_and_theme_follow_the_causing_symbol(self) -> None:
         presentation = self.namespace["_slots_result_presentation"]
@@ -660,7 +688,7 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertNotIn("_try_consume_chips", respin)
         self.assertIn("column_order = _slots_respin_column_order(respin_index)", respin)
         self.assertIn("for index, column in enumerate(column_order)", respin)
-        self.assertIn("for column, delay in zip(column_order, ROLETA2_COLUMN_DELAYS)", respin)
+        self.assertIn("stop_steps = tuple(zip(column_order, ROLETA2_COLUMN_DELAYS))", respin)
         self.assertIn("ROLETA2_RESPIN_START_DELAYS[index]", respin)
         self.assertIn("for outcome_index, next_outcome in enumerate(outcomes[1:], start=1)", execution)
         self.assertIn("deja_respin_index = max(", execution)
@@ -952,6 +980,15 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
             self.assertNotIn("_change_user_bonus_chips", source)
         self.assertIn("summary=modifier_summary", deja)
         self.assertIn("summary=live_summary", sete)
+        # Quando o novo resultado também é 7 solitário, contador/Resultado/Saldo
+        # entram no frame em que a última coluna para. Não há um edit numérico
+        # extra antes do próximo respin.
+        for source in (deja, sete):
+            self.assertIn("sete_solitario_coalesced = False", source)
+            self.assertIn("can_coalesce_sete = (", source)
+            self.assertIn("if not sete_solitario_coalesced:", source)
+        self.assertIn("is_final_stop = stop_index == len(stop_steps) - 1", deja)
+        self.assertIn("is_final_stop = stop_index == len(reroll_columns) - 1", sete)
 
     def test_roleta2_statistics_are_separate_but_visible_in_profile_totals(self) -> None:
         base = BASE_PATH.read_text(encoding="utf-8")
@@ -964,8 +1001,19 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
         self.assertIn("stats.get('roleta2_spins'", base)
         self.assertIn("stats.get('roleta2_jackpots'", base)
 
-    def test_setes_espalhados_uses_the_new_compact_copy(self) -> None:
-        roll = self._class_method("_roll_roleta2_outcome")
+    def test_setes_espalhados_has_the_three_approved_title_and_description_variants(self) -> None:
+        self.assertEqual(
+            self.namespace["ROLETA2_SETES_ESPALHADOS_TITLE_VARIANTS"],
+            ("Setes espalhados", "7 por todo lado", "Setes perdidos"),
+        )
+        self.assertEqual(
+            self.namespace["ROLETA2_SETES_ESPALHADOS_SUMMARY_VARIANTS"],
+            (
+                "Vieram vários 7, só que espalhados",
+                "Os 7 vieram, mas cada um no seu canto",
+                "Vieram vários 7 sem formar uma linha",
+            ),
+        )
         source = ast.get_source_segment(
             self.source,
             next(
@@ -974,8 +1022,8 @@ class GamesRoleta2SlotsTests(unittest.TestCase):
                 if isinstance(node, ast.FunctionDef) and node.name == "_roll_roleta2_outcome"
             ),
         )
-        self.assertIsNotNone(roll)
-        self.assertIn('"setes_espalhados": "Vieram vários 7, só que espalhados"', str(source))
+        self.assertIn("ROLETA2_SETES_ESPALHADOS_TITLE_VARIANTS", str(source))
+        self.assertIn("ROLETA2_SETES_ESPALHADOS_SUMMARY_VARIANTS", str(source))
 
     def test_roleta2_explicitly_blocks_apostador_race_effects(self) -> None:
         allowed = self._class_method("_roleta2_race_effects_allowed")

@@ -121,6 +121,37 @@ ROLETA2_LOSS_SUMMARIES = {
     "7 solitário": "As outras colunas vão girar até vir um resultado decente",
 }
 
+ROLETA2_NEAR_MISS_TITLE_VARIANTS = (
+    "Foi quase hein",
+    "Quase!",
+    "Por pouco",
+)
+ROLETA2_NEAR_MISS_SUMMARY_VARIANTS = (
+    "Duas {emoji} combinaram na {line} linha",
+    "Quase fechou: duas {emoji} na {line} linha",
+    "A {line} linha ficou a uma {emoji} de combinar",
+)
+ROLETA2_FALTOU_UM_SETE_TITLE_VARIANTS = (
+    "Faltou um sete",
+    "Quase 777",
+    "Só mais um 7",
+)
+ROLETA2_FALTOU_UM_SETE_SUMMARY_VARIANTS = (
+    "Se tivesse mais 1 hein",
+    "Só faltou mais um 7",
+    "Tão perto dos três 7",
+)
+ROLETA2_SETES_ESPALHADOS_TITLE_VARIANTS = (
+    "Setes espalhados",
+    "7 por todo lado",
+    "Setes perdidos",
+)
+ROLETA2_SETES_ESPALHADOS_SUMMARY_VARIANTS = (
+    "Vieram vários 7, só que espalhados",
+    "Os 7 vieram, mas cada um no seu canto",
+    "Vieram vários 7 sem formar uma linha",
+)
+
 ROLETA2_PAYOUTS = {
     "sete_pecados": (200, 0),
     "jackpot": (100, 0),
@@ -772,7 +803,7 @@ def _slots_result_presentation(
     elif kind == "loss":
         if title == "7 solitário":
             symbol = SLOT_SEVEN
-        elif title == "Foi quase hein":
+        elif title in ROLETA2_NEAR_MISS_TITLE_VARIANTS:
             symbol = _slots_matching_pair_symbol(grid)
     else:
         symbol = ROLETA2_KIND_TITLE_SYMBOLS.get(kind)
@@ -797,34 +828,37 @@ class GincanaSlotsMixin:
 
     def _pick_roleta2_loss_copy(self, grid: list[list[str]]) -> tuple[str, str]:
         self._ensure_game_animation_runtime()
-        flat = [cell for row in grid for cell in row]
         pair_match = _slots_matching_pair(grid)
-        contextual_title = ""
         if _slots_is_sete_solitario(grid):
             # 7 solitário agora é uma mecânica de respin, então nunca pode ser
             # substituído por uma copy genérica só porque repetiu em sequência.
             self._last_game_loss_titles["roleta2"] = "7 solitário"
             return "7 solitário", ROLETA2_LOSS_SUMMARIES["7 solitário"]
+
+        last_title = self._last_game_loss_titles.get("roleta2")
         if pair_match is not None:
-            contextual_title = "Foi quase hein"
+            available_titles = [
+                candidate
+                for candidate in ROLETA2_NEAR_MISS_TITLE_VARIANTS
+                if candidate != last_title
+            ]
+            title = random.choice(available_titles or list(ROLETA2_NEAR_MISS_TITLE_VARIANTS))
+            pair_symbol = str(pair_match[0])
+            line_number = ("1ª", "2ª", "3ª")[int(pair_match[1])]
+            pair_emoji = SLOT_EMOJIS.get(pair_symbol, "🎰")
+            summary_template = random.choice(ROLETA2_NEAR_MISS_SUMMARY_VARIANTS)
+            summary = summary_template.format(emoji=pair_emoji, line=line_number)
+            self._last_game_loss_titles["roleta2"] = title
+            return title, summary
 
         generic_titles = (
             "Não veio nada",
             "Nenhuma combinação",
             "Você ganhou... nada!",
         )
-        last_title = self._last_game_loss_titles.get("roleta2")
-        if contextual_title and contextual_title != last_title:
-            title = contextual_title
-        else:
-            available = [candidate for candidate in generic_titles if candidate != last_title]
-            title = random.choice(available or list(generic_titles))
+        available = [candidate for candidate in generic_titles if candidate != last_title]
+        title = random.choice(available or list(generic_titles))
         self._last_game_loss_titles["roleta2"] = title
-        if title == "Foi quase hein" and pair_match is not None:
-            pair_symbol = str(pair_match[0])
-            line_number = ("1ª", "2ª", "3ª")[int(pair_match[1])]
-            pair_emoji = SLOT_EMOJIS.get(pair_symbol, "🎰")
-            return title, f"Duas {pair_emoji} combinaram na {line_number} linha"
         return title, ROLETA2_LOSS_SUMMARIES[title]
 
     def _roll_roleta2_outcome(
@@ -927,8 +961,6 @@ class GincanaSlotsMixin:
                     "deja_vu": "A primeira e a terceira coluna repetiram o mesmo resultado",
                     "banana_split": _slots_banana_split_summary(grid),
                     "escorredio": "As bananas fizeram uma coluna escorregar e girar outra vez",
-                    "setes_espalhados": "Vieram vários 7, só que espalhados",
-                    "faltou_um_sete": "Se tivesse mais 1 hein",
                 }
                 titles = {
                     "sete_pecados": "Sete pecados",
@@ -938,11 +970,16 @@ class GincanaSlotsMixin:
                     "deja_vu": "Déjà vu",
                     "banana_split": "Banana split",
                     "escorredio": "Escorredio",
-                    "setes_espalhados": "Setes espalhados",
-                    "faltou_um_sete": "Faltou um sete",
                 }
-                title = titles.get(component_kind, "Roleta 2")
-                summary = summaries.get(component_kind, "Resultado da roleta")
+                if component_kind == "setes_espalhados":
+                    title = random.choice(ROLETA2_SETES_ESPALHADOS_TITLE_VARIANTS)
+                    summary = random.choice(ROLETA2_SETES_ESPALHADOS_SUMMARY_VARIANTS)
+                elif component_kind == "faltou_um_sete":
+                    title = random.choice(ROLETA2_FALTOU_UM_SETE_TITLE_VARIANTS)
+                    summary = random.choice(ROLETA2_FALTOU_UM_SETE_SUMMARY_VARIANTS)
+                else:
+                    title = titles.get(component_kind, "Roleta 2")
+                    summary = summaries.get(component_kind, "Resultado da roleta")
                 if component_kind == "deja_vu":
                     normal_payout, bonus_payout = 0, _slots_deja_vu_payout(deja_vu_index)
             title_emoji, color_theme = _slots_result_presentation(component_kind, grid, title)
@@ -1839,19 +1876,64 @@ class GincanaSlotsMixin:
                 return spin_message, final_grid
 
         stopped: set[int] = set()
-        for column, delay in zip(column_order, ROLETA2_COLUMN_DELAYS):
+        sete_solitario_coalesced = False
+        stop_steps = tuple(zip(column_order, ROLETA2_COLUMN_DELAYS))
+        for stop_index, (column, delay) in enumerate(stop_steps):
             if not await self._wait_game_animation_delay(skip_event, delay):
                 return spin_message, final_grid
             stopped.add(column)
             frame = self._roleta2_display_grid(target_grid, stopped_columns=stopped)
-            view = self._make_roleta2_respin_view(
-                self._render_roleta2_board(frame),
-                balance_text=balance_text,
-                footer_text=footer_text,
-                normal_delta=normal_delta,
-                bonus_delta=bonus_delta,
-                summary=modifier_summary,
+            is_final_stop = stop_index == len(stop_steps) - 1
+            can_coalesce_sete = (
+                is_final_stop
+                and bool(outcome.get("has_sete_solitario"))
+                and not isinstance(preview_raw, list)
             )
+            if can_coalesce_sete:
+                self._roleta2_record_live_respin_effect(
+                    live_effect_state,
+                    "sete_solitario",
+                    bonus_payout=int(outcome.get("sete_solitario_payout", 0) or 0),
+                )
+                total_normal_payout = int(running_normal_payout) + int(
+                    outcome.get("normal_payout", 0) or 0
+                )
+                total_bonus_payout = int(running_bonus_payout) + int(
+                    outcome.get("bonus_payout", 0) or 0
+                )
+                view = self._make_roleta2_effect_view(
+                    title="7 solitário",
+                    title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+                    color_theme=SLOT_SEVEN,
+                    summary=self._roleta2_live_effect_summary(
+                        str(
+                            outcome.get("sete_solitario_summary")
+                            or "As outras colunas vão girar até vir um resultado decente"
+                        ),
+                        live_effect_state,
+                    ),
+                    board=self._render_roleta2_board(frame),
+                    balance_text=self._format_roleta2_projected_balance(
+                        base_normal=base_normal_balance,
+                        base_bonus=base_bonus_balance,
+                        normal_payout=total_normal_payout,
+                        bonus_payout=total_bonus_payout,
+                        temporary_bonus=temporary_bonus,
+                    ),
+                    footer_text=footer_text,
+                    normal_delta=total_normal_payout - int(entry_normal),
+                    bonus_delta=total_bonus_payout - int(entry_bonus),
+                )
+                sete_solitario_coalesced = True
+            else:
+                view = self._make_roleta2_respin_view(
+                    self._render_roleta2_board(frame),
+                    balance_text=balance_text,
+                    footer_text=footer_text,
+                    normal_delta=normal_delta,
+                    bonus_delta=bonus_delta,
+                    summary=modifier_summary,
+                )
             rendered = await self._render_or_replace_game_message(
                 source_message,
                 spin_message,
@@ -1979,45 +2061,50 @@ class GincanaSlotsMixin:
             await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
         if bool(outcome.get("has_sete_solitario")):
-            self._roleta2_record_live_respin_effect(
-                live_effect_state,
-                "sete_solitario",
-                bonus_payout=int(outcome.get("sete_solitario_payout", 0) or 0),
-            )
-            total_normal_payout = int(running_normal_payout) + int(outcome.get("normal_payout", 0) or 0)
-            total_bonus_payout = int(running_bonus_payout) + int(outcome.get("bonus_payout", 0) or 0)
-            sete_view = self._make_roleta2_effect_view(
-                title="7 solitário",
-                title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
-                color_theme=SLOT_SEVEN,
-                summary=self._roleta2_live_effect_summary(
-                    str(
-                        outcome.get("sete_solitario_summary")
-                        or "As outras colunas vão girar até vir um resultado decente"
-                    ),
+            if not sete_solitario_coalesced:
+                self._roleta2_record_live_respin_effect(
                     live_effect_state,
-                ),
-                board=self._render_roleta2_board(final_grid),
-                balance_text=self._format_roleta2_projected_balance(
-                    base_normal=base_normal_balance,
-                    base_bonus=base_bonus_balance,
-                    normal_payout=total_normal_payout,
-                    bonus_payout=total_bonus_payout,
-                    temporary_bonus=temporary_bonus,
-                ),
-                footer_text=footer_text,
-                normal_delta=total_normal_payout - int(entry_normal),
-                bonus_delta=total_bonus_payout - int(entry_bonus),
-            )
-            rendered = await self._render_or_replace_game_message(
-                source_message,
-                spin_message,
-                view=sete_view,
-                final=False,
-                cancel_event=skip_event,
-            )
-            if rendered is not None:
-                spin_message = rendered
+                    "sete_solitario",
+                    bonus_payout=int(outcome.get("sete_solitario_payout", 0) or 0),
+                )
+                total_normal_payout = int(running_normal_payout) + int(
+                    outcome.get("normal_payout", 0) or 0
+                )
+                total_bonus_payout = int(running_bonus_payout) + int(
+                    outcome.get("bonus_payout", 0) or 0
+                )
+                sete_view = self._make_roleta2_effect_view(
+                    title="7 solitário",
+                    title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+                    color_theme=SLOT_SEVEN,
+                    summary=self._roleta2_live_effect_summary(
+                        str(
+                            outcome.get("sete_solitario_summary")
+                            or "As outras colunas vão girar até vir um resultado decente"
+                        ),
+                        live_effect_state,
+                    ),
+                    board=self._render_roleta2_board(final_grid),
+                    balance_text=self._format_roleta2_projected_balance(
+                        base_normal=base_normal_balance,
+                        base_bonus=base_bonus_balance,
+                        normal_payout=total_normal_payout,
+                        bonus_payout=total_bonus_payout,
+                        temporary_bonus=temporary_bonus,
+                    ),
+                    footer_text=footer_text,
+                    normal_delta=total_normal_payout - int(entry_normal),
+                    bonus_delta=total_bonus_payout - int(entry_bonus),
+                )
+                rendered = await self._render_or_replace_game_message(
+                    source_message,
+                    spin_message,
+                    view=sete_view,
+                    final=False,
+                    cancel_event=skip_event,
+                )
+                if rendered is not None:
+                    spin_message = rendered
             await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
         return spin_message, final_grid
@@ -2067,6 +2154,7 @@ class GincanaSlotsMixin:
 
         # O 7 preserva sua coluna inteira. As outras duas voltam a girar juntas,
         # mantendo resultado, saldo e contadores já conquistados visíveis.
+        sete_solitario_coalesced = False
         frame = self._roleta2_display_grid(target_grid, stopped_columns=stopped)
         spinning_view = self._make_roleta2_effect_view(
             title="7 solitário...",
@@ -2089,7 +2177,7 @@ class GincanaSlotsMixin:
         if rendered is not None:
             spin_message = rendered
 
-        for column in reroll_columns:
+        for stop_index, column in enumerate(reroll_columns):
             if not await self._wait_game_animation_delay(
                 skip_event,
                 ROLETA2_COLUMN_DELAYS[column],
@@ -2097,17 +2185,60 @@ class GincanaSlotsMixin:
                 return spin_message, final_grid
             stopped.add(column)
             frame = self._roleta2_display_grid(target_grid, stopped_columns=stopped)
-            stopping_view = self._make_roleta2_effect_view(
-                title="7 solitário...",
-                title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
-                color_theme=SLOT_SEVEN,
-                summary=live_summary,
-                board=self._render_roleta2_board(frame),
-                balance_text=balance_text,
-                footer_text=footer_text,
-                normal_delta=normal_delta,
-                bonus_delta=bonus_delta,
+            is_final_stop = stop_index == len(reroll_columns) - 1
+            can_coalesce_sete = (
+                is_final_stop
+                and bool(outcome.get("has_sete_solitario"))
+                and not isinstance(preview_raw, list)
             )
+            if can_coalesce_sete:
+                self._roleta2_record_live_respin_effect(
+                    live_effect_state,
+                    "sete_solitario",
+                    bonus_payout=int(outcome.get("sete_solitario_payout", 0) or 0),
+                )
+                total_normal_payout = int(running_normal_payout) + int(
+                    outcome.get("normal_payout", 0) or 0
+                )
+                total_bonus_payout = int(running_bonus_payout) + int(
+                    outcome.get("bonus_payout", 0) or 0
+                )
+                stopping_view = self._make_roleta2_effect_view(
+                    title="7 solitário",
+                    title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+                    color_theme=SLOT_SEVEN,
+                    summary=self._roleta2_live_effect_summary(
+                        str(
+                            outcome.get("sete_solitario_summary")
+                            or "As outras colunas vão girar até vir um resultado decente"
+                        ),
+                        live_effect_state,
+                    ),
+                    board=self._render_roleta2_board(frame),
+                    balance_text=self._format_roleta2_projected_balance(
+                        base_normal=base_normal_balance,
+                        base_bonus=base_bonus_balance,
+                        normal_payout=total_normal_payout,
+                        bonus_payout=total_bonus_payout,
+                        temporary_bonus=temporary_bonus,
+                    ),
+                    footer_text=footer_text,
+                    normal_delta=total_normal_payout - int(entry_normal),
+                    bonus_delta=total_bonus_payout - int(entry_bonus),
+                )
+                sete_solitario_coalesced = True
+            else:
+                stopping_view = self._make_roleta2_effect_view(
+                    title="7 solitário...",
+                    title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+                    color_theme=SLOT_SEVEN,
+                    summary=live_summary,
+                    board=self._render_roleta2_board(frame),
+                    balance_text=balance_text,
+                    footer_text=footer_text,
+                    normal_delta=normal_delta,
+                    bonus_delta=bonus_delta,
+                )
             rendered = await self._render_or_replace_game_message(
                 source_message,
                 spin_message,
@@ -2235,45 +2366,50 @@ class GincanaSlotsMixin:
             await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
         if bool(outcome.get("has_sete_solitario")):
-            self._roleta2_record_live_respin_effect(
-                live_effect_state,
-                "sete_solitario",
-                bonus_payout=int(outcome.get("sete_solitario_payout", 0) or 0),
-            )
-            total_normal_payout = int(running_normal_payout) + int(outcome.get("normal_payout", 0) or 0)
-            total_bonus_payout = int(running_bonus_payout) + int(outcome.get("bonus_payout", 0) or 0)
-            sete_view = self._make_roleta2_effect_view(
-                title="7 solitário",
-                title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
-                color_theme=SLOT_SEVEN,
-                summary=self._roleta2_live_effect_summary(
-                    str(
-                        outcome.get("sete_solitario_summary")
-                        or "As outras colunas vão girar até vir um resultado decente"
-                    ),
+            if not sete_solitario_coalesced:
+                self._roleta2_record_live_respin_effect(
                     live_effect_state,
-                ),
-                board=self._render_roleta2_board(final_grid),
-                balance_text=self._format_roleta2_projected_balance(
-                    base_normal=base_normal_balance,
-                    base_bonus=base_bonus_balance,
-                    normal_payout=total_normal_payout,
-                    bonus_payout=total_bonus_payout,
-                    temporary_bonus=temporary_bonus,
-                ),
-                footer_text=footer_text,
-                normal_delta=total_normal_payout - int(entry_normal),
-                bonus_delta=total_bonus_payout - int(entry_bonus),
-            )
-            rendered = await self._render_or_replace_game_message(
-                source_message,
-                spin_message,
-                view=sete_view,
-                final=False,
-                cancel_event=skip_event,
-            )
-            if rendered is not None:
-                spin_message = rendered
+                    "sete_solitario",
+                    bonus_payout=int(outcome.get("sete_solitario_payout", 0) or 0),
+                )
+                total_normal_payout = int(running_normal_payout) + int(
+                    outcome.get("normal_payout", 0) or 0
+                )
+                total_bonus_payout = int(running_bonus_payout) + int(
+                    outcome.get("bonus_payout", 0) or 0
+                )
+                sete_view = self._make_roleta2_effect_view(
+                    title="7 solitário",
+                    title_emoji=SLOT_EMOJIS[SLOT_SEVEN],
+                    color_theme=SLOT_SEVEN,
+                    summary=self._roleta2_live_effect_summary(
+                        str(
+                            outcome.get("sete_solitario_summary")
+                            or "As outras colunas vão girar até vir um resultado decente"
+                        ),
+                        live_effect_state,
+                    ),
+                    board=self._render_roleta2_board(final_grid),
+                    balance_text=self._format_roleta2_projected_balance(
+                        base_normal=base_normal_balance,
+                        base_bonus=base_bonus_balance,
+                        normal_payout=total_normal_payout,
+                        bonus_payout=total_bonus_payout,
+                        temporary_bonus=temporary_bonus,
+                    ),
+                    footer_text=footer_text,
+                    normal_delta=total_normal_payout - int(entry_normal),
+                    bonus_delta=total_bonus_payout - int(entry_bonus),
+                )
+                rendered = await self._render_or_replace_game_message(
+                    source_message,
+                    spin_message,
+                    view=sete_view,
+                    final=False,
+                    cancel_event=skip_event,
+                )
+                if rendered is not None:
+                    spin_message = rendered
             await self._wait_game_animation_delay(skip_event, ROLETA2_EFFECT_READ_DELAY)
 
         return spin_message, final_grid

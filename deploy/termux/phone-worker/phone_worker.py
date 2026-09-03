@@ -101,7 +101,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.1"
+PHONE_WORKER_VERSION = "1.11.2"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1448,6 +1448,43 @@ def _get_json_url(url: str, *, timeout: float = 8.0, max_bytes: int = 1024 * 102
     return status, parsed
 
 
+def _get_local_json_url(url: str, *, timeout: float = 4.0, max_bytes: int = 128 * 1024) -> tuple[int, dict[str, Any]]:
+    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": f"CorePhoneWorkerLocal/{PHONE_WORKER_VERSION}"}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
+            raw = resp.read(max_bytes + 1)
+            status = int(getattr(resp, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(min(max_bytes, 16 * 1024))
+        status = int(exc.code)
+    if len(raw) > max_bytes:
+        return status, {"ok": False, "error": "resposta local grande demais"}
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+        return status, data if isinstance(data, dict) else {"ok": False, "error": "resposta local não é objeto"}
+    except Exception as exc:
+        return status, {"ok": False, "error": f"JSON local inválido: {type(exc).__name__}"}
+
+
+def _post_local_json_url(url: str, payload: dict[str, Any], *, timeout: float = 4.0, max_bytes: int = 128 * 1024) -> tuple[int, dict[str, Any]]:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json", "User-Agent": f"CorePhoneWorkerLocal/{PHONE_WORKER_VERSION}"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
+            raw = resp.read(max_bytes + 1)
+            status = int(getattr(resp, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(min(max_bytes, 16 * 1024))
+        status = int(exc.code)
+    if len(raw) > max_bytes:
+        return status, {"ok": False, "error": "resposta local grande demais"}
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+        return status, data if isinstance(data, dict) else {"ok": False, "error": "resposta local não é objeto"}
+    except Exception as exc:
+        return status, {"ok": False, "error": f"JSON local inválido: {type(exc).__name__}"}
+
+
 def _download_url_to_file(
     url: str,
     target: Path,
@@ -1953,6 +1990,92 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
         print(f"[core-worker-heartbeat] falhou endpoint=/core-worker/heartbeat elapsed_ms={elapsed_ms}: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
     _write_runtime_status(control_plane_alive=True, heartbeat_ok=False, reason="heartbeat_failed")
     return False
+
+
+def _try_auto_enroll_local_apk_once(*, timeout: float = 4.0) -> dict[str, Any]:
+    """Pareia o APK filho via loopback usando o Termux como raiz de confiança."""
+    base_url, _token, parent_worker_id = _core_worker_auth_parts()
+    if not base_url or not parent_worker_id:
+        return {"ok": False, "state": "parent_not_configured"}
+    local_url = "http://127.0.0.1:8767/core-worker/enrollment"
+    try:
+        status, local = _get_local_json_url(local_url, timeout=timeout, max_bytes=128 * 1024)
+    except Exception as exc:
+        return {"ok": False, "state": "apk_not_listening", "error": _short_text(exc, limit=100)}
+    if status != 200 or not local.get("ok"):
+        return {"ok": False, "state": "apk_probe_failed", "status": status}
+    state = str(local.get("state") or "").strip().lower()
+    if state == "paired":
+        return {"ok": True, "state": "paired", "worker_id": local.get("worker_id")}
+    if state != "waiting_parent":
+        return {"ok": False, "state": state or "apk_not_ready"}
+    parent_hint = str(local.get("parent_worker_id") or "").strip()
+    if parent_hint != parent_worker_id:
+        return {"ok": False, "state": "parent_mismatch"}
+    challenge = str(local.get("challenge") or "").strip()
+    install_id = str(local.get("install_id") or "").strip()
+    source_fingerprint = str(local.get("sourceFingerprint") or "").strip().lower()
+    if len(challenge) < 24 or len(install_id) < 8:
+        return {"ok": False, "state": "invalid_local_challenge"}
+    payload = {
+        "parent_worker_id": parent_worker_id,
+        "challenge": challenge,
+        "install_id": install_id,
+        "sourceFingerprint": source_fingerprint,
+        "versionName": str(local.get("versionName") or ""),
+        "versionCode": int(local.get("versionCode") or 0),
+        "runtime_kind": "apk",
+        "protocol": "parent-local-v1",
+    }
+    status, enrolled = _post_core_worker_json("/core-worker/enroll/apk-child", payload, timeout=max(6.0, timeout))
+    if status != 200 or not enrolled.get("ok"):
+        return {"ok": False, "state": "vps_rejected", "status": status, "error": _short_text(enrolled.get("error"), limit=120)}
+    complete_payload = {
+        "challenge": challenge,
+        "worker_id": str(enrolled.get("worker_id") or ""),
+        "parent_worker_id": parent_worker_id,
+        "token": str(enrolled.get("token") or ""),
+        "direct_http_token": str(enrolled.get("direct_http_token") or ""),
+    }
+    complete_status, complete = _post_local_json_url(
+        "http://127.0.0.1:8767/core-worker/enrollment/complete",
+        complete_payload,
+        timeout=timeout,
+    )
+    if complete_status != 200 or not complete.get("ok"):
+        return {"ok": False, "state": "local_delivery_failed", "status": complete_status, "error": _short_text(complete.get("error"), limit=120)}
+    return {"ok": True, "state": "paired", "worker_id": complete.get("worker_id")}
+
+
+def _start_apk_child_auto_enrollment() -> None:
+    if not _heartbeat_configured():
+        return
+    interval = max(5.0, min(120.0, _env_float("CORE_WORKER_APK_ENROLL_INTERVAL_SECONDS", 15.0)))
+
+    def loop() -> None:
+        last_state = ""
+        while True:
+            try:
+                result = _try_auto_enroll_local_apk_once(timeout=4.0)
+                state = str(result.get("state") or "unknown")
+                if state != last_state:
+                    if result.get("ok") and state == "paired":
+                        print(f"[core-worker-apk-enroll] APK filho pareado automaticamente como {result.get('worker_id') or '?'}", flush=True)
+                    elif state not in {"apk_not_listening", "paired"}:
+                        print(f"[core-worker-apk-enroll] estado={state} detalhe={_short_text(result.get('error'), limit=100)}", flush=True)
+                    last_state = state
+                if result.get("ok") and state == "paired":
+                    time.sleep(max(60.0, interval * 4))
+                else:
+                    time.sleep(interval)
+            except Exception as exc:
+                if last_state != "error":
+                    print(f"[core-worker-apk-enroll] falhou: {type(exc).__name__}: {_short_text(exc, limit=100)}", flush=True)
+                    last_state = "error"
+                time.sleep(interval)
+
+    threading.Thread(target=loop, name="core-worker-apk-enrollment", daemon=True).start()
+    print(f"[core-worker-apk-enroll] ativo; intervalo={int(interval)}s; porta_local=8767", flush=True)
 
 
 def _start_core_worker_heartbeat(*, host: str, port: int) -> None:
@@ -9977,6 +10100,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("source_zip_url ausente; publique source-core-worker-app.zip na VPS")
     expected_source_sha = str(payload.get("source_sha256") or "").strip().lower()
     source_fingerprint = str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or expected_source_sha or "").strip()
+    _auth_base, _auth_token, parent_worker_id = _core_worker_auth_parts()
     project_subdir = str(payload.get("project_subdir") or "android/core-worker-app").strip().strip("/")
     if not project_subdir or project_subdir.startswith("/") or ".." in project_subdir.split("/"):
         raise ValueError("project_subdir inválido")
@@ -10206,7 +10330,11 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
         if not gradlew.is_file():
             raise FileNotFoundError("Gradle Wrapper ausente; Gradle global do Termux não é permitido")
         gradlew.chmod(0o755)
-        cmd = [str(gradlew), "assembleDebug", "--no-daemon", "--max-workers=1", "--stacktrace", "--console=plain"]
+        cmd = [
+            str(gradlew), "assembleDebug", "--no-daemon", "--max-workers=1", "--stacktrace", "--console=plain",
+            f"-PCORE_WORKER_PARENT_WORKER_ID={parent_worker_id}",
+            f"-PCORE_WORKER_SOURCE_FINGERPRINT={source_fingerprint}",
+        ]
         if not env.get("ANDROID_HOME"):
             default_sdk = Path.home() / "android-sdk"
             if default_sdk.exists():
@@ -11187,6 +11315,7 @@ def main() -> int:
     # nenhuma porta HTTP local disponível. Inicie-o antes de tentar bind.
     _write_runtime_status(control_plane_alive=True, heartbeat_ok=None, reason="control_plane_starting")
     _start_core_worker_heartbeat(host=args.host, port=args.port)
+    _start_apk_child_auto_enrollment()
     _start_core_worker_jobs(
         host=args.host,
         port=args.port,

@@ -1,5 +1,12 @@
 # Phone Worker Termux
 
+## Pareamento automático do APK filho (1.11.2+)
+
+A partir do Phone Worker `1.11.2`, o Termux pareado vira a raiz de confiança do runtime APK do mesmo aparelho. Não é necessário gerar `CORE-XXXX` para o fluxo normal. O APK 0.8.1+ expõe um challenge efêmero **somente em `127.0.0.1:8767`**; o Termux autentica na VPS com a própria credencial, solicita uma credencial nova e exclusiva para `<worker-id>-apk` e entrega essa credencial ao APK pelo loopback. O token do Termux não é gravado no APK.
+
+O enrollment é idempotente por identidade lógica: reinstalar o APK mantém `<worker-id>-apk` e rotaciona a credencial. Se o APK ainda não estiver aberto, o Termux apenas continua verificando em background; não há job, shell remoto ou código manual necessário. `CORE-XXXX` permanece documentado abaixo apenas como recovery para instalações antigas/excepcionais.
+
+
 ## 1.11.0 — control plane recuperável e updater bootstrap independente
 
 A versão `1.11.0` elimina a dependência estrutural entre o agent Termux e a porta HTTP local. Heartbeat, polling de jobs, envio de resultados e pull de atualização iniciam antes do `ThreadingHTTPServer`; `8766` é apenas a porta direta principal do Termux, `8768` é recuperação explícita de conflito e o agent pode operar em `control-plane-only`. A porta `8767` permanece reservada ao runtime APK durante bootstrap compartilhado.

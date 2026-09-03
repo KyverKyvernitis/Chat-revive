@@ -148,15 +148,22 @@ final class CoreWorkerDirectHttpServer {
              BufferedInputStream input = new BufferedInputStream(client.getInputStream());
              BufferedOutputStream output = new BufferedOutputStream(client.getOutputStream())) {
             HttpRequest request = readRequest(input);
-            HttpResponse response = route(request);
+            boolean loopback = client.getInetAddress() != null && client.getInetAddress().isLoopbackAddress();
+            HttpResponse response = route(request, loopback);
             writeResponse(output, response);
         } catch (Throwable ignored) {
             // O cliente pode ter fechado a conexão; isso não derruba o serviço.
         }
     }
 
-    private HttpResponse route(HttpRequest request) {
+    private HttpResponse route(HttpRequest request, boolean loopback) {
         try {
+            if (loopback && "GET".equals(request.method) && "/core-worker/enrollment".equals(request.path)) {
+                return json(200, CoreWorkerAutoEnrollment.status(context));
+            }
+            if (loopback && "POST".equals(request.method) && "/core-worker/enrollment/complete".equals(request.path)) {
+                return json(200, CoreWorkerAutoEnrollment.complete(context, request.jsonBody()));
+            }
             if (!authorized(request.headers)) {
                 return json(401, new JSONObject().put("ok", false).put("error", "token inválido ou ausente"));
             }
@@ -202,6 +209,8 @@ final class CoreWorkerDirectHttpServer {
                 return new HttpResponse(200, headers, result.data);
             }
             return json(404, new JSONObject().put("ok", false).put("error", "rota não encontrada"));
+        } catch (SecurityException error) {
+            return json(403, errorJson(error));
         } catch (IllegalArgumentException error) {
             return json(400, errorJson(error));
         } catch (Throwable error) {
@@ -366,6 +375,7 @@ final class CoreWorkerDirectHttpServer {
         if (status == 200) return "OK";
         if (status == 400) return "Bad Request";
         if (status == 401) return "Unauthorized";
+        if (status == 403) return "Forbidden";
         if (status == 404) return "Not Found";
         if (status == 413) return "Payload Too Large";
         if (status == 422) return "Unprocessable Entity";

@@ -450,6 +450,8 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "runtime_kind": _short_text(record.get("runtime_kind"), limit=24),
         "parent_worker_id": _short_text(record.get("parent_worker_id"), limit=64),
         "physical_worker_id": _short_text(record.get("physical_worker_id") or record.get("parent_worker_id") or record.get("worker_id"), limit=64),
+        "auto_enrollment": bool(record.get("auto_enrollment")),
+        "auto_enrollment_protocol": _short_text(record.get("auto_enrollment_protocol"), limit=32),
         "runtime_mode": runtime_mode,
         "runtime": _safe_dict(runtime, max_items=16),
         "endpoint": _short_text(record.get("endpoint"), limit=160),
@@ -824,6 +826,92 @@ class CoreWorkersRegistry:
                 data, canonical_worker_id=requested, token=token, payload=payload,
             )
         return requested
+
+    def enroll_apk_child_from_parent(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        parent_token: str,
+        remote_addr: str = "",
+    ) -> dict[str, Any]:
+        """Emite uma credencial exclusiva para o runtime APK filho.
+
+        A chamada só é aceita com a credencial do Termux pai. O token do pai
+        nunca é reutilizado pelo APK; cada enrollment/reeinstalação rotaciona a
+        credencial de `<parent>-apk` sem criar IDs `-apk-2`, `-apk-3`, etc.
+        """
+        parent_id = _safe_worker_id(payload.get("parent_worker_id") or payload.get("worker_id"))
+        challenge = _short_text(payload.get("challenge"), limit=160)
+        install_id = _short_text(payload.get("install_id"), limit=160)
+        source_fingerprint = _short_text(payload.get("sourceFingerprint") or payload.get("source_fingerprint"), limit=64).lower()
+        version_name = _short_text(payload.get("versionName") or payload.get("version_name"), limit=32)
+        try:
+            version_code = int(payload.get("versionCode") or payload.get("version_code") or 0)
+        except Exception:
+            version_code = 0
+        if not parent_id or len(challenge) < 24 or len(install_id) < 8:
+            raise CoreWorkerRegistryError("enrollment APK incompleto", status=400)
+        if source_fingerprint and not re.fullmatch(r"[0-9a-f]{64}", source_fingerprint):
+            raise CoreWorkerRegistryError("source fingerprint do APK inválido", status=400)
+        ts = _now()
+        child_token = secrets.token_urlsafe(32)
+        install_hash = hashlib.sha256(install_id.encode("utf-8")).hexdigest()
+        challenge_hash = hashlib.sha256(challenge.encode("utf-8")).hexdigest()
+        with self._lock:
+            data = self._load_unlocked()
+            parent_id, parent = self._authenticate_worker_unlocked(data, worker_id=parent_id, token=parent_token)
+            if not _is_termux_runtime_record(parent):
+                raise CoreWorkerRegistryError("enrollment automático exige Termux pai autenticado", status=409)
+            workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+            child_id = _apk_runtime_worker_id(parent_id)
+            existing = workers.get(child_id)
+            record = dict(existing) if isinstance(existing, Mapping) else {
+                "worker_id": child_id,
+                "registered_at": ts,
+                "paired_by_id": int(parent.get("paired_by_id") or 0),
+                "paired_by_name": _short_text(parent.get("paired_by_name"), limit=80),
+            }
+            base_name = _short_text(parent.get("name"), limit=54, default="Core Worker")
+            record.update({
+                "worker_id": child_id,
+                "name": _short_text(f"{base_name} · APK", limit=64),
+                "enabled": True,
+                "token_hash": _hash_secret(child_token),
+                "updated_at": ts,
+                "last_heartbeat_at": 0.0,
+                "roles": ["apk-worker", "diagnostics"],
+                "capabilities": ["apk-worker", "diagnostics"],
+                "supported_tasks": [],
+                "source": "core-worker-apk-auto-child",
+                "platform": "android",
+                "runtime_kind": "apk",
+                "parent_worker_id": parent_id,
+                "physical_worker_id": parent_id,
+                "bootstrap_shared_token": False,
+                "auto_enrollment": True,
+                "auto_enrollment_protocol": "parent-local-v1",
+                "auto_enrollment_install_hash": install_hash,
+                "auto_enrollment_challenge_hash": challenge_hash,
+                "auto_enrollment_version_name": version_name,
+                "auto_enrollment_version_code": version_code,
+                "auto_enrollment_source_fingerprint": source_fingerprint,
+                "auto_enrollment_at": ts,
+                "remote_addr": _short_text(remote_addr, limit=64),
+            })
+            workers[child_id] = record
+            data["workers"] = workers
+            self._save_unlocked(data)
+            public = _compact_worker_public(record, now=ts)
+        return {
+            "ok": True,
+            "worker_id": child_id,
+            "parent_worker_id": parent_id,
+            "physical_worker_id": parent_id,
+            "token": child_token,
+            "direct_http_token": child_token,
+            "worker": public,
+            "credential_rotated": True,
+        }
 
     def _cleanup_pairings_unlocked(self, data: dict[str, Any], *, now: float | None = None) -> int:
         ts = _now() if now is None else float(now)
@@ -2090,6 +2178,17 @@ def core_worker_authenticate_http(headers: Mapping[str, Any], payload: Mapping[s
                 raise
             get_core_workers_registry().ensure_direct_worker(payload, token=token, remote_addr=remote_addr)
             result = get_core_workers_registry().authenticate_worker(str(worker_id or ""), token=token)
+        return 200, result
+    except CoreWorkerRegistryError as exc:
+        return exc.status, {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return 500, {"ok": False, "error": f"falha interna: {type(exc).__name__}"}
+
+
+def enroll_core_worker_apk_child_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
+    try:
+        token = _bearer_token(headers)
+        result = get_core_workers_registry().enroll_apk_child_from_parent(payload, parent_token=token, remote_addr=remote_addr)
         return 200, result
     except CoreWorkerRegistryError as exc:
         return exc.status, {"ok": False, "error": str(exc)}

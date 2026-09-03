@@ -888,9 +888,13 @@ def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any
         "GRADLE_OPTS": f"-Xmx{xmx_mb}m -Xms64m -XX:MaxMetaspaceSize={metaspace_mb}m -Dfile.encoding=UTF-8 -Dorg.gradle.daemon=false -Dorg.gradle.vfs.watch=false -Djdk.lang.Process.launchMechanism=FORK",
         "JAVA_TOOL_OPTIONS": "-Djdk.lang.Process.launchMechanism=FORK",
     })
+    parent_worker_id = str(payload.get("physicalWorkerId") or payload.get("parentWorkerId") or payload.get("selectedBuilderWorkerId") or "").strip()
+    source_fingerprint = str(payload.get("sourceFingerprint") or payload.get("source_sha256") or "").strip()
     command = [
         "/system/bin/sh", paths["gradle"], "assembleDebug",
         "--no-daemon", "--max-workers=1", "--stacktrace", "--console=plain",
+        f"-PCORE_WORKER_PARENT_WORKER_ID={parent_worker_id}",
+        f"-PCORE_WORKER_SOURCE_FINGERPRINT={source_fingerprint}",
     ]
 
     timeout = int(payload.get("timeout_seconds") or payload.get("timeoutSeconds") or DEFAULT_TIMEOUT_SECONDS)

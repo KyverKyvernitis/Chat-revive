@@ -1043,6 +1043,7 @@ def _select_apk_builder(
                 "worker": worker,
                 "worker_id": worker_id,
                 "runtime_kind": "apk",
+                "physical_worker_id": str(worker.get("physical_worker_id") or worker.get("parent_worker_id") or worker_id),
                 "toolchain_fingerprint": fingerprint,
                 "app_version_code": app_code,
                 "rank": (float(worker.get("last_seen") or 0), worker_id),
@@ -1059,6 +1060,7 @@ def _select_apk_builder(
             "worker": worker,
             "worker_id": worker_id,
             "runtime_kind": "termux",
+            "physical_worker_id": worker_id,
             "toolchain_fingerprint": _worker_toolchain_fingerprint(worker),
             "agent_source_hash": _worker_source_hash(worker),
             "rank": (float(worker.get("last_seen") or 0), worker_id),
@@ -2153,6 +2155,7 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
     selected_worker_id = str(builder.get("worker_id") or "")
     selected_runtime_kind = str(builder.get("runtime_kind") or "")
     selected_toolchain_fingerprint = str(builder.get("toolchain_fingerprint") or "")
+    selected_physical_worker_id = str(builder.get("physical_worker_id") or selected_worker_id)
     desired_source = _publish_desired_apk_source(
         version_name=version_name,
         version_code=version_code,
@@ -2169,6 +2172,8 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         "selectedBuilderWorkerId": selected_worker_id,
         "selectedBuilderRuntimeKind": selected_runtime_kind,
         "toolchainFingerprint": selected_toolchain_fingerprint,
+        "physicalWorkerId": selected_physical_worker_id,
+        "parentWorkerId": selected_physical_worker_id,
     })
     item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
     item.update({

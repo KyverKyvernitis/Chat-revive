@@ -50,6 +50,21 @@ final class CoreWorkerRuntimeIdentity {
         editor.putBoolean("direct_http_port_migrated_v072", true).apply();
     }
 
+    static void markChildApkPair(SharedPreferences prefs, String parentWorkerId) {
+        if (prefs == null) return;
+        String parent = safeId(parentWorkerId);
+        String child = apkChildId(parent);
+        prefs.edit()
+                .putString("pairing_owner", "parent-child")
+                .putString("runtime_worker_id", child)
+                .putString("physical_worker_id", parent)
+                .putString("parent_worker_id", parent)
+                .putBoolean("bootstrap_shared_worker_identity", true)
+                .putInt("direct_http_port", APK_BOOTSTRAP_PORT)
+                .putBoolean("direct_http_port_migrated_v072", true)
+                .apply();
+    }
+
     static void markDedicatedApkPair(SharedPreferences prefs, String workerId) {
         if (prefs == null) return;
         String safe = safeId(workerId);
@@ -125,8 +140,9 @@ final class CoreWorkerRuntimeIdentity {
         SharedPreferences prefs = prefs(context);
         String canonical = canonicalWorkerId(prefs);
         String runtime = runtimeWorkerId(prefs);
-        int fallback = !canonical.isEmpty() && !runtime.isEmpty() && !canonical.equals(runtime)
-                ? APK_BOOTSTRAP_PORT : TERMUX_PORT;
+        int fallback = canonical.isEmpty()
+                ? APK_BOOTSTRAP_PORT
+                : (!runtime.isEmpty() && !canonical.equals(runtime) ? APK_BOOTSTRAP_PORT : TERMUX_PORT);
         int value = prefs.getInt("direct_http_port", fallback);
         return value >= 1024 && value <= 65535 ? value : fallback;
     }

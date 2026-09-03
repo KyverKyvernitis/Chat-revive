@@ -11,6 +11,8 @@ def coreWorkerEsc = { String value ->
 }
 def coreWorkerVpsUrl = (project.findProperty("CORE_WORKER_VPS_URL") ?: System.getenv("CORE_WORKER_VPS_URL") ?: "").toString().trim()
 def coreWorkerVpsLabel = (project.findProperty("CORE_WORKER_VPS_LABEL") ?: System.getenv("CORE_WORKER_VPS_LABEL") ?: (coreWorkerVpsUrl ? "VPS privada configurada no build" : "VPS não configurada no build")).toString().trim()
+def coreWorkerParentWorkerId = (project.findProperty("CORE_WORKER_PARENT_WORKER_ID") ?: System.getenv("CORE_WORKER_PARENT_WORKER_ID") ?: "").toString().trim()
+def coreWorkerSourceFingerprint = (project.findProperty("CORE_WORKER_SOURCE_FINGERPRINT") ?: System.getenv("CORE_WORKER_SOURCE_FINGERPRINT") ?: "").toString().trim()
 
 def coreWorkerSigningProps = new Properties()
 def coreWorkerSigningFile = file("${projectDir}/core-worker-signing.properties")
@@ -63,11 +65,13 @@ android {
         // apps target 29+, então esta variante operacional permanece em target 28.
         // compileSdk continua moderno e a distribuição não ocorre pelo Google Play.
         targetSdk coreWorkerSelfBuilderTargetSdk
-        versionCode 127
-        versionName "0.8.0"
+        versionCode 128
+        versionName "0.8.1"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
+        buildConfigField "String", "CORE_WORKER_PARENT_WORKER_ID", "\"${coreWorkerEsc(coreWorkerParentWorkerId)}\""
+        buildConfigField "String", "CORE_WORKER_SOURCE_FINGERPRINT", "\"${coreWorkerEsc(coreWorkerSourceFingerprint)}\""
         buildConfigField "boolean", "CORE_WORKER_FCM_ENABLED", "true"
 
         // Chaquopy embute o CPython no APK. Mantemos só arm64-v8a para reduzir peso no

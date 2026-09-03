@@ -2987,7 +2987,7 @@ class WorkersPanelView(discord.ui.LayoutView):
     def _panel_action_specs_for_selected(self) -> list[dict[str, Any]]:
         selected_worker = self._selected_worker()
         specs: list[dict[str, Any]] = [
-            {"label": "Gerar código", "value": "_pairing_modal", "description": "Parear novo celular", "emoji": "🔐", "panel_action": "pair", "category": "add"},
+            {"label": "Recovery de pareamento", "value": "_pairing_modal", "description": "Código manual excepcional", "emoji": "🔐", "panel_action": "pair", "category": "organize"},
             {"label": "Como adicionar", "value": "_onboarding_guide", "description": "Guia simples", "emoji": "📲", "panel_action": "onboarding", "category": "add"},
             {"label": "Testar troca automática", "value": "_failover_test", "description": "Precisa de 2+ workers", "emoji": "🧪", "panel_action": "failover", "category": "add"},
             {"label": "Limpar jobs", "value": "_cleanup_jobs", "description": "Remove travados/antigos", "emoji": "🧹", "panel_action": "cleanup", "category": "organize"},
@@ -3201,9 +3201,6 @@ class WorkersPanelView(discord.ui.LayoutView):
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
         refresh.callback = self._refresh_panel
 
-        pairing = discord.ui.Button(label="Parear celular", emoji="🔐", style=discord.ButtonStyle.success)
-        pairing.callback = self._create_pairing
-
         wake = discord.ui.Button(
             label="Acordar phone-worker",
             emoji="📡",
@@ -3223,9 +3220,9 @@ class WorkersPanelView(discord.ui.LayoutView):
                 discord.ui.ActionRow(worker_select),
                 discord.ui.ActionRow(action_select),
             ])
-            components.append(discord.ui.ActionRow(refresh, pairing))
+            components.append(discord.ui.ActionRow(refresh))
         else:
-            components.append(discord.ui.ActionRow(refresh, pairing))
+            components.append(discord.ui.ActionRow(refresh))
         if not CORE_WORKER_APK_REPLACES_TERMUX and not _snapshot_has_online_worker(snapshot):
             components.append(discord.ui.ActionRow(wake))
         container = discord.ui.Container(*components, accent_color=snapshot.accent)
@@ -3560,16 +3557,13 @@ class WorkersPanelView(discord.ui.LayoutView):
             default_profile = _normalize_worker_profile(profile)
             profile_roles = ", ".join(_role_label(role) for role in WORKER_ROLE_PROFILES.get(default_profile, ()))
             msg = (
-                "## 🔐 Código para adicionar celular\n"
+                "## 🔐 Recovery manual de pareamento\n"
                 f"**Código:** `{code}` · expira em `{expires}`\n"
                 f"**Nome:** `{default_name}` · **perfil:** `{default_profile}`\n\n"
-                "**No APK Core Worker:**\n"
-                "1. Abra **Conexão**.\n"
-                f"2. Confirme a VPS `{base_url}`.\n"
-                f"3. Informe o código `{code}` e o nome `{default_name}`.\n"
-                "4. Toque em **Conectar** e volte a este painel.\n\n"
+                "O fluxo normal do APK 0.8.1+ é automático e não usa código. Use este recovery apenas se o enrollment parent → child não conseguir concluir.\n\n"
+                "**No APK Core Worker:** abra a área de recovery manual, informe o código e confirme a VPS.\n\n"
                 f"Funções desse perfil: `{_shorten(profile_roles, limit=220)}`\n"
-                "-# O APK assume heartbeat, fila e execução; Termux não é necessário."
+                "-# O token do Termux não é compartilhado com o APK no fluxo automático."
             )
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"código de pareamento gerado: {code}")
             self._ensure_selected_worker()
@@ -3587,19 +3581,15 @@ class WorkersPanelView(discord.ui.LayoutView):
         base_url = _public_base_url()
         msg = (
             "## 📲 Como adicionar um celular\n"
-            "O Core Worker funciona diretamente pelo APK.\n\n"
-            "**Antes de começar:**\n"
-            "1. Instale o APK privado no celular.\n"
-            "2. Conecte o Tailscale na mesma rede da VPS.\n"
-            "3. Permita notificações, inicialização automática e bateria sem restrições.\n\n"
-            "**Depois, neste painel:**\n"
-            "1. Toque em **Adicionar celular**.\n"
-            "2. Escolha nome e perfil.\n"
-            "3. Digite o código na tela **Conexão** do APK.\n"
-            "4. Toque em **Atualizar** após o APK confirmar a conexão.\n\n"
+            "O Core Worker 0.8.1+ pareia automaticamente com o Termux já autenticado do mesmo aparelho.\n\n"
+            "**Fluxo normal:**\n"
+            "1. Mantenha o phone-worker Termux online e atualizado.\n"
+            "2. Instale/abra o APK privado publicado por esse worker.\n"
+            "3. O APK abre o enrollment local em 8767 e o Termux cria automaticamente `<worker>-apk`.\n"
+            "4. A credencial filha é entregue pelo loopback e o toolchain começa a sincronizar sozinho.\n\n"
             f"VPS detectada: `{base_url}`\n"
-            "Perfis: `leve`, `midia`/Normal, `completo`, `turbo` e `bedrock`.\n"
-            "-# O APK não é compilado pela VPS e não depende do Termux."
+            "O código manual existe somente em **Recovery de pareamento**.\n"
+            "-# Termux continua como fallback e nunca entrega o próprio token ao APK."
         )
         await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 

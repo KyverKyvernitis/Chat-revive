@@ -4114,6 +4114,35 @@ def _attach_core_worker_apk_http_token(status: int, body: object, payload: objec
         body["direct_http_token"] = token
 
 
+@app.post("/core-worker/enroll/apk-child")
+def core_worker_enroll_apk_child():
+    from utility.commands.workers_registry import enroll_core_worker_apk_child_http
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    parent_id = str(payload.get("parent_worker_id") or payload.get("worker_id") or "").strip()
+    desired = _load_core_worker_desired_source()
+    if desired and not desired.get("_invalid"):
+        expected_parent = str(desired.get("selectedBuilderWorkerId") or "").strip()
+        allowed_builders = {parent_id, (parent_id + "-apk") if parent_id else ""}
+        if expected_parent and expected_parent not in allowed_builders:
+            return jsonify({"ok": False, "error": "parent não corresponde ao builder selecionado do APK"}), 409
+        expected_fp = str(desired.get("sourceFingerprint") or "").strip().lower()
+        actual_fp = str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or "").strip().lower()
+        if expected_fp and actual_fp != expected_fp:
+            return jsonify({"ok": False, "error": "APK pertence a uma source diferente do target atual"}), 409
+        expected_code = int(desired.get("versionCode") or 0)
+        try:
+            actual_code = int(payload.get("versionCode") or payload.get("version_code") or 0)
+        except Exception:
+            actual_code = 0
+        if expected_code and actual_code != expected_code:
+            return jsonify({"ok": False, "error": "versionCode do APK não corresponde ao target atual"}), 409
+    status, body = enroll_core_worker_apk_child_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    return jsonify(body), status
+
+
 @app.post("/core-worker/pair")
 def core_worker_pair():
     from utility.commands.workers_registry import redeem_core_worker_pairing_http

@@ -188,6 +188,20 @@ public class MainActivity extends Activity {
             mainHandler.postDelayed(this, 1000L);
         }
     };
+    private final Runnable autoEnrollmentUiRefreshRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (activityDestroyed || !CoreWorkerAutoEnrollment.supported()) return;
+            updatePairingUi();
+            if (hasPairing()) {
+                nativeWorkerOnline = true;
+                nativeWorkerState = "pareado automaticamente ao Termux pai";
+                showLocalAgentText();
+                return;
+            }
+            mainHandler.postDelayed(this, 1500L);
+        }
+    };
     private volatile String lastTerminalStatusLine = "";
     private volatile long lastTerminalStatusAt = 0L;
     private boolean suppressBedrockSwitchEvents = false;
@@ -357,6 +371,10 @@ public class MainActivity extends Activity {
             startupLog("completeStartup:ui-ready");
             refreshLocalStatus("Interface pronta. Runtime, rootfs e sincronizações vão carregar em segundo plano.");
             scheduleActivityCreateStartupTasks();
+            if (CoreWorkerAutoEnrollment.supported()) {
+                mainHandler.removeCallbacks(autoEnrollmentUiRefreshRunnable);
+                mainHandler.postDelayed(autoEnrollmentUiRefreshRunnable, 500L);
+            }
         } catch (Throwable exc) {
             fullStartupDone = false;
             startupFallbackVisible = true;
@@ -443,6 +461,7 @@ public class MainActivity extends Activity {
         bedrockProbeRunning.set(false);
         permissionGateDelayedRecheckScheduled.set(false);
         mainHandler.removeCallbacks(bedrockFullTerminalRefreshRunnable);
+        mainHandler.removeCallbacks(autoEnrollmentUiRefreshRunnable);
         try {
             if (bedrockFullTerminalDialog != null && bedrockFullTerminalDialog.isShowing()) {
                 bedrockFullTerminalDialog.dismiss();
@@ -1971,22 +1990,23 @@ public class MainActivity extends Activity {
             if (connectTitleText != null) {
                 connectTitleText.setText("Conexão");
             }
+            boolean autoEnrollment = !paired && CoreWorkerAutoEnrollment.supported();
             if (connectHintText != null) {
                 connectHintText.setText(paired
                         ? "Vínculo ativo. Nenhum código necessário."
-                        : "Use o código do painel workers.");
+                        : (autoEnrollment ? "Pareamento automático com o Termux deste aparelho." : "Recovery manual por código disponível."));
             }
             if (pairingStatusText != null) {
                 String profile = appliedProfile();
                 pairingStatusText.setText(paired
                         ? "VPS principal conectada · perfil " + profileLabel(profile)
-                        : "Ainda não conectado. Gere um código no Discord.");
+                        : (autoEnrollment ? "Vinculando automaticamente ao worker físico…" : "Ainda não conectado. Use recovery manual se necessário."));
             }
             if (rePairButton != null) {
                 rePairButton.setVisibility(paired ? View.VISIBLE : View.GONE);
             }
             if (pairingForm != null) {
-                pairingForm.setVisibility(paired ? View.GONE : View.VISIBLE);
+                pairingForm.setVisibility(paired || autoEnrollment ? View.GONE : View.VISIBLE);
             }
         });
     }
@@ -3691,6 +3711,7 @@ public class MainActivity extends Activity {
             dialog.setContentView(root);
             dialog.setOnDismissListener(d -> {
                 mainHandler.removeCallbacks(bedrockFullTerminalRefreshRunnable);
+        mainHandler.removeCallbacks(autoEnrollmentUiRefreshRunnable);
                 bedrockFullTerminalText = null;
                 bedrockFullTerminalDialog = null;
             });
@@ -3701,6 +3722,7 @@ public class MainActivity extends Activity {
                 window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(BG));
             }
             mainHandler.removeCallbacks(bedrockFullTerminalRefreshRunnable);
+        mainHandler.removeCallbacks(autoEnrollmentUiRefreshRunnable);
             mainHandler.post(bedrockFullTerminalRefreshRunnable);
         });
     }
@@ -4900,9 +4922,12 @@ public class MainActivity extends Activity {
             boolean paired = hasPairing()
                     || prefs.getBoolean("paired_via_native_apk", false)
                     || !prefs.getString("worker_token", "").trim().isEmpty();
-            if (!paired) return;
-            prefs.edit().putBoolean("agent_enabled", true).apply();
-            CoreWorkerRuntimeService.requestStart(this, reason == null ? "activity" : reason);
+            if (!paired && !CoreWorkerAutoEnrollment.supported()) return;
+            prefs.edit()
+                    .putBoolean("agent_enabled", true)
+                    .putString("auto_enrollment_state", paired ? "paired" : "waiting_parent")
+                    .apply();
+            CoreWorkerRuntimeService.requestStart(this, paired ? (reason == null ? "activity" : reason) : "auto_enrollment_bootstrap");
         } catch (Throwable exc) {
             appStatusLastError = shortThrowable(exc);
         }
@@ -6342,7 +6367,11 @@ public class MainActivity extends Activity {
                     + profileLabel(profile) + " · Push " + fcmCompactLabel()
                     + " · " + internal + " · " + emptyFallback(nativeWorkerState, "worker direto");
         }
-        return (internalRuntimeOnline ? "✅ Runtime APK preparado" : "⚠️ Aguardando pareamento")
+        if (CoreWorkerAutoEnrollment.supported()) {
+            return (internalRuntimeOnline ? "✅ Runtime APK preparado" : "⏳ Vinculando automaticamente")
+                    + "\n" + internal + " · Termux autenticado fará o vínculo sem código.";
+        }
+        return (internalRuntimeOnline ? "✅ Runtime APK preparado" : "⚠️ Recovery de pareamento pendente")
                 + "\n" + internal + " · conexão direta com a VPS.";
     }
 

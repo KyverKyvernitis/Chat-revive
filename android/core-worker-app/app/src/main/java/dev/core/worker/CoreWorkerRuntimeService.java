@@ -239,11 +239,6 @@ public class CoreWorkerRuntimeService extends Service {
         try {
             if (nativeTtsManager == null) startNativeTtsBridge();
             if (directHttpServer != null && directHttpServer.isRunning()) return;
-            if (prefs().getString("worker_token", "").trim().isEmpty()) {
-                prefs().edit().putBoolean("direct_http_active", false)
-                        .putString("direct_http_error", "aguardando pareamento direto").apply();
-                return;
-            }
             directHttpServer = new CoreWorkerDirectHttpServer(getApplicationContext(), prefs(), nativeTtsManager);
             directHttpServer.start();
         } catch (Throwable error) {
@@ -745,6 +740,9 @@ public class CoreWorkerRuntimeService extends Service {
         status.put("termux_bootstrap_builder_supported", true);
         status.put("parent_worker_id", CoreWorkerRuntimeIdentity.parentWorkerId(getApplicationContext()));
         status.put("runtime_worker_id", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
+        status.put("auto_enrollment_state", prefs().getString("auto_enrollment_state", CoreWorkerAutoEnrollment.supported() ? "waiting_parent" : "disabled"));
+        status.put("auto_enrolled_apk", prefs().getBoolean("auto_enrolled_apk", false));
+        status.put("source_fingerprint", BuildConfig.CORE_WORKER_SOURCE_FINGERPRINT);
         status.put("apk_self_builder", CoreWorkerApkBuildManager.preflight(getApplicationContext(), false));
         status.put("capabilities", capabilities);
         status.put("supported_tasks", supported);
@@ -772,6 +770,7 @@ public class CoreWorkerRuntimeService extends Service {
         payload.put("appVersionCode", BuildConfig.VERSION_CODE);
         payload.put("versionName", BuildConfig.VERSION_NAME);
         payload.put("versionCode", BuildConfig.VERSION_CODE);
+        payload.put("sourceFingerprint", BuildConfig.CORE_WORKER_SOURCE_FINGERPRINT);
         payload.put("workerId", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
         payload.put("installId", installId());
         payload.put("deviceName", prefs().getString("device_name", ""));

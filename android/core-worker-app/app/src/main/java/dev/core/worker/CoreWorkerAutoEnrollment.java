@@ -24,8 +24,18 @@ final class CoreWorkerAutoEnrollment {
     private CoreWorkerAutoEnrollment() { }
 
     static boolean supported() {
+        // O APK só precisa saber a qual worker físico pertence e qual source o
+        // produziu. A URL da VPS é entregue pelo Termux autenticado no momento
+        // do enrollment, evitando que uma propriedade de build ausente derrube
+        // o bootstrap automático.
         return !safe(BuildConfig.CORE_WORKER_PARENT_WORKER_ID).isEmpty()
-                && !safe(BuildConfig.CORE_WORKER_VPS_URL).isEmpty();
+                && !safe(BuildConfig.CORE_WORKER_SOURCE_FINGERPRINT).isEmpty();
+    }
+
+    static String unsupportedReason() {
+        if (safe(BuildConfig.CORE_WORKER_PARENT_WORKER_ID).isEmpty()) return "parent_hint ausente no APK";
+        if (safe(BuildConfig.CORE_WORKER_SOURCE_FINGERPRINT).isEmpty()) return "sourceFingerprint ausente no APK";
+        return "";
     }
 
     static JSONObject status(Context context) throws Exception {
@@ -51,7 +61,7 @@ final class CoreWorkerAutoEnrollment {
         }
         if (!supported()) {
             out.put("state", "manual_recovery_available");
-            out.put("error", "APK sem parent_hint/VPS embutidos");
+            out.put("error", unsupportedReason());
             return out;
         }
         String challenge = challenge(prefs);
@@ -83,8 +93,12 @@ final class CoreWorkerAutoEnrollment {
         String token = safe(payload.optString("token", ""));
         if (token.length() < 24) throw new SecurityException("credencial filha inválida");
         String directHttpToken = safe(payload.optString("direct_http_token", ""));
-        String serverUrl = safe(BuildConfig.CORE_WORKER_VPS_URL);
-        if (serverUrl.isEmpty()) throw new IllegalStateException("VPS embutida ausente");
+        String serverUrl = safe(payload.optString("server_url", ""));
+        if (serverUrl.isEmpty()) serverUrl = safe(BuildConfig.CORE_WORKER_VPS_URL);
+        if (serverUrl.isEmpty()) throw new IllegalStateException("VPS ausente na entrega do parent");
+        if (!(serverUrl.startsWith("http://") || serverUrl.startsWith("https://"))) {
+            throw new SecurityException("URL da VPS inválida");
+        }
 
         prefs.edit()
                 .putString("server_url", serverUrl)

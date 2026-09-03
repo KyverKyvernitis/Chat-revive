@@ -3560,7 +3560,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 "## 🔐 Recovery manual de pareamento\n"
                 f"**Código:** `{code}` · expira em `{expires}`\n"
                 f"**Nome:** `{default_name}` · **perfil:** `{default_profile}`\n\n"
-                "O fluxo normal do APK 0.8.1+ é automático e não usa código. Use este recovery apenas se o enrollment parent → child não conseguir concluir.\n\n"
+                "O fluxo normal do APK 0.8.2+ é automático e não usa código. Use este recovery apenas se o enrollment parent → child não conseguir concluir.\n\n"
                 "**No APK Core Worker:** abra a área de recovery manual, informe o código e confirme a VPS.\n\n"
                 f"Funções desse perfil: `{_shorten(profile_roles, limit=220)}`\n"
                 "-# O token do Termux não é compartilhado com o APK no fluxo automático."
@@ -3581,7 +3581,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         base_url = _public_base_url()
         msg = (
             "## 📲 Como adicionar um celular\n"
-            "O Core Worker 0.8.1+ pareia automaticamente com o Termux já autenticado do mesmo aparelho.\n\n"
+            "O Core Worker 0.8.2+ pareia automaticamente com o Termux já autenticado do mesmo aparelho.\n\n"
             "**Fluxo normal:**\n"
             "1. Mantenha o phone-worker Termux online e atualizado.\n"
             "2. Instale/abra o APK privado publicado por esse worker.\n"

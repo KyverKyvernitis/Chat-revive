@@ -50,7 +50,7 @@ def test_parent_enrollment_issues_distinct_child_token_and_reuses_child_id(tmp_p
         "challenge": "x" * 43,
         "install_id": "install-11111111",
         "sourceFingerprint": "a" * 64,
-        "versionName": "0.8.1",
+        "versionName": "0.8.2",
         "versionCode": 128,
     }
     first = registry.enroll_apk_child_from_parent(payload, parent_token=parent_token)
@@ -100,7 +100,7 @@ def test_termux_auto_enrollment_delivers_child_credential_only_over_loopback(mon
         "challenge": "z" * 43,
         "install_id": "install-abcdef12",
         "sourceFingerprint": "b" * 64,
-        "versionName": "0.8.1",
+        "versionName": "0.8.2",
         "versionCode": 128,
     }))
     seen = {}
@@ -121,6 +121,7 @@ def test_termux_auto_enrollment_delivers_child_credential_only_over_loopback(mon
     assert "parent-token" not in json.dumps(seen)
     assert seen["local_url"].startswith("http://127.0.0.1:8767/")
     assert seen["local_payload"]["token"].startswith("child-token-")
+    assert seen["local_payload"]["server_url"] == "https://vps.invalid"
 
 
 def test_android_enrollment_endpoint_is_loopback_only_and_pre_auth():
@@ -171,9 +172,9 @@ def test_normal_ui_prefers_automatic_enrollment_over_core_code():
 def test_versions_advance_for_auto_enrollment_protocol():
     gradle = GRADLE.read_text(encoding="utf-8")
     phone = PHONE_WORKER_PATH.read_text(encoding="utf-8")
-    assert 'versionCode 128' in gradle
-    assert 'versionName "0.8.1"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.2"' in phone
+    assert 'versionCode 129' in gradle
+    assert 'versionName "0.8.2"' in gradle
+    assert 'PHONE_WORKER_VERSION = "1.11.3"' in phone
 
 
 def test_discord_panel_uses_manual_pairing_only_as_recovery():
@@ -181,4 +182,24 @@ def test_discord_panel_uses_manual_pairing_only_as_recovery():
     assert 'label="Parear celular"' not in workers
     assert 'Recovery de pareamento' in workers
     assert 'Código manual excepcional' in workers
-    assert 'O fluxo normal do APK 0.8.1+ é automático e não usa código.' in workers
+    assert 'O fluxo normal do APK 0.8.2+ é automático e não usa código.' in workers
+
+
+def test_auto_enrollment_does_not_require_vps_url_embedded_in_apk():
+    enroll = (JAVA / "CoreWorkerAutoEnrollment.java").read_text(encoding="utf-8")
+    supported_body = enroll.split("static boolean supported()", 1)[1].split("static String unsupportedReason()", 1)[0]
+    assert "CORE_WORKER_PARENT_WORKER_ID" in supported_body
+    assert "CORE_WORKER_SOURCE_FINGERPRINT" in supported_body
+    assert "CORE_WORKER_VPS_URL" not in supported_body
+    assert 'payload.optString("server_url", "")' in enroll
+    assert 'serverUrl = safe(BuildConfig.CORE_WORKER_VPS_URL)' in enroll
+
+
+def test_auto_enrollment_reports_missing_build_hint_instead_of_generic_recovery():
+    enroll = (JAVA / "CoreWorkerAutoEnrollment.java").read_text(encoding="utf-8")
+    activity = (JAVA / "MainActivity.java").read_text(encoding="utf-8")
+    phone = PHONE_WORKER_PATH.read_text(encoding="utf-8")
+    assert "parent_hint ausente no APK" in enroll
+    assert "sourceFingerprint ausente no APK" in enroll
+    assert "CoreWorkerAutoEnrollment.unsupportedReason()" in activity
+    assert '"error": _short_text(local.get("error"), limit=120)' in phone

@@ -6371,8 +6371,9 @@ public class MainActivity extends Activity {
             return (internalRuntimeOnline ? "✅ Runtime APK preparado" : "⏳ Vinculando automaticamente")
                     + "\n" + internal + " · Termux autenticado fará o vínculo sem código.";
         }
-        return (internalRuntimeOnline ? "✅ Runtime APK preparado" : "⚠️ Recovery de pareamento pendente")
-                + "\n" + internal + " · conexão direta com a VPS.";
+        String autoEnrollIssue = CoreWorkerAutoEnrollment.unsupportedReason();
+        return (internalRuntimeOnline ? "✅ Runtime APK preparado" : "⚠️ Auto-pair indisponível")
+                + "\n" + internal + " · " + (autoEnrollIssue.isEmpty() ? "recovery manual disponível" : autoEnrollIssue + " · recovery manual disponível");
     }
 
 

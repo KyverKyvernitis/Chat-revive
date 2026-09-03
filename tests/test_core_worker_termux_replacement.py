@@ -69,12 +69,12 @@ def _worker_record(*, worker_id: str, token: str, apk: bool, ready: bool) -> dic
 
 def test_version_marks_bootstrap_to_self_builder_release() -> None:
     gradle = read(ANDROID / "app/build.gradle")
-    assert "versionCode 128" in gradle
-    assert 'versionName "0.8.1"' in gradle
+    assert "versionCode 129" in gradle
+    assert 'versionName "0.8.2"' in gradle
     assert "def coreWorkerSelfBuilderTargetSdk = 28" in gradle
     assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
     assert "verifyCoreWorkerSelfBuilderTargetSdk" in gradle
-    assert read(ANDROID / "README.md").startswith("# Core Worker 0.8.1")
+    assert read(ANDROID / "README.md").startswith("# Core Worker 0.8.2")
 
 
 def test_android_runtime_has_no_legacy_termux_protocol_or_package_dependency() -> None:
@@ -181,7 +181,7 @@ def test_termux_bootstrap_publishes_external_toolchain_and_stays_fallback() -> N
     phone_worker = read(ROOT / "deploy/termux/phone-worker/phone_worker.py")
     automation = read(ROOT / "scripts/core-worker-automation.py")
     workers = read(ROOT / "utility/commands/workers.py")
-    assert 'PHONE_WORKER_VERSION = "1.11.2"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.11.3"' in phone_worker
     assert '_prepare_apk_self_builder_toolchain(project_dir, env)' in phone_worker
     assert '_upload_core_worker_toolchain' in phone_worker
     assert 'publish_toolchain_chunk_assets' not in phone_worker

@@ -1,6 +1,6 @@
-# Core Worker 0.8.1 — pareamento automático parent → child
+# Core Worker 0.8.2 — pareamento automático parent → child
 
-A versão `0.8.1` (`versionCode 128`) remove o código `CORE-XXXX` do fluxo normal do APK. O APK privado recebe no build apenas `parent_worker_id` e `sourceFingerprint` não secretos. No primeiro boot ele abre um challenge efêmero somente em loopback na porta 8767; o Termux 1.11.2 já autenticado valida esse challenge, pede à VPS uma credencial exclusiva para `<parent>-apk` e a entrega de volta pelo loopback. O token do Termux nunca é copiado para o APK. Reinstalações rotacionam a credencial do mesmo `<parent>-apk` em vez de criar IDs novos. O pareamento manual permanece somente como recovery legado.
+A versão `0.8.2` (`versionCode 129`) remove o código `CORE-XXXX` do fluxo normal do APK. O APK privado recebe no build apenas `parent_worker_id` e `sourceFingerprint` não secretos. No primeiro boot ele abre um challenge efêmero somente em loopback na porta 8767; o Termux 1.11.3 já autenticado valida esse challenge, pede à VPS uma credencial exclusiva para `<parent>-apk` e a entrega de volta pelo loopback. O token do Termux nunca é copiado para o APK. Reinstalações rotacionam a credencial do mesmo `<parent>-apk` em vez de criar IDs novos. O pareamento manual permanece somente como recovery legado.
 
 Depois do enrollment, o APK inicia automaticamente o download/validação do toolchain externo e só anuncia `apk-builder` após os smokes existentes. Rootfs/Bedrock continuam subsistemas separados e não são requisito para o autobuilder.
 

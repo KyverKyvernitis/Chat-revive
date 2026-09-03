@@ -230,7 +230,7 @@ def test_05_offline_device_target_is_published_persistently(tmp_path: Path, monk
     result = module.queue_agent_updates()
     latest = json.loads((tmp_path / "agent/latest.json").read_text(encoding="utf-8"))
     assert result["pending"] is True
-    assert latest["version"] == "1.11.2"
+    assert latest["version"] == "1.11.3"
     assert (tmp_path / "agent/releases" / f"{latest['source_hash']}.zip").is_file()
 
 

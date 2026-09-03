@@ -101,7 +101,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.2"
+PHONE_WORKER_VERSION = "1.11.3"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2008,7 +2008,7 @@ def _try_auto_enroll_local_apk_once(*, timeout: float = 4.0) -> dict[str, Any]:
     if state == "paired":
         return {"ok": True, "state": "paired", "worker_id": local.get("worker_id")}
     if state != "waiting_parent":
-        return {"ok": False, "state": state or "apk_not_ready"}
+        return {"ok": False, "state": state or "apk_not_ready", "error": _short_text(local.get("error"), limit=120)}
     parent_hint = str(local.get("parent_worker_id") or "").strip()
     if parent_hint != parent_worker_id:
         return {"ok": False, "state": "parent_mismatch"}
@@ -2036,6 +2036,7 @@ def _try_auto_enroll_local_apk_once(*, timeout: float = 4.0) -> dict[str, Any]:
         "parent_worker_id": parent_worker_id,
         "token": str(enrolled.get("token") or ""),
         "direct_http_token": str(enrolled.get("direct_http_token") or ""),
+        "server_url": base_url,
     }
     complete_status, complete = _post_local_json_url(
         "http://127.0.0.1:8767/core-worker/enrollment/complete",

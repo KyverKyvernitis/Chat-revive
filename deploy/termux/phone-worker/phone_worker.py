@@ -7,6 +7,7 @@ import base64
 import contextlib
 import colorsys
 import hashlib
+import http.client
 import io
 import importlib
 import json
@@ -100,12 +101,18 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.43"
+PHONE_WORKER_VERSION = "1.11.0"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
+TERMUX_PRIMARY_HTTP_PORT = 8766
+TERMUX_RECOVERY_HTTP_PORT = 8768
+_DIRECT_HTTP_STATE = "starting"
+_EFFECTIVE_HTTP_PORT: int | None = None
+_LAST_HEARTBEAT_OK_AT = 0.0
+_RUNTIME_STATUS_LOCK = threading.RLock()
 
 
 def _early_env_truthy(value: object, default: bool = False) -> bool:
@@ -1592,6 +1599,151 @@ def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
         _persist_pending_core_job_results()
     return sent
 
+
+def _runtime_state_dir() -> Path:
+    configured = str(os.getenv("PHONE_WORKER_STATE_DIR") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".local" / "state" / "core-worker-phone-worker"
+
+
+def _runtime_status_path() -> Path:
+    return _runtime_state_dir() / "runtime-status.json"
+
+
+def _write_runtime_status(*, control_plane_alive: bool, heartbeat_ok: bool | None = None, reason: str = "") -> None:
+    global _LAST_HEARTBEAT_OK_AT
+    now = time.time()
+    if heartbeat_ok is True:
+        _LAST_HEARTBEAT_OK_AT = now
+    payload = {
+        "schema": 2,
+        "runtime_kind": "termux",
+        "runtime_mode": "termux",
+        "source": "termux-phone-worker",
+        "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+        "pid": os.getpid(),
+        "version": PHONE_WORKER_VERSION,
+        "source_hash": _phone_worker_source_hash(),
+        "started_at": START_TIME,
+        "updated_at": now,
+        "control_plane_alive": bool(control_plane_alive),
+        "last_heartbeat_ok_at": _LAST_HEARTBEAT_OK_AT or None,
+        "direct_http_state": _DIRECT_HTTP_STATE,
+        "http_port": _EFFECTIVE_HTTP_PORT,
+        "preferred_http_port": TERMUX_PRIMARY_HTTP_PORT,
+        "recovery_http_port": TERMUX_RECOVERY_HTTP_PORT,
+        "reason": _short_text(reason, limit=160),
+    }
+    try:
+        path = _runtime_status_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception as exc:
+        print(f"[phone-worker-state] falha ao persistir status: {type(exc).__name__}", flush=True)
+
+
+def _probe_direct_http_owner(host: str, port: int, *, timeout: float = 0.8) -> str:
+    probe_host = "127.0.0.1" if host in {"", "0.0.0.0", "::"} else host
+    headers = {"Accept": "application/json", "User-Agent": f"CorePhoneWorkerSupervisorProbe/{PHONE_WORKER_VERSION}"}
+    tokens = []
+    for name in ("PHONE_WORKER_TOKEN", "CORE_WORKER_APK_HTTP_TOKEN", "CORE_WORKER_DIRECT_HTTP_TOKEN"):
+        value = str(os.getenv(name) or "").strip()
+        if value and value not in tokens:
+            tokens.append(value)
+    attempts = [""] + tokens
+    for token in attempts:
+        current = dict(headers)
+        if token:
+            current["Authorization"] = f"Bearer {token}"
+        try:
+            req = urllib.request.Request(f"http://{probe_host}:{int(port)}/health", headers=current, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                data = json.loads(response.read(128 * 1024).decode("utf-8", errors="replace"))
+            if not isinstance(data, dict):
+                continue
+            kind = str(data.get("runtime_kind") or "").strip().lower()
+            source = str(data.get("source") or "").strip().lower()
+            if kind == "apk" or source.startswith("core-worker-apk"):
+                return "apk"
+            if kind == "termux" and source == "termux-phone-worker":
+                return "termux"
+            return "unknown_http"
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403}:
+                continue
+        except Exception:
+            continue
+    try:
+        with socket.create_connection((probe_host, int(port)), timeout=timeout):
+            return "unknown_listener"
+    except Exception:
+        return "none"
+
+
+def _bind_phone_worker_http_server(host: str, preferred_port: int, *, token: str, max_body_bytes: int, max_output_bytes: int, job_timeout: int) -> ThreadingHTTPServer | None:
+    global _DIRECT_HTTP_STATE, _EFFECTIVE_HTTP_PORT
+    candidates = [int(preferred_port)]
+    if int(preferred_port) == TERMUX_PRIMARY_HTTP_PORT:
+        candidates.append(TERMUX_RECOVERY_HTTP_PORT)
+    for index, selected_port in enumerate(candidates):
+        try:
+            server = ThreadingHTTPServer((host, selected_port), WorkerHandler)
+        except OSError as exc:
+            if getattr(exc, "errno", None) not in {98, 48, 10048}:  # Linux/macOS/Windows EADDRINUSE
+                print(f"[phone-worker-http] bind {host}:{selected_port} falhou: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+                if index == len(candidates) - 1:
+                    _DIRECT_HTTP_STATE = "bind_failed_control_plane_alive"
+                continue
+            owner = _probe_direct_http_owner(host, selected_port)
+            if selected_port == TERMUX_PRIMARY_HTTP_PORT and owner == "apk":
+                _DIRECT_HTTP_STATE = "port_owned_by_apk"
+            elif owner == "termux":
+                _DIRECT_HTTP_STATE = "port_owned_by_old_termux"
+            else:
+                _DIRECT_HTTP_STATE = "port_owned_by_unknown_listener"
+            print(f"[phone-worker-http] porta {selected_port} ocupada owner={owner}; agent continua com control plane ativo", flush=True)
+            continue
+        server.worker_token = token
+        server.phone_worker_host = host
+        server.phone_worker_port = selected_port
+        server.max_body_bytes = max_body_bytes
+        server.max_output_bytes = max_output_bytes
+        server.job_timeout = job_timeout
+        _EFFECTIVE_HTTP_PORT = selected_port
+        if selected_port == TERMUX_PRIMARY_HTTP_PORT:
+            _DIRECT_HTTP_STATE = "listening_primary"
+        else:
+            _DIRECT_HTTP_STATE = "listening_recovery_after_conflict"
+        print(f"[phone-worker-http] ouvindo em {host}:{selected_port}; state={_DIRECT_HTTP_STATE}", flush=True)
+        return server
+    _EFFECTIVE_HTTP_PORT = None
+    if _DIRECT_HTTP_STATE in {"starting", "port_owned_by_apk", "port_owned_by_old_termux", "port_owned_by_unknown_listener"}:
+        _DIRECT_HTTP_STATE = "port_conflict_control_plane_alive"
+    print(f"[phone-worker-http] sem endpoint direto; state={_DIRECT_HTTP_STATE}; heartbeat/jobs continuam ativos", flush=True)
+    return None
+
+
+
+def _bootstrap_updater_snapshot() -> dict[str, Any]:
+    path = _runtime_state_dir() / "updater-status.json"
+    try:
+        data = json.loads(path.read_text("utf-8"))
+        if not isinstance(data, dict):
+            return {"state": "unknown"}
+        allowed = {
+            "state", "updated_at", "target_version", "target_source_hash", "current_version",
+            "current_source_hash", "reason", "rolled_back", "bootstrap_version", "blocked_key",
+        }
+        return {str(k): v for k, v in data.items() if str(k) in allowed}
+    except FileNotFoundError:
+        return {"state": "legacy_or_not_initialized"}
+    except Exception:
+        return {"state": "state_unreadable"}
+
+
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     status = _safe_telemetry("system", _system_status, {"ok": False})
     music_node = _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"})
@@ -1599,8 +1751,9 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
     name = _default_worker_name()
     endpoint = str(os.getenv("CORE_WORKER_ENDPOINT") or os.getenv("PHONE_WORKER_ENDPOINT") or "").strip()
-    if not endpoint and host not in {"", "0.0.0.0", "::"}:
-        endpoint = f"http://{host}:{port}"
+    effective_port = _EFFECTIVE_HTTP_PORT
+    if not endpoint and effective_port and host not in {"", "0.0.0.0", "::"}:
+        endpoint = f"http://{host}:{effective_port}"
     profile = _current_core_worker_profile()
     roles, capabilities = _current_core_worker_roles_and_capabilities()
     safe_mode = _phone_worker_safe_mode_enabled()
@@ -1630,7 +1783,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "runtime_mode": CORE_WORKER_RUNTIME_MODE,
         "version": PHONE_WORKER_VERSION,
         "source_hash": _phone_worker_source_hash(),
-        "worker_update_transports": ["inline-b64-v1", "zip-v1"],
+        "worker_update_transports": ["bootstrap-manifest-v2", "zip-v1", "inline-b64-v1"],
         "profile": profile,
         "profile_label": _core_worker_profile_label(profile),
         "safe_mode": safe_mode,
@@ -1654,9 +1807,13 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "sshd_ok": ((status.get("sshd") or {}).get("ok") if isinstance(status.get("sshd"), dict) else None),
             "runtime_mode": CORE_WORKER_RUNTIME_MODE,
             "internal_runtime_state": CORE_WORKER_INTERNAL_RUNTIME_STATE,
+            "control_plane_alive": True,
+            "direct_http_state": _DIRECT_HTTP_STATE,
+            "http_port": _EFFECTIVE_HTTP_PORT,
+            "last_heartbeat_ok_at": _LAST_HEARTBEAT_OK_AT or None,
         },
         "status": {
-            "worker_update": {"transports": ["inline-b64-v1", "zip-v1"]},
+            "worker_update": {"transports": ["bootstrap-manifest-v2", "zip-v1", "inline-b64-v1"], "updater": _bootstrap_updater_snapshot()},
             "core_worker_jobs": _core_job_runtime_snapshot(),
             "core_worker_network": _core_worker_network_runtime_snapshot(),
             "music_node": music_node,
@@ -1672,7 +1829,11 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "profile": profile,
             "profile_label": _core_worker_profile_label(profile),
             "http_host": host,
-            "http_port": port,
+            "http_port": _EFFECTIVE_HTTP_PORT,
+            "preferred_http_port": TERMUX_PRIMARY_HTTP_PORT,
+            "recovery_http_port": TERMUX_RECOVERY_HTTP_PORT,
+            "direct_http_state": _DIRECT_HTTP_STATE,
+            "control_plane_alive": True,
             "python": status.get("python"),
             "platform": status.get("platform"),
             "disk_home": status.get("disk_home"),
@@ -1755,6 +1916,9 @@ def _pair_core_worker(
         "CORE_WORKER_NAME": payload.get("name") or selected_name,
         "CORE_WORKER_ROLES": ",".join(payload.get("roles") or _env_list("CORE_WORKER_ROLES", [])),
         "CORE_WORKER_CAPABILITIES": ",".join(payload.get("capabilities") or _env_list("CORE_WORKER_CAPABILITIES", [])),
+        "PHONE_WORKER_CONFIG_SCHEMA": "2",
+        "PHONE_WORKER_SELF_UPDATE_ENABLED": "true",
+        "PHONE_WORKER_BOOTSTRAP_UPDATE_ENABLED": "true",
     })
     print(f"[core-worker-pair] pareado como {returned_worker_id}; token salvo em {env_path}", flush=True)
     print("[core-worker-pair] heartbeat/jobs já podem usar o env atualizado; reiniciar ainda é recomendado se o supervisor estiver antigo.", flush=True)
@@ -1779,6 +1943,7 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
         status, data = _post_core_worker_json("/core-worker/heartbeat", payload, timeout=timeout)
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
         if 200 <= status < 300 and data.get("ok", True):
+            _write_runtime_status(control_plane_alive=True, heartbeat_ok=True, reason="heartbeat_ok")
             with contextlib.suppress(Exception):
                 _flush_pending_core_worker_job_results(timeout=min(5.0, max(1.0, timeout)))
             return True
@@ -1786,6 +1951,7 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
     except Exception as exc:
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
         print(f"[core-worker-heartbeat] falhou endpoint=/core-worker/heartbeat elapsed_ms={elapsed_ms}: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+    _write_runtime_status(control_plane_alive=True, heartbeat_ok=False, reason="heartbeat_failed")
     return False
 
 
@@ -3992,6 +4158,14 @@ def _system_status() -> dict[str, Any]:
         "supported_tasks": list(SUPPORTED_DIRECT_TASKS),
         "supported_core_worker_jobs": _supported_core_worker_job_types(),
         "pid": os.getpid(),
+        "process_started_at": START_TIME,
+        "status_updated_at": time.time(),
+        "control_plane_alive": True,
+        "direct_http_state": _DIRECT_HTTP_STATE,
+        "http_port": _EFFECTIVE_HTTP_PORT,
+        "preferred_http_port": TERMUX_PRIMARY_HTTP_PORT,
+        "recovery_http_port": TERMUX_RECOVERY_HTTP_PORT,
+        "last_heartbeat_ok_at": _LAST_HEARTBEAT_OK_AT or None,
         "uptime_seconds": round(time.time() - START_TIME, 3),
         "platform": platform.platform(),
         "machine": platform.machine(),
@@ -7967,6 +8141,21 @@ def _find_termux_gradle_home(env: dict[str, str]) -> Path:
     raise FileNotFoundError("distribuição completa do Gradle não encontrada no Termux")
 
 
+
+def _find_pinned_gradle_89_home(env: dict[str, str]) -> Path:
+    root = Path(env.get("GRADLE_USER_HOME") or os.getenv("PHONE_WORKER_GRADLE_USER_HOME") or (Path.home() / ".core-worker-gradle-home")).expanduser()
+    candidates: list[Path] = []
+    wrapper_dists = root / "wrapper/dists"
+    if wrapper_dists.is_dir():
+        for launcher in wrapper_dists.glob("gradle-8.9-*/**/gradle-8.9/bin/gradle"):
+            candidates.append(launcher.parent.parent)
+    for candidate in candidates:
+        launcher = candidate / "bin/gradle"
+        if launcher.is_file() and list((candidate / "lib").glob("gradle-launcher-8.9*.jar")):
+            return candidate.resolve()
+    raise FileNotFoundError("distribuição Gradle 8.9 do Wrapper não encontrada no GRADLE_USER_HOME controlado")
+
+
 def _find_android_sdk_home(env: dict[str, str]) -> Path:
     candidates = [
         Path(str(env.get("ANDROID_HOME") or "")).expanduser(),
@@ -8560,49 +8749,42 @@ def _smoke_apk_self_builder_bundle(bundle_root: Path) -> dict[str, Any]:
 
 
 def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
-    """Gera no Termux o bundle que o APK usará nos builds seguintes.
-
-    A VPS nunca executa essa preparação. O bundle é criado dentro do workspace
-    temporário do phone-worker, entra no APK bootstrap e depois é retido pelo app.
-    """
-    helpers = _load_apk_identity_module()
-    asset = _apk_self_builder_bundle_asset(project_dir)
-    chunked = helpers.validate_toolchain_chunk_assets(project_dir)
-    existing = _apk_self_builder_bundle_valid(asset)
-    rebuild = _env_bool("PHONE_WORKER_APK_SELF_BUILDER_REBUILD", False)
-    chunk_size = max(4 * 1024 * 1024, min(32 * 1024 * 1024, _env_int("PHONE_WORKER_APK_SELF_BUILDER_ASSET_CHUNK_BYTES", 16 * 1024 * 1024)))
-    if chunked.get("ok") and not rebuild:
-        if asset.exists():
-            asset.unlink()
-        return {**chunked, "generated": False, "source": "project_chunk_assets"}
-    if existing.get("ok") and not rebuild:
-        published = helpers.publish_toolchain_chunk_assets(asset, project_dir, chunk_size=chunk_size)
-        return {**existing, **published, "source": "project_asset_migrated"}
+    """Prepara/publica toolchain externo; nunca o copia para assets do APK."""
     if not _is_termux_runtime():
-        raise RuntimeError("toolchain self-builder ausente e geração bootstrap só é permitida no Termux")
+        raise RuntimeError("bootstrap inicial do toolchain externo só é permitido no Termux")
+
+    # Limpe apenas o diretório legado conhecido dentro do workspace descartável.
+    legacy_assets = project_dir / "app/src/main/assets/core-linux/android-builder"
+    if legacy_assets.exists():
+        shutil.rmtree(legacy_assets, ignore_errors=True)
 
     jdk_home = _find_termux_java_home(env)
-    gradle_home = _find_termux_gradle_home(env)
+    gradle_home = _find_pinned_gradle_89_home(env)
     sdk_home = _find_android_sdk_home(env)
+    build_tools = sdk_home / "build-tools/34.0.0"
+    if not build_tools.is_dir():
+        raise FileNotFoundError("build-tools 34.0.0 ausente para toolchain externo")
     aapt2_cmd = shutil.which("aapt2", path=env.get("PATH")) or shutil.which("aapt2")
     if not aapt2_cmd or not Path(aapt2_cmd).is_file():
-        raise FileNotFoundError("aapt2 compatível com Termux não encontrado")
+        raise FileNotFoundError("aapt2 Bionic compatível não encontrado")
 
-    stage_root = project_dir / "app/build/core-worker-self-builder-toolchain"
-    bundle_root = stage_root / "bundle"
-    bundle_archive = stage_root / "android-builder-toolchain.zip"
-    shutil.rmtree(stage_root, ignore_errors=True)
+    cache_root = Path(os.getenv("PHONE_WORKER_TOOLCHAIN_CACHE_DIR") or (Path.home() / ".core-worker-toolchain-cache")).expanduser()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    bundle_root = cache_root / "staging-bundle"
+    bundle_archive = cache_root / "toolchain-v2-arm64.zip"
+    stage_archive = cache_root / ".toolchain-v2-arm64.zip.tmp"
+    shutil.rmtree(bundle_root, ignore_errors=True)
+    with contextlib.suppress(Exception):
+        stage_archive.unlink()
     bundle_root.mkdir(parents=True, exist_ok=True)
     try:
         _copy_tree_dereferenced(jdk_home, bundle_root / "jdk")
         _copy_tree_dereferenced(gradle_home, bundle_root / "gradle")
-        gradle_launcher_report = _patch_gradle_launcher_for_android(bundle_root / "gradle/bin/gradle")
-
+        # O wrapper oficial já resolveu Gradle 8.9. Não reescrevemos o launcher
+        # da distribuição fixa: smokes precisam testar o que o APK realmente usará.
         sdk_target = bundle_root / "android-sdk"
         _copy_tree_dereferenced(sdk_home / "platforms/android-34", sdk_target / "platforms/android-34")
-        build_tools = _latest_android_build_tools(sdk_home)
-        if build_tools is not None:
-            _copy_tree_dereferenced(build_tools, sdk_target / "build-tools" / build_tools.name)
+        _copy_tree_dereferenced(build_tools, sdk_target / "build-tools/34.0.0")
         for optional in ("platform-tools", "licenses"):
             source = sdk_home / optional
             if source.is_dir():
@@ -8611,132 +8793,196 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
         bin_dir = bundle_root / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(Path(aapt2_cmd).resolve(), bin_dir / "aapt2")
-
         prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
-        runtime_libs = bundle_root / "runtime-libs"
         runtime_library_report = _collect_minimal_termux_runtime_libraries(
             jdk_home=jdk_home,
             aapt2_path=Path(aapt2_cmd),
             prefix=prefix,
-            target=runtime_libs,
+            target=bundle_root / "runtime-libs",
             env=env,
         )
-        smoke = _smoke_apk_self_builder_bundle(bundle_root)
         executable_paths = _apk_self_builder_executable_paths(bundle_root)
-
+        smoke = _smoke_apk_self_builder_bundle(bundle_root)
         manifest = {
-            "schema": "core-worker-android-builder-v1",
-            "version": 7,
-            "arch": "aarch64",
-            "runtime": "termux-bionic-direct",
+            "schema": "core-worker-android-builder-v2",
+            "version": 2,
+            "arch": "arm64-v8a",
+            "physicalWorkerId": str(os.getenv("CORE_WORKER_ID") or _default_worker_id()),
             "generatedBy": f"phone-worker-{PHONE_WORKER_VERSION}",
             "createdAt": int(time.time()),
-            "paths": {
-                "jdk": "jdk",
-                "gradle": "gradle/bin/gradle",
-                "androidSdk": "android-sdk",
-                "aapt2": "bin/aapt2",
-                "runtimeLibs": "runtime-libs",
-            },
-            "sdk": {
+            "versions": {
+                "jdkMajor": 17,
+                "gradle": "8.9",
+                "agp": "8.7.3",
                 "compileSdk": 34,
-                "buildTools": build_tools.name if build_tools is not None else "",
+                "buildTools": "34.0.0",
+                "chaquopy": "17.0.0",
+                "aapt2": "termux-bionic",
             },
+            "compatibility": {"arch": "arm64-v8a", "runtime": "android-private-bionic", "targetSdkMax": 28},
+            "paths": {"jdk": "jdk", "gradle": "gradle/bin/gradle", "androidSdk": "android-sdk", "aapt2": "bin/aapt2", "runtimeLibs": "runtime-libs"},
             "runtimeLibraries": runtime_library_report,
-            "gradleLauncher": gradle_launcher_report,
+            "validation": {"strategy": "required-executable-smoke-v2", "requiredSmokeChecks": ["java", "javac", "jar", "gradle", "aapt2"]},
             "bootstrapSmoke": smoke,
-            "validation": {
-                "strategy": "required-executable-smoke-v2",
-                "requiredSmokeChecks": ["java", "javac", "jar", "gradle", "aapt2"],
-            },
             "executablePaths": executable_paths,
-            "safety": {
-                "generatedOnTermux": True,
-                "vpsBuild": False,
-                "noRemoteShell": True,
-                "privateApkOnly": True,
-                "targetSdkMax": 28,
-            },
+            "safety": {"generatedOnTermux": True, "vpsBuild": False, "embeddedInApk": False, "noRemoteShell": True},
         }
         (bundle_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        generated = _zip_directory_deterministic(bundle_root, bundle_archive)
-        validated = _apk_self_builder_bundle_valid(bundle_archive)
-        if not validated.get("ok"):
-            raise RuntimeError("bundle self-builder gerado mas inválido: " + str(validated.get("error") or "erro desconhecido"))
-        published = helpers.publish_toolchain_chunk_assets(bundle_archive, project_dir, chunk_size=chunk_size)
+        generated = _zip_directory_deterministic(bundle_root, stage_archive)
+        os.replace(stage_archive, bundle_archive)
+        publish = _upload_core_worker_toolchain(bundle_archive, manifest=manifest)
+        if not publish.get("ok"):
+            raise RuntimeError("publicação do toolchain externo falhou: " + _short_text(publish.get("error") or publish, limit=240))
         return {
-            **validated,
-            **generated,
-            **published,
+            "ok": True,
             "generated": True,
-            "source": "termux_bootstrap",
-            "jdk": str(jdk_home),
-            "gradle": str(gradle_home),
-            "androidSdk": str(sdk_home),
-            "aapt2": str(aapt2_cmd),
-            "runtimeLibraries": runtime_library_report,
-            "gradleLauncher": gradle_launcher_report,
+            "source": "termux_external_toolchain_v2",
+            "embeddedInApk": False,
+            "archive": str(bundle_archive),
+            "archiveBytes": bundle_archive.stat().st_size,
+            "archiveSha256": _sha256_path(bundle_archive),
+            "toolchainFingerprint": publish.get("toolchainFingerprint"),
+            "publish": publish,
+            "versions": manifest["versions"],
             "bootstrapSmoke": smoke,
+            **generated,
         }
     finally:
-        shutil.rmtree(stage_root, ignore_errors=True)
+        shutil.rmtree(bundle_root, ignore_errors=True)
+        with contextlib.suppress(Exception):
+            stage_archive.unlink()
+
+
+
+def _read_meminfo_bytes() -> dict[str, int]:
+    result: dict[str, int] = {}
+    try:
+        for line in Path("/proc/meminfo").read_text("utf-8", errors="replace").splitlines():
+            if ":" not in line:
+                continue
+            key, rest = line.split(":", 1)
+            match = re.search(r"(\d+)", rest)
+            if match:
+                result[key] = int(match.group(1)) * 1024
+    except Exception:
+        pass
+    return result
+
+
+def _effective_gradle_heap_mb(available_bytes: int) -> int:
+    available_mb = max(0, int(available_bytes // (1024 * 1024)))
+    configured = _env_int("PHONE_WORKER_APK_BUILD_XMX_MB", 0)
+    if configured > 0:
+        return max(192, min(configured, max(192, available_mb - 256)))
+    # Preserve memória para Android, Python, aapt2 e filesystem cache. Em aparelhos
+    # modestos o Gradle recebe pouco; em aparelhos fortes ainda há teto previsível.
+    usable = max(192, available_mb - 384)
+    return max(192, min(1024, int(usable * 0.55)))
 
 
 def _prepare_termux_android_build(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
-    """Ajustes seguros para build Android dentro do Termux.
-
-    O Android Gradle Plugin tenta baixar um aapt2 Linux comum que não roda no
-    Android/Termux. Quando existir aapt2 do Termux, forçamos o override global.
-    Também permitimos fallback para SDK 34, que é o caminho que funcionou no
-    builder do usuário.
-    """
-    info: dict[str, Any] = {"termux": _is_termux_runtime()}
+    """Preflight reproduzível para Gradle no Termux, sem tocar em ~/.gradle global."""
+    info: dict[str, Any] = {"termux": _is_termux_runtime(), "gradle": "8.9", "jdkMajor": 17, "compileSdk": 34, "buildTools": "34.0.0"}
     if not info["termux"] or not _env_bool("PHONE_WORKER_APK_BUILD_TERMUX_TWEAKS", True):
         return info
 
     default_sdk = Path.home() / "android-sdk"
-    if not env.get("ANDROID_HOME") and default_sdk.exists():
-        env["ANDROID_HOME"] = str(default_sdk)
-        env.setdefault("ANDROID_SDK_ROOT", str(default_sdk))
-        env["PATH"] = f"{default_sdk}/cmdline-tools/latest/bin:{default_sdk}/platform-tools:" + env.get("PATH", "")
-        info["android_home"] = str(default_sdk)
-
-    sdk_fallback = str(os.getenv("PHONE_WORKER_APK_BUILD_TERMUX_SDK") or "34").strip()
     android_home = Path(env.get("ANDROID_HOME") or env.get("ANDROID_SDK_ROOT") or default_sdk).expanduser()
-    if sdk_fallback:
-        android_jar = android_home / "platforms" / f"android-{sdk_fallback}" / "android.jar"
-        info["android_jar"] = str(android_jar)
-        info["android_jar_ok"] = bool(android_jar.is_file() and android_jar.stat().st_size > 1024 * 1024)
-    build_gradle = project_dir / "app" / "build.gradle"
-    if sdk_fallback and build_gradle.exists():
-        text = build_gradle.read_text(encoding="utf-8", errors="ignore")
-        changed = re.sub(r"(compileSdk\s*=?\s*)\d+", rf"\g<1>{sdk_fallback}", text)
-        changed = re.sub(r"(targetSdk\s*=?\s*)\d+", rf"\g<1>{sdk_fallback}", changed)
-        if changed != text:
-            build_gradle.write_text(changed, encoding="utf-8")
-            info["sdk_fallback"] = sdk_fallback
+    android_jar = android_home / "platforms/android-34/android.jar"
+    build_tools = android_home / "build-tools/34.0.0"
+    if not android_jar.is_file() or android_jar.stat().st_size <= 1024 * 1024:
+        raise FileNotFoundError(f"compileSdk 34 ausente: {android_jar}")
+    if not build_tools.is_dir():
+        raise FileNotFoundError(f"build-tools 34.0.0 ausente: {build_tools}")
+    env["ANDROID_HOME"] = str(android_home)
+    env["ANDROID_SDK_ROOT"] = str(android_home)
+    env["PATH"] = f"{android_home}/cmdline-tools/latest/bin:{android_home}/platform-tools:" + env.get("PATH", "")
+    info.update({"android_home": str(android_home), "android_jar": str(android_jar), "android_jar_ok": True, "build_tools_path": str(build_tools)})
 
-    aapt2_path = shutil.which("aapt2")
-    if aapt2_path:
-        gradle_dir = Path.home() / ".gradle"
-        gradle_dir.mkdir(parents=True, exist_ok=True)
-        props = gradle_dir / "gradle.properties"
-        line = f"android.aapt2FromMavenOverride={aapt2_path}"
-        lines = props.read_text(encoding="utf-8", errors="ignore").splitlines() if props.exists() else []
-        replaced = False
-        new_lines = []
-        for existing in lines:
-            if existing.startswith("android.aapt2FromMavenOverride="):
-                new_lines.append(line)
-                replaced = True
-            else:
-                new_lines.append(existing)
-        if not replaced:
-            new_lines.append(line)
-        props.write_text("\n".join(new_lines).strip() + "\n", encoding="utf-8")
-        info["aapt2_override"] = aapt2_path
+    jdk_home = _find_termux_java_home(env)
+    env["JAVA_HOME"] = str(jdk_home)
+    java_probe = subprocess.run([str(jdk_home / "bin/java"), "-version"], env=env, capture_output=True, text=True, timeout=20, check=False)
+    java_text = ((java_probe.stderr or "") + "\n" + (java_probe.stdout or "")).strip()
+    major_match = re.search(r'version\s+"(?P<major>\d+)', java_text)
+    java_major = int(major_match.group("major")) if major_match else 0
+    if java_probe.returncode != 0 or java_major != 17:
+        raise RuntimeError(f"JDK incompatível: esperado major 17, detectado {java_major or 'desconhecido'}")
+    info["java_home"] = str(jdk_home)
+    info["java_major"] = java_major
+
+    aapt2_path = shutil.which("aapt2", path=env.get("PATH")) or shutil.which("aapt2")
+    if not aapt2_path or not Path(aapt2_path).is_file():
+        raise FileNotFoundError("aapt2 Bionic do Termux não encontrado")
+    info["aapt2_override"] = aapt2_path
+
+    gradle_user_home = Path(os.getenv("PHONE_WORKER_GRADLE_USER_HOME") or (Path.home() / ".core-worker-gradle-home")).expanduser()
+    gradle_user_home.mkdir(parents=True, exist_ok=True)
+    env["GRADLE_USER_HOME"] = str(gradle_user_home)
+    mem = _read_meminfo_bytes()
+    available = int(mem.get("MemAvailable") or mem.get("MemFree") or 0)
+    total = int(mem.get("MemTotal") or 0)
+    xmx_mb = _effective_gradle_heap_mb(available)
+    if available and available < max(384 * 1024 * 1024, xmx_mb * 1024 * 1024 + 192 * 1024 * 1024):
+        raise RuntimeError(f"preflight_blocked: memória disponível insuficiente ({available // (1024*1024)} MiB)")
+    props = gradle_user_home / "gradle.properties"
+    props.write_text(
+        "\n".join([
+            f"org.gradle.jvmargs=-Xmx{xmx_mb}m -Xms64m -Dfile.encoding=UTF-8",
+            "org.gradle.parallel=false",
+            "org.gradle.workers.max=1",
+            "org.gradle.daemon=false",
+            "org.gradle.vfs.watch=false",
+            f"android.aapt2FromMavenOverride={aapt2_path}",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    info.update({
+        "gradle_user_home": str(gradle_user_home),
+        "gradle_properties": str(props),
+        "xmx_mb": xmx_mb,
+        "memory_total_bytes": total,
+        "memory_available_bytes": available,
+    })
+
+    gradlew = project_dir / "gradlew"
+    wrapper_jar = project_dir / "gradle/wrapper/gradle-wrapper.jar"
+    wrapper_props = project_dir / "gradle/wrapper/gradle-wrapper.properties"
+    if not gradlew.is_file() or not wrapper_jar.is_file() or not wrapper_props.is_file():
+        raise FileNotFoundError("Gradle Wrapper completo ausente no projeto; Gradle global não é permitido")
+    gradlew.chmod(0o755)
+    wrapper_text = wrapper_props.read_text("utf-8", errors="replace")
+    if "gradle-8.9-" not in wrapper_text or "distributionSha256Sum=" not in wrapper_text:
+        raise RuntimeError("Gradle Wrapper não está fixado em 8.9 com checksum")
+    probe = subprocess.run([str(gradlew), "--version", "--no-daemon"], cwd=str(project_dir), env=env, capture_output=True, text=True, errors="replace", timeout=300, check=False)
+    probe_text = (probe.stdout or "") + "\n" + (probe.stderr or "")
+    if probe.returncode != 0 or not re.search(r"(?m)^Gradle\s+8\.9\b", probe_text):
+        raise RuntimeError("Gradle Wrapper não executou a versão fixada 8.9: " + _short_text(probe_text, limit=500))
+    info["gradle_version_ok"] = True
+    info["gradle_probe"] = _short_text(probe_text, limit=1200)
+
+    free = shutil.disk_usage(project_dir).free
+    source_bytes = sum(path.stat().st_size for path in project_dir.rglob("*") if path.is_file())
+    min_free = max(768 * 1024 * 1024, source_bytes * 4 + 512 * 1024 * 1024)
+    info.update({"storage_free_bytes": free, "source_tree_bytes": source_bytes, "estimated_required_bytes": min_free})
+    if free < min_free:
+        raise RuntimeError(f"preflight_blocked: espaço insuficiente free={free} required={min_free}")
+    battery = _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot())
+    battery_level = battery.get("level") if isinstance(battery, dict) else None
+    charging = battery.get("charging") if isinstance(battery, dict) else None
+    battery_temperature = battery.get("temperature_c") if isinstance(battery, dict) else None
+    info["battery"] = {
+        "available": bool(battery.get("available")) if isinstance(battery, dict) else False,
+        "level": battery_level,
+        "charging": charging,
+        "status": battery.get("status") if isinstance(battery, dict) else None,
+        "plugged": battery.get("plugged") if isinstance(battery, dict) else None,
+        "temperature_c": battery_temperature,
+    }
+    if battery_level is not None and int(battery_level) < 25 and charging is not True:
+        raise RuntimeError(f"preflight_blocked: bateria baixa ({int(battery_level)}%) e aparelho não está carregando")
+    if battery_temperature is not None and float(battery_temperature) >= 45.0:
+        raise RuntimeError(f"preflight_blocked: temperatura alta ({float(battery_temperature):.1f} °C)")
     return info
-
 
 
 def _apk_build_safe_slug(value: Any, *, fallback: str = "apk-build") -> str:
@@ -8863,24 +9109,55 @@ def _cleanup_old_apk_build_artifacts(build_root: Path, *, keep_apks: int | None 
     return result
 
 
+def _classify_apk_failure_text(text: str) -> dict[str, Any]:
+    lowered = str(text or "").lower()
+    transient_patterns = (
+        r"outofmemoryerror", r"java heap space", r"gc overhead limit",
+        r"killed process", r"signal 9", r"exit(?:ed)?(?: with)?(?: code)? 137",
+        r"cannot allocate memory", r"resource temporarily unavailable",
+        r"no space left on device", r"preflight_blocked:.*(?:mem|espaço|bateria|temperatura)",
+        r"battery.*(?:low|baixa)", r"thermal|temperatura alta|overheat",
+        r"timed? out|timeout", r"connection (?:reset|refused|aborted)",
+        r"temporary failure|network is unreachable|name or service not known|http 5\d\d",
+        r"builder.*(?:busy|ocupado)|build lock", r"lease.*(?:expired|perd)",
+        r"falha publicando|upload.*(?:falh|interromp)|broken pipe",
+    )
+    deterministic_patterns = (
+        r"cannot find symbol", r"unclosed string literal", r"';' expected",
+        r"compilation failed|compiledebugjavawithjavac",
+        r"android resource linking failed|resource .* not found|error: resource",
+        r"manifest merger failed|processdebugmainmanifest",
+        r"google-services\.json.*(?:ausente|inválido|incompatível)",
+        r"assinatura.*(?:incompatível|divergente)|keystore.*(?:ausente|inválid|diverg)",
+        r"arquivo obrigatório ausente|source.*(?:fingerprint|sha256).*diverg",
+        r"toolchain.*manifest.*inválid|schema inválido.*toolchain|matriz de versões.*incompatível",
+        r"jdk incompatível|gradle wrapper.*(?:ausente|não está fixado)|compileSdk 34 ausente|build-tools 34\.0\.0 ausente",
+        r"syntax error", r"cmake error|ninja:.*(?:error|failed)|clang: error",
+    )
+    for pattern in transient_patterns:
+        if re.search(pattern, lowered, flags=re.IGNORECASE):
+            return {"category": "transient", "retryable": True, "permanent": False}
+    for pattern in deterministic_patterns:
+        if re.search(pattern, lowered, flags=re.IGNORECASE):
+            return {"category": "deterministic", "retryable": False, "permanent": True}
+    return {"category": "unknown", "retryable": True, "permanent": False}
+
+
 def _summarize_gradle_log(path: Path | None) -> dict[str, Any]:
     if path is None or not path.exists():
-        return {"summary": "erro de Gradle sem log persistente", "permanent": False, "detail": ""}
+        return {"summary": "erro de Gradle sem log persistente", "category": "unknown", "retryable": True, "permanent": False, "detail": ""}
     text = _tail_text_file(path, limit=70000)
-    lowered = text.lower()
     patterns = [
         r"java\.lang\.outofmemoryerror[^\n]*",
         r"java heap space[^\n]*",
-        r"required array size too large[^\n]*",
         r"no space left[^\n]*",
+        r"cannot find symbol[^\n]*",
+        r"unclosed string literal[^\n]*",
+        r"android resource linking failed[^\n]*",
+        r"manifest merger failed[^\n]*",
         r"caused by: (?:java\.|org\.|com\.android\.)[^\n]+",
-        r"execution failed for task '[^']+'",
-        r"c/c\+\+: .+",
-        r"cmake[^\n]+syntax error[^\n]+",
         r"cmake error[^\n]*",
         r"ninja:[^\n]+",
-        r"aapt2[^\n]+",
-        r"manifest merger failed[^\n]*",
     ]
     hits: list[str] = []
     for pattern in patterns:
@@ -8892,20 +9169,21 @@ def _summarize_gradle_log(path: Path | None) -> dict[str, Any]:
                 break
         if len(hits) >= 4:
             break
-    permanent = any(fragment in lowered for fragment in (
-        'syntax error: ")" unexpected',
-        "cmake",
-        "manifest merger failed",
-        "google-services.json",
-        "assinatura compatível",
-    ))
-    if 'syntax error: ")" unexpected' in lowered and "cmake" in lowered:
-        summary = "CMake do Android SDK incompatível com Termux/Android; use executor prebuilt via jniLibs"
-    elif hits:
+    task_match = re.search(r"Execution failed for task ['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE)
+    task_detail = f"task {task_match.group(1)}" if task_match else ""
+    classification = _classify_apk_failure_text(text)
+    if hits:
         summary = "build do APK falhou: " + hits[0]
     else:
         summary = "build do APK falhou; veja gradle_log_tail"
-    return {"summary": _short_text(summary, limit=180), "permanent": permanent, "detail": " | ".join(hits[:4])}
+    details = hits[:4]
+    if task_detail and task_detail not in details:
+        details.append(task_detail)
+    return {
+        "summary": _short_text(summary, limit=180),
+        "detail": " | ".join(details),
+        **classification,
+    }
 
 
 def _apk_build_failure_result(
@@ -9177,6 +9455,69 @@ def _inspect_android_native_build_environment(project_dir: Path, env: dict[str, 
 
     info["summary"] = "toolchain nativa pronta" if info["ok"] else "toolchain nativa incompleta: " + ", ".join(info["missing"])
     return info
+
+
+
+def _upload_core_worker_toolchain(archive: Path, *, manifest: dict[str, Any]) -> dict[str, Any]:
+    base_url, token, worker_id = _core_worker_auth_parts()
+    if not base_url or not token or not worker_id:
+        return {"ok": False, "error": "worker não pareado; não posso publicar toolchain"}
+    if not archive.is_file():
+        return {"ok": False, "error": "toolchain local ausente"}
+    sha = _sha256_path(archive)
+    parsed = urllib.parse.urlparse(base_url.rstrip("/") + "/core-worker/toolchain/publish")
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return {"ok": False, "error": "URL da VPS inválida para toolchain"}
+    boundary = "----CoreWorkerToolchain" + secrets.token_hex(12)
+
+    def field(name: str, value: Any) -> bytes:
+        return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode("utf-8")
+
+    prefix = b"".join([
+        field("worker_id", worker_id),
+        field("physical_worker_id", worker_id),
+        field("sha256", sha),
+        field("manifest", json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))),
+        (f"--{boundary}\r\nContent-Disposition: form-data; name=\"toolchain\"; filename=\"toolchain-{sha[:12]}.zip\"\r\nContent-Type: application/zip\r\n\r\n").encode("utf-8"),
+    ])
+    suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    content_length = len(prefix) + archive.stat().st_size + len(suffix)
+    timeout = max(30.0, _env_float("PHONE_WORKER_TOOLCHAIN_PUBLISH_TIMEOUT_SECONDS", 900.0))
+    connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    connection = connection_cls(parsed.hostname, parsed.port, timeout=timeout)
+    path = parsed.path or "/core-worker/toolchain/publish"
+    if parsed.query:
+        path += "?" + parsed.query
+    try:
+        connection.putrequest("POST", path)
+        connection.putheader("Authorization", f"Bearer {token}")
+        connection.putheader("X-Core-Worker-Id", worker_id)
+        connection.putheader("User-Agent", f"CorePhoneWorker/{PHONE_WORKER_VERSION}")
+        connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
+        connection.putheader("Content-Length", str(content_length))
+        connection.endheaders()
+        connection.send(prefix)
+        with archive.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                connection.send(chunk)
+        connection.send(suffix)
+        response = connection.getresponse()
+        raw = response.read(256 * 1024)
+        try:
+            data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+        except Exception:
+            data = {"ok": False, "error": "resposta inválida publicando toolchain"}
+        if not (200 <= response.status < 300):
+            return {"ok": False, "status": response.status, "error": _short_text(data.get("error") if isinstance(data, dict) else raw, limit=240)}
+        return data if isinstance(data, dict) else {"ok": False, "error": "resposta inválida"}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}"}
+    finally:
+        with contextlib.suppress(Exception):
+            connection.close()
 
 
 def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None = None, source_sha256: str = "", source_fingerprint: str = "", notification_id: str = "", apk_signing_mode: str = "", apk_signing_keystore_sha256: str = "") -> dict[str, Any]:
@@ -9771,8 +10112,9 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                     builder_environment=builder_environment,
                     extra={
                         "stage": "self_builder_toolchain_prepare",
-                        "retryable": False,
-                        "permanent_failure": True,
+                        "failure_category": _classify_apk_failure_text(detail).get("category"),
+                        "retryable": _classify_apk_failure_text(detail).get("retryable"),
+                        "permanent_failure": _classify_apk_failure_text(detail).get("permanent"),
                         "self_builder_error": detail,
                     },
                 )
@@ -9815,13 +10157,10 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
         version_code = int(payload.get("versionCode") or payload.get("version_code") or detected_version_code or 0)
         notification_id = str(payload.get("notificationId") or payload.get("notification_id") or f"apk-{version_code}-{(source_fingerprint or expected_source_sha)[:12]}").strip()
         gradlew = project_dir / "gradlew"
-        if gradlew.exists():
-            gradlew.chmod(0o755)
-            cmd = [str(gradlew), "assembleDebug", "--no-daemon", "--max-workers=1", "--stacktrace", "--console=plain"]
-        else:
-            if not shutil.which("gradle"):
-                raise FileNotFoundError("gradle não encontrado no worker builder")
-            cmd = ["gradle", "assembleDebug", "--no-daemon", "--max-workers=1", "--stacktrace", "--console=plain"]
+        if not gradlew.is_file():
+            raise FileNotFoundError("Gradle Wrapper ausente; Gradle global do Termux não é permitido")
+        gradlew.chmod(0o755)
+        cmd = [str(gradlew), "assembleDebug", "--no-daemon", "--max-workers=1", "--stacktrace", "--console=plain"]
         if not env.get("ANDROID_HOME"):
             default_sdk = Path.home() / "android-sdk"
             if default_sdk.exists():
@@ -9831,7 +10170,11 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
         shutil.rmtree(project_dir / "app/build/outputs/apk/debug", ignore_errors=True)
         with gradle_log.open("w", encoding="utf-8", errors="replace") as log_fh:
             log_fh.write("===== Core Worker APK build =====\n")
+            updater_snapshot = _bootstrap_updater_snapshot()
             log_fh.write(f"phone_worker_version={PHONE_WORKER_VERSION}\n")
+            log_fh.write(f"phone_worker_source_hash={_phone_worker_source_hash()}\n")
+            log_fh.write(f"bootstrap_version={updater_snapshot.get('bootstrap_version') or 'unknown'}\n")
+            log_fh.write(f"runtime_kind=termux runtime_mode=termux direct_http_port={_EFFECTIVE_HTTP_PORT or 0} direct_http_state={_DIRECT_HTTP_STATE}\n")
             log_fh.write(f"started_at={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(started))}\n")
             log_fh.write(f"work_dir={work_dir}\n")
             log_fh.write(f"project_dir={project_dir}\n")
@@ -9839,6 +10182,11 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             log_fh.write(f"source_sha256={expected_source_sha or download.get('sha256') or ''}\n")
             log_fh.write(f"source_fingerprint={source_fingerprint}\n")
             log_fh.write("cmd=" + " ".join(shlex.quote(part) for part in cmd) + "\n")
+            log_fh.write(f"jdk_major={builder_environment.get('java_major', '')} gradle=8.9 agp=8.7.3 compileSdk=34 buildTools=34.0.0 chaquopy=17.0.0\n")
+            log_fh.write(f"aapt2={builder_environment.get('aapt2_override', '')} xmx_mb={builder_environment.get('xmx_mb', '')}\n")
+            log_fh.write(f"memory_available_bytes={builder_environment.get('memory_available_bytes', 0)} storage_free_bytes={builder_environment.get('storage_free_bytes', 0)}\n")
+            tool_info = builder_environment.get("self_builder_toolchain") if isinstance(builder_environment.get("self_builder_toolchain"), dict) else {}
+            log_fh.write(f"toolchain_fingerprint={tool_info.get('toolchainFingerprint') or ''}\n")
             log_fh.write("===== Gradle output =====\n")
             log_fh.flush()
             try:
@@ -9863,7 +10211,8 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 builder_environment=builder_environment,
                 native_environment=native_environment,
                 extra={
-                    "retryable": False,
+                    "failure_category": str(gradle_failure.get("category") or "unknown"),
+                    "retryable": bool(gradle_failure.get("retryable", True)),
                     "permanent_failure": bool(gradle_failure.get("permanent")),
                     "gradle_error_summary": gradle_failure.get("summary"),
                     "gradle_error_detail": gradle_failure.get("detail"),
@@ -10028,11 +10377,14 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
 _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker.py": ("worker", "phone_worker.py", 0o755),
     "apk_identity.py": ("worker", "apk_identity.py", 0o644),
+    "phone_worker_bootstrap.py": ("worker", "phone_worker_bootstrap.py", 0o755),
     "music_agent.py": ("worker", "music_agent.py", 0o755),
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
     "start-phone-music-agent.sh": ("worker", "start-phone-music-agent.sh", 0o755),
     "watch-phone-worker.sh": ("worker", "watch-phone-worker.sh", 0o755),
     "pair-phone-worker.sh": ("worker", "pair-phone-worker.sh", 0o755),
+    "repair-phone-worker.sh": ("worker", "repair-phone-worker.sh", 0o755),
+    "accept-core-worker-on-device.sh": ("worker", "accept-core-worker-on-device.sh", 0o755),
     "bootstrap-phone-worker.sh": ("worker", "bootstrap-phone-worker.sh", 0o755),
     "install.sh": ("worker", "install.sh", 0o755),
     "README.md": ("worker", "README.md", 0o644),
@@ -10096,7 +10448,11 @@ def _normalize_worker_update_target(target: str) -> str:
 def _safe_update_target_path(target: str) -> tuple[Path, int]:
     clean = _normalize_worker_update_target(target)
     location, filename, mode = _WORKER_UPDATE_TARGETS[clean]
-    base = (_phone_worker_dir() if location == "worker" else Path.home()).expanduser().resolve()
+    if location == "worker":
+        release_dir = str(os.getenv("PHONE_WORKER_RELEASE_DIR") or "").strip()
+        base = (Path(release_dir) if release_dir else _phone_worker_dir()).expanduser().resolve()
+    else:
+        base = Path.home().expanduser().resolve()
     path = (base / filename).resolve()
     try:
         path.relative_to(base)
@@ -10221,6 +10577,26 @@ def _load_worker_update_files(payload: dict[str, Any], *, max_file_bytes: int, m
 
 
 def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("bootstrap_manifest") is True or str(payload.get("update_transport") or "").strip() == "bootstrap-manifest-v2":
+        bootstrap = Path(__file__).with_name("phone_worker_bootstrap.py")
+        if not bootstrap.is_file():
+            return {"ok": False, "summary": "bootstrap updater ausente; execute repair-phone-worker.sh uma vez", "state": "blocked_by_bootstrap_missing"}
+        try:
+            proc = subprocess.run([sys.executable, str(bootstrap), "--check"], cwd=str(bootstrap.parent), capture_output=True, text=True, timeout=max(30, _env_int("PHONE_WORKER_BOOTSTRAP_JOB_TIMEOUT_SECONDS", 180)))
+            output = _sanitize_log_text((proc.stdout or "") + "\n" + (proc.stderr or ""), limit=4000).strip()
+            parsed = {}
+            for line in reversed((proc.stdout or "").splitlines()):
+                try:
+                    candidate = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(candidate, dict):
+                    parsed = candidate
+                    break
+            ok = proc.returncode == 0 and parsed.get("ok", True) is not False
+            return {"ok": ok, "summary": _short_text(parsed.get("summary") or output or ("bootstrap concluído" if ok else "bootstrap falhou"), limit=240), "bootstrap": parsed, "update_transport": "bootstrap-manifest-v2", "restart_pending": bool(parsed.get("restart_pending"))}
+        except Exception as exc:
+            return {"ok": False, "summary": f"bootstrap updater falhou: {type(exc).__name__}: {_short_text(exc, limit=120)}", "update_transport": "bootstrap-manifest-v2"}
     if not _env_bool("PHONE_WORKER_SELF_UPDATE_ENABLED", True):
         raise PermissionError("self-update do phone-worker desativado por configuração")
     target_source_hash = str(payload.get("source_hash") or "").strip().lower()
@@ -10369,13 +10745,26 @@ def _launch_deferred_phone_worker_action(result: dict[str, Any]) -> None:
     watch_script = Path(str(result.pop("_deferred_watch_script", "") or _best_script("watch-phone-worker.sh"))).expanduser()
     worker_dir = _phone_worker_dir()
     script = worker_dir / f".core-worker-deferred-{action}.sh"
+    pid_file = _phone_worker_pid_file()
+    quoted_pid_file = shlex.quote(str(pid_file))
     lines = [
-        "#!/data/data/com.termux/files/usr/bin/bash",
-        "set +e",
-        "sleep 1",
-        "termux-wake-lock >/dev/null 2>&1 || true",
+        '#!/data/data/com.termux/files/usr/bin/bash',
+        'set +e',
+        'sleep 1',
+        'termux-wake-lock >/dev/null 2>&1 || true',
+        f"PID_FILE={quoted_pid_file}",
+        "pid=''",
+        'if [ -r "$PID_FILE" ]; then pid=$(head -n1 "$PID_FILE" 2>/dev/null | tr -cd \'0-9\'); fi',
+        'if [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && kill -0 "$pid" 2>/dev/null; then',
+        '  cmd=$(tr \'\\000\' \' \' < "/proc/$pid/cmdline" 2>/dev/null || true)',
+        '  case "$cmd" in *phone_worker.py*) kill "$pid" >/dev/null 2>&1 || true ;; esac',
+        'fi',
         f"tmux kill-session -t {shlex.quote(session)} >/dev/null 2>&1 || true",
-        "pkill -f 'phone_worker.py' >/dev/null 2>&1 || true",
+        'sleep 1',
+        'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then',
+        '  cmd=$(tr \'\\000\' \' \' < "/proc/$pid/cmdline" 2>/dev/null || true)',
+        '  case "$cmd" in *phone_worker.py*) kill -9 "$pid" >/dev/null 2>&1 || true ;; esac',
+        'fi',
     ]
     if action == "restart":
         lines.extend([
@@ -10748,14 +11137,9 @@ def main() -> int:
         )
         return 0 if ok else 1
 
-    server = ThreadingHTTPServer((args.host, args.port), WorkerHandler)
-    server.worker_token = args.token
-    server.phone_worker_host = args.host
-    server.phone_worker_port = args.port
-    server.max_body_bytes = max_body_bytes
-    server.max_output_bytes = max_output_bytes
-    server.job_timeout = job_timeout
-    print(f"[phone-worker] ouvindo em {args.host}:{args.port}; token={'sim' if args.token else 'não'}; versão={PHONE_WORKER_VERSION}", flush=True)
+    # O control plane é exclusivamente de saída e precisa sobreviver mesmo sem
+    # nenhuma porta HTTP local disponível. Inicie-o antes de tentar bind.
+    _write_runtime_status(control_plane_alive=True, heartbeat_ok=None, reason="control_plane_starting")
     _start_core_worker_heartbeat(host=args.host, port=args.port)
     _start_core_worker_jobs(
         host=args.host,
@@ -10764,7 +11148,24 @@ def main() -> int:
         max_output_bytes=max_output_bytes,
         job_timeout=job_timeout,
     )
-    server.serve_forever()
+    server = _bind_phone_worker_http_server(
+        args.host,
+        args.port,
+        token=args.token,
+        max_body_bytes=max_body_bytes,
+        max_output_bytes=max_output_bytes,
+        job_timeout=job_timeout,
+    )
+    _write_runtime_status(control_plane_alive=True, heartbeat_ok=None, reason=_DIRECT_HTTP_STATE)
+    print(f"[phone-worker] control plane ativo; token_http={'sim' if args.token else 'não'}; versão={PHONE_WORKER_VERSION}; http_state={_DIRECT_HTTP_STATE}; http_port={_EFFECTIVE_HTTP_PORT}", flush=True)
+    if server is not None:
+        server.serve_forever()
+    else:
+        # Sem endpoint direto o processo principal permanece vivo; heartbeat/jobs
+        # continuam em threads daemon e o supervisor usa runtime-status + PID.
+        while True:
+            _write_runtime_status(control_plane_alive=True, heartbeat_ok=None, reason="control_plane_only")
+            time.sleep(15.0)
     return 0
 
 

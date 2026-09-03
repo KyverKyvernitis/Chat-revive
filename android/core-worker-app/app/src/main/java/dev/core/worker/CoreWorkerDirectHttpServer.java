@@ -56,22 +56,49 @@ final class CoreWorkerDirectHttpServer {
 
     synchronized void start() throws Exception {
         if (isRunning()) return;
-        int port = normalizePort(CoreWorkerRuntimeIdentity.directHttpPort(context));
-        ServerSocket socket = new ServerSocket();
-        socket.setReuseAddress(true);
-        socket.bind(new InetSocketAddress("0.0.0.0", port), 16);
+        int requestedPort = normalizePort(CoreWorkerRuntimeIdentity.directHttpPort(context));
+        int effectivePort = requestedPort;
+        String state = "listening";
+        String reason = "";
+        ServerSocket socket = null;
+        try {
+            socket = bind(requestedPort);
+        } catch (java.net.BindException conflict) {
+            // O APK compartilhado já pede 8767. Para um pareamento dedicado que
+            // preferia 8766, conflito é tratado conservadoramente: nunca tomamos
+            // a porta de um Termux/processo existente e usamos 8767 explicitamente.
+            if (requestedPort != 8766) throw conflict;
+            effectivePort = 8767;
+            state = "port_conflict_fallback_8767";
+            reason = "8766 ocupada; APK preservou o listener existente";
+            socket = bind(effectivePort);
+        }
         serverSocket = socket;
         running.set(true);
         prefs.edit()
                 .putBoolean("direct_http_active", true)
-                .putInt("direct_http_port", port)
-                .putString("direct_http_error", "")
+                .putInt("direct_http_requested_port", requestedPort)
+                .putInt("direct_http_effective_port", effectivePort)
+                .putString("direct_http_state", state)
+                .putString("direct_http_error", reason)
                 .putLong("direct_http_started_at", System.currentTimeMillis())
                 .apply();
         Thread thread = new Thread(this::acceptLoop, "core-worker-direct-http");
         thread.setDaemon(true);
         acceptThread = thread;
         thread.start();
+    }
+
+    private static ServerSocket bind(int port) throws Exception {
+        ServerSocket socket = new ServerSocket();
+        try {
+            socket.setReuseAddress(true);
+            socket.bind(new InetSocketAddress("0.0.0.0", port), 16);
+            return socket;
+        } catch (Throwable error) {
+            try { socket.close(); } catch (Throwable ignored) { }
+            throw error;
+        }
     }
 
     synchronized void stop() {
@@ -89,6 +116,7 @@ final class CoreWorkerDirectHttpServer {
         try { clients.shutdownNow(); } catch (Throwable ignored) { }
         prefs.edit()
                 .putBoolean("direct_http_active", false)
+                .putString("direct_http_state", "stopped")
                 .putLong("direct_http_stopped_at", System.currentTimeMillis())
                 .apply();
     }

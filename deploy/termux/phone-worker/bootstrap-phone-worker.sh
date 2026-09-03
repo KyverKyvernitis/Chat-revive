@@ -103,7 +103,7 @@ pkg install termux-api -y || true
 
 log "copiando/reparando scripts em $WORKER_DIR"
 mkdir -p "$WORKER_DIR"
-for f in phone_worker.py apk_identity.py music_agent.py start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
+for f in phone_worker.py phone_worker_bootstrap.py repair-phone-worker.sh accept-core-worker-on-device.sh apk_identity.py music_agent.py start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [[ -f "$SCRIPT_DIR/$f" ]]; then
     cp "$SCRIPT_DIR/$f" "$WORKER_DIR/$f"
   fi
@@ -113,7 +113,7 @@ for f in start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh 
     write_compat_wrapper "$f"
   fi
 done
-chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/music_agent.py" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/start-phone-music-agent.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true
+chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/repair-phone-worker.sh" "$WORKER_DIR/accept-core-worker-on-device.sh" "$WORKER_DIR/music_agent.py" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/start-phone-music-agent.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true
 
 log "criando/reparando inicialização automática do Termux:Boot"
 install_core_worker_boot || true
@@ -127,9 +127,8 @@ fi
 log "pareando como '$WORKER_NAME' perfil '$PROFILE'"
 bash "$WORKER_DIR/pair-phone-worker.sh" "$CODE" "$VPS_URL" "$WORKER_NAME" "$PROFILE"
 
-log "reiniciando worker"
-pkill -f '[p]hone_worker.py' 2>/dev/null || true
-sleep 1
+log "reiniciando worker pelo supervisor validado"
+bash "$WORKER_DIR/start-phone-worker.sh" || true
 nohup bash "$WORKER_DIR/watch-phone-worker.sh" >> "$WORKER_DIR/phone-worker-watch.log" 2>&1 &
 sleep 2
 

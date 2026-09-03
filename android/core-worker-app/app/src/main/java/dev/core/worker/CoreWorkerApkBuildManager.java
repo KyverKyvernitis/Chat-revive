@@ -1,8 +1,12 @@
 package dev.core.worker;
 
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
+import android.os.BatteryManager;
+import android.os.Build;
 import android.os.PowerManager;
 
 import com.chaquo.python.PyObject;
@@ -19,6 +23,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HashSet;
@@ -31,14 +37,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
 /**
  * Autobuilder controlado do Core Worker.
  *
- * O primeiro APK compatível continua sendo compilado no Termux. Depois que esse
- * APK contém o asset privado do toolchain, esta classe provisiona o ambiente no
- * armazenamento interno e passa a executar apk_build_debug/apk_publish_last.
- * A VPS nunca executa Gradle: entrega fonte/segredos por job autenticado e recebe
- * o APK pronto.
+ * O primeiro APK compatível continua sendo compilado no Termux, mas não contém
+ * JDK/Gradle/SDK nos assets. Esta classe migra um bundle legado se ele já existir,
+ * ou baixa o toolchain externo autenticado para slots privados e só anuncia
+ * apk-builder depois de cinco smokes reais. A VPS nunca executa Gradle.
  */
 final class CoreWorkerApkBuildManager {
     private static final String PREFS = "core_worker_private";
@@ -83,7 +91,7 @@ final class CoreWorkerApkBuildManager {
     static JSONArray dynamicCapabilities(Context context) {
         JSONArray out = new JSONArray();
         JSONObject preflight = preflight(context, false);
-        if (preflight.optBoolean("ready", false) || preflight.optBoolean("publishReady", false)) {
+        if (preflight.optBoolean("ready", false)) {
             out.put("apk-builder");
             out.put("apk-self-builder");
         }
@@ -94,7 +102,7 @@ final class CoreWorkerApkBuildManager {
     static JSONArray dynamicRoles(Context context) {
         JSONArray out = new JSONArray();
         JSONObject preflight = preflight(context, false);
-        if (preflight.optBoolean("ready", false) || preflight.optBoolean("publishReady", false)) {
+        if (preflight.optBoolean("ready", false)) {
             out.put("apk-builder");
         }
         return out;
@@ -134,6 +142,10 @@ final class CoreWorkerApkBuildManager {
             }
             provisionPrivateAssets(context);
             JSONObject value = callPythonPreflight(context, true);
+            value = finalizeToolchainPreflight(context, value);
+            SharedPreferences preflightPrefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            value.put("toolchainReleaseFingerprint", preflightPrefs.getString("apk_self_builder_toolchain_fingerprint", ""));
+            value.put("toolchainUpdateState", preflightPrefs.getString("apk_self_builder_toolchain_update_state", value.optString("toolchainUpdateState", "")));
             value.put("appVersionCode", BuildConfig.VERSION_CODE);
             value.put("checkedAt", now);
             cachedPreflight = value;
@@ -208,10 +220,12 @@ final class CoreWorkerApkBuildManager {
             provisionPrivateAssets(context);
             if (!Python.isStarted()) Python.start(new AndroidPlatform(context));
             PyObject module = Python.getInstance().getModule("coreworker.apk_self_builder");
+            JSONObject effectivePayload = payload == null ? new JSONObject() : new JSONObject(payload.toString());
+            effectivePayload.put("builderResources", buildResourceSnapshot(context));
             PyObject response = module.callAttr(
                     "run",
                     type,
-                    payload == null ? "{}" : payload.toString(),
+                    effectivePayload.toString(),
                     context.getFilesDir().getAbsolutePath(),
                     context.getCacheDir().getAbsolutePath(),
                     context.getApplicationInfo().nativeLibraryDir,
@@ -236,6 +250,36 @@ final class CoreWorkerApkBuildManager {
         } finally {
             if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         }
+    }
+
+    private static JSONObject buildResourceSnapshot(Context context) {
+        JSONObject out = new JSONObject();
+        try {
+            Intent battery = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (battery != null) {
+                int level = battery.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                int scale = battery.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+                int temp = battery.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1);
+                int status = battery.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+                out.put("batteryPercent", level >= 0 ? Math.round(level * 100.0 / Math.max(1, scale)) : -1);
+                out.put("charging", status == BatteryManager.BATTERY_STATUS_CHARGING
+                        || status == BatteryManager.BATTERY_STATUS_FULL
+                        || battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0);
+                if (temp >= 0) out.put("temperatureC", temp / 10.0);
+            }
+        } catch (Throwable ignored) { }
+        try {
+            PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+            if (power != null && Build.VERSION.SDK_INT >= 29) {
+                out.put("thermalStatus", power.getCurrentThermalStatus());
+            }
+        } catch (Throwable ignored) { }
+        try {
+            File files = context.getFilesDir();
+            out.put("storageFreeBytes", files.getUsableSpace());
+            out.put("storageTotalBytes", files.getTotalSpace());
+        } catch (Throwable ignored) { }
+        return out;
     }
 
     private static JSONObject callPythonPreflight(Context context, boolean runSmoke) throws Exception {
@@ -269,6 +313,8 @@ final class CoreWorkerApkBuildManager {
             value.put("refreshing", true);
             value.put("appVersionCode", BuildConfig.VERSION_CODE);
             value.put("checkedAt", checkedAt);
+            value.put("toolchainReleaseFingerprint", prefs.getString("apk_self_builder_toolchain_fingerprint", ""));
+            value.put("toolchainUpdateState", prefs.getString("apk_self_builder_toolchain_update_state", ""));
         } catch (Throwable ignored) { }
         return value;
     }
@@ -310,55 +356,395 @@ final class CoreWorkerApkBuildManager {
         File manifest = new File(toolchain, "manifest.json");
         File repro = new File(builder, "repro-assets");
         if (!builder.exists() && !builder.mkdirs()) throw new IllegalStateException("não consegui criar diretório do autobuilder");
-        if (!repro.exists()) repro.mkdirs();
+        if (!repro.exists() && !repro.mkdirs()) throw new IllegalStateException("não consegui criar repro-assets");
 
-        int provisionedVersion = prefs.getInt("apk_self_builder_asset_version_code", 0);
-        boolean shouldRefresh = provisionedVersion != BuildConfig.VERSION_CODE || !manifest.isFile();
-        boolean chunkedAsset = assetExists(context.getAssets(), TOOLCHAIN_CHUNKS_MANIFEST);
-        JSONObject chunks = chunkedAsset ? readChunkDescriptor(context) : null;
-        JSONObject chunksArchive = chunks == null ? null : chunks.optJSONObject("archive");
-        String chunksSha = chunksArchive == null ? "" : chunksArchive.optString("sha256", "").toLowerCase(Locale.ROOT);
-        boolean retainedChunks = chunks != null && retainedChunkAssetsPresent(repro, chunks);
-        boolean sameChunkedToolchain = manifest.isFile() && retainedChunks && chunksSha.matches("[0-9a-f]{64}") && chunksSha.equals(
-                prefs.getString("apk_self_builder_archive_sha256", ""));
-        if (shouldRefresh && sameChunkedToolchain) {
-            copyAsset(context.getAssets(), TOOLCHAIN_CHUNKS_MANIFEST, new File(repro, TOOLCHAIN_CHUNKS_MANIFEST));
-            prefs.edit().putInt("apk_self_builder_asset_version_code", BuildConfig.VERSION_CODE).apply();
-            shouldRefresh = false;
+        // Compatibilidade de migração: instalações antigas podem ter o toolchain em
+        // ZIP/.cwpart nos assets. Novos APKs nunca geram esses assets; só os lemos
+        // uma vez se ainda não existir um toolchain privado.
+        if (!manifest.isFile()) {
+            provisionLegacyToolchainIfPresent(context, builder, toolchain, repro, prefs);
         }
-        if (shouldRefresh && (chunkedAsset || assetExists(context.getAssets(), TOOLCHAIN_ASSET))) {
-            File retained;
-            if (chunkedAsset) {
-                retained = materializeChunkedToolchain(context, builder, repro, chunks);
-            } else {
-                retained = new File(repro, TOOLCHAIN_ASSET);
-                copyAsset(context.getAssets(), TOOLCHAIN_ASSET, retained);
-            }
-            File staging = new File(builder, "toolchain-next");
-            deleteTree(staging);
-            if (!staging.mkdirs()) throw new IllegalStateException("não consegui criar staging do toolchain");
-            try {
-                extractZip(retained, staging);
-                File stagedManifest = new File(staging, "manifest.json");
-                if (!stagedManifest.isFile()) throw new IllegalStateException("manifest.json ausente no toolchain do APK");
-                restoreExecutablePaths(staging, stagedManifest);
-                deleteTree(toolchain);
-                if (!staging.renameTo(toolchain)) {
-                    copyTree(staging, toolchain);
-                    deleteTree(staging);
-                }
-                restoreExecutablePaths(toolchain, new File(toolchain, "manifest.json"));
-                SharedPreferences.Editor editor = prefs.edit()
-                        .putInt("apk_self_builder_asset_version_code", BuildConfig.VERSION_CODE);
-                if (chunkedAsset) editor.putString("apk_self_builder_archive_sha256", chunksSha);
-                editor.apply();
-            } finally {
-                if (chunkedAsset) retained.delete();
-            }
+
+        try {
+            provisionExternalToolchain(context, builder, toolchain, prefs);
+        } catch (Throwable error) {
+            prefs.edit()
+                    .putString("apk_self_builder_toolchain_update_state", "failed_transient")
+                    .putString("apk_self_builder_toolchain_update_error", compact(shortThrowable(error)))
+                    .putLong("apk_self_builder_toolchain_update_at", System.currentTimeMillis())
+                    .apply();
+            // Um update externo quebrado não destrói o último toolchain conhecido.
+            // Se não houver fallback local, o preflight precisa falhar e o Termux
+            // permanece como builder canônico.
+            if (!new File(toolchain, "manifest.json").isFile()) throw error;
         }
 
         retainAssetIfPresent(context, BOX64_ASSET, new File(repro, BOX64_ASSET));
         retainAssetIfPresent(context, EMBEDDED_MANIFEST_ASSET, new File(repro, EMBEDDED_MANIFEST_ASSET));
+    }
+
+    private static void provisionLegacyToolchainIfPresent(
+            Context context, File builder, File toolchain, File repro, SharedPreferences prefs) throws Exception {
+        boolean chunkedAsset = assetExists(context.getAssets(), TOOLCHAIN_CHUNKS_MANIFEST);
+        boolean zipAsset = assetExists(context.getAssets(), TOOLCHAIN_ASSET);
+        if (!chunkedAsset && !zipAsset) return;
+
+        JSONObject chunks = chunkedAsset ? readChunkDescriptor(context) : null;
+        JSONObject chunksArchive = chunks == null ? null : chunks.optJSONObject("archive");
+        String chunksSha = chunksArchive == null ? "" : chunksArchive.optString("sha256", "").toLowerCase(Locale.ROOT);
+        File retained;
+        if (chunkedAsset) {
+            retained = materializeChunkedToolchain(context, builder, repro, chunks);
+        } else {
+            retained = new File(repro, TOOLCHAIN_ASSET);
+            copyAsset(context.getAssets(), TOOLCHAIN_ASSET, retained);
+        }
+        File staging = new File(builder, "toolchain-next");
+        deleteTree(staging);
+        if (!staging.mkdirs()) throw new IllegalStateException("não consegui criar staging legado do toolchain");
+        try {
+            extractZip(retained, staging);
+            File stagedManifest = new File(staging, "manifest.json");
+            restoreExecutablePaths(staging, stagedManifest);
+            promoteToolchain(builder, toolchain, staging, prefs,
+                    chunksSha.matches("[0-9a-f]{64}") ? chunksSha : "legacy-assets");
+            prefs.edit()
+                    .putInt("apk_self_builder_asset_version_code", BuildConfig.VERSION_CODE)
+                    .putString("apk_self_builder_toolchain_update_state", "legacy_migrated")
+                    .putLong("apk_self_builder_toolchain_update_at", System.currentTimeMillis())
+                    .apply();
+        } finally {
+            if (chunkedAsset) retained.delete();
+        }
+    }
+
+    private static void provisionExternalToolchain(
+            Context context, File builder, File toolchain, SharedPreferences prefs) throws Exception {
+        String token = prefs.getString("worker_token", "").trim();
+        String workerId = CoreWorkerRuntimeIdentity.runtimeWorkerId(context);
+        String physicalWorkerId = CoreWorkerRuntimeIdentity.canonicalWorkerId(context);
+        String serverUrl = prefs.getString("server_url", "").trim();
+        if (serverUrl.isEmpty()) serverUrl = BuildConfig.CORE_WORKER_VPS_URL == null ? "" : BuildConfig.CORE_WORKER_VPS_URL.trim();
+        if (token.isEmpty() || workerId.isEmpty() || serverUrl.isEmpty()) {
+            prefs.edit().putString("apk_self_builder_toolchain_update_state", "blocked_by_config").apply();
+            return;
+        }
+        serverUrl = trimTrailingSlash(serverUrl);
+        URL latestUrl = sameOriginUrl(serverUrl, serverUrl + "/core-worker/toolchain/latest?worker_id=" + urlEncode(workerId));
+        HttpResult latest = authenticatedGet(latestUrl, workerId, token, 512 * 1024L);
+        verifySignedResponse(latest, token);
+        JSONObject target = new JSONObject(new String(latest.body, StandardCharsets.UTF_8));
+        if (!"core-worker-toolchain-release-v2".equals(target.optString("schema", ""))) {
+            throw new IllegalStateException("manifesto latest do toolchain possui schema inválido");
+        }
+        String fingerprint = target.optString("toolchainFingerprint", "").trim().toLowerCase(Locale.ROOT);
+        String sha256 = target.optString("sha256", "").trim().toLowerCase(Locale.ROOT);
+        long compactBytes = target.optLong("bytes", 0L);
+        long expandedBytes = target.optLong("expandedBytes", 0L);
+        if (!fingerprint.matches("[0-9a-f]{64}") || !fingerprint.equals(sha256)
+                || compactBytes <= 0L || compactBytes > 1024L * 1024L * 1024L
+                || expandedBytes <= 0L || expandedBytes > MAX_TOOLCHAIN_EXPANDED_BYTES) {
+            throw new IllegalStateException("metadados de tamanho/fingerprint inválidos no toolchain externo");
+        }
+        String declaredPhysical = target.optString("physicalWorkerId", "").trim();
+        if (!declaredPhysical.isEmpty() && !physicalWorkerId.isEmpty() && !declaredPhysical.equals(physicalWorkerId)) {
+            throw new IllegalStateException("toolchain publicado para outro worker físico");
+        }
+        JSONObject versions = target.optJSONObject("versions");
+        if (versions == null || versions.optInt("jdkMajor", 0) != 17
+                || !"8.9".equals(versions.optString("gradle", ""))
+                || versions.optInt("compileSdk", 0) != 34
+                || !"34.0.0".equals(versions.optString("buildTools", ""))) {
+            throw new IllegalStateException("matriz de versões do toolchain externo incompatível");
+        }
+
+        File manifest = new File(toolchain, "manifest.json");
+        String currentFingerprint = prefs.getString("apk_self_builder_toolchain_fingerprint", "").trim().toLowerCase(Locale.ROOT);
+        if (manifest.isFile() && fingerprint.equals(currentFingerprint)) {
+            restoreExecutablePaths(toolchain, manifest);
+            prefs.edit().putString("apk_self_builder_toolchain_update_state", "succeeded").apply();
+            return;
+        }
+
+        long requiredFree = compactBytes + expandedBytes + 256L * 1024L * 1024L;
+        long usable = builder.getUsableSpace();
+        if (usable > 0L && usable < requiredFree) {
+            prefs.edit()
+                    .putString("apk_self_builder_toolchain_update_state", "preflight_blocked")
+                    .putString("apk_self_builder_toolchain_update_error", "espaço insuficiente para atualizar toolchain")
+                    .putLong("apk_self_builder_toolchain_required_bytes", requiredFree)
+                    .putLong("apk_self_builder_toolchain_free_bytes", usable)
+                    .apply();
+            if (!manifest.isFile()) throw new IllegalStateException("preflight_blocked: espaço insuficiente para toolchain");
+            return;
+        }
+
+        String rawUrl = target.optString("url", "").trim();
+        URL releaseUrl = sameOriginUrl(serverUrl, rawUrl.startsWith("http://") || rawUrl.startsWith("https://")
+                ? rawUrl : serverUrl + (rawUrl.startsWith("/") ? rawUrl : "/" + rawUrl));
+        File archivePart = new File(builder, "toolchain-download.part");
+        File staging = new File(builder, "toolchain-next");
+        deleteTree(staging);
+        archivePart.delete();
+        prefs.edit()
+                .putString("apk_self_builder_toolchain_update_state", "toolchain_downloading")
+                .putString("apk_self_builder_toolchain_target", fingerprint)
+                .putLong("apk_self_builder_toolchain_update_at", System.currentTimeMillis())
+                .apply();
+        try {
+            downloadAuthenticated(releaseUrl, workerId, token, archivePart, compactBytes, fingerprint);
+            if (!staging.mkdirs()) throw new IllegalStateException("não consegui criar staging do toolchain externo");
+            extractZip(archivePart, staging);
+            File stagedManifest = new File(staging, "manifest.json");
+            restoreExecutablePaths(staging, stagedManifest);
+            JSONObject internal = new JSONObject(new String(java.nio.file.Files.readAllBytes(stagedManifest.toPath()), StandardCharsets.UTF_8));
+            if (!"core-worker-android-builder-v2".equals(internal.optString("schema", ""))) {
+                throw new IllegalStateException("schema interno do toolchain externo inválido");
+            }
+            String internalPhysical = internal.optString("physicalWorkerId", "").trim();
+            if (!internalPhysical.isEmpty() && !physicalWorkerId.isEmpty() && !internalPhysical.equals(physicalWorkerId)) {
+                throw new IllegalStateException("toolchain interno pertence a outro worker físico");
+            }
+            prefs.edit().putString("apk_self_builder_toolchain_update_state", "validating").apply();
+            promoteToolchain(builder, toolchain, staging, prefs, fingerprint);
+            prefs.edit().putString("apk_self_builder_toolchain_update_state", "verifying_runtime").apply();
+        } finally {
+            archivePart.delete();
+            if (staging.exists()) deleteTree(staging);
+        }
+    }
+
+    private static void promoteToolchain(
+            File builder, File toolchain, File staging, SharedPreferences prefs, String newFingerprint) throws Exception {
+        File previous = new File(builder, "toolchain-previous");
+        String oldFingerprint = prefs.getString("apk_self_builder_toolchain_fingerprint", "");
+        deleteTree(previous);
+        if (toolchain.exists()) {
+            if (!toolchain.renameTo(previous)) {
+                copyTree(toolchain, previous);
+                deleteTree(toolchain);
+            }
+        }
+        try {
+            if (!staging.renameTo(toolchain)) {
+                copyTree(staging, toolchain);
+                deleteTree(staging);
+            }
+        } catch (Throwable error) {
+            deleteTree(toolchain);
+            if (previous.exists()) {
+                if (!previous.renameTo(toolchain)) copyTree(previous, toolchain);
+            }
+            throw error;
+        }
+        prefs.edit()
+                .putString("apk_self_builder_previous_toolchain_fingerprint", oldFingerprint)
+                .putString("apk_self_builder_toolchain_fingerprint", newFingerprint)
+                .putString("apk_self_builder_pending_toolchain_fingerprint", newFingerprint)
+                .putLong("apk_self_builder_toolchain_promoted_at", System.currentTimeMillis())
+                .apply();
+    }
+
+    private static JSONObject finalizeToolchainPreflight(Context context, JSONObject value) throws Exception {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String pending = prefs.getString("apk_self_builder_pending_toolchain_fingerprint", "").trim();
+        if (pending.isEmpty()) return value;
+        File builder = new File(context.getFilesDir(), "apk-self-builder");
+        File current = new File(builder, "toolchain");
+        File previous = new File(builder, "toolchain-previous");
+        if (value.optBoolean("ready", false)) {
+            prefs.edit()
+                    .putString("apk_self_builder_known_good_toolchain_fingerprint", pending)
+                    .remove("apk_self_builder_pending_toolchain_fingerprint")
+                    .putString("apk_self_builder_toolchain_update_state", "succeeded")
+                    .putString("apk_self_builder_toolchain_update_error", "")
+                    .putLong("apk_self_builder_toolchain_verified_at", System.currentTimeMillis())
+                    .apply();
+            value.put("toolchainUpdateState", "succeeded");
+            value.put("toolchainFingerprint", pending);
+            return value;
+        }
+        if (!previous.isDirectory()) {
+            prefs.edit().putString("apk_self_builder_toolchain_update_state", "failed").apply();
+            value.put("toolchainUpdateState", "failed");
+            return value;
+        }
+
+        String previousFingerprint = prefs.getString("apk_self_builder_previous_toolchain_fingerprint", "");
+        File failed = new File(builder, "toolchain-failed");
+        deleteTree(failed);
+        if (current.exists() && !current.renameTo(failed)) {
+            copyTree(current, failed);
+            deleteTree(current);
+        }
+        if (!previous.renameTo(current)) {
+            copyTree(previous, current);
+            deleteTree(previous);
+        }
+        restoreExecutablePaths(current, new File(current, "manifest.json"));
+        prefs.edit()
+                .putString("apk_self_builder_toolchain_fingerprint", previousFingerprint)
+                .remove("apk_self_builder_pending_toolchain_fingerprint")
+                .putString("apk_self_builder_toolchain_update_state", "rolled_back")
+                .putString("apk_self_builder_toolchain_update_error", compact(value.optString("summary", "smoke do toolchain novo falhou")))
+                .putLong("apk_self_builder_toolchain_verified_at", System.currentTimeMillis())
+                .apply();
+        JSONObject rollback = callPythonPreflight(context, true);
+        rollback.put("toolchainUpdateState", "rolled_back");
+        rollback.put("rolledBackFrom", pending);
+        rollback.put("toolchainFingerprint", previousFingerprint);
+        deleteTree(failed);
+        return rollback;
+    }
+
+    private static String trimTrailingSlash(String value) {
+        String out = value == null ? "" : value.trim();
+        while (out.endsWith("/")) out = out.substring(0, out.length() - 1);
+        return out;
+    }
+
+    private static String urlEncode(String value) throws Exception {
+        return java.net.URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8.name());
+    }
+
+    private static URL sameOriginUrl(String serverUrl, String candidate) throws Exception {
+        URL base = new URL(serverUrl);
+        URL target = new URL(candidate);
+        int basePort = base.getPort() >= 0 ? base.getPort() : base.getDefaultPort();
+        int targetPort = target.getPort() >= 0 ? target.getPort() : target.getDefaultPort();
+        if (!("http".equalsIgnoreCase(target.getProtocol()) || "https".equalsIgnoreCase(target.getProtocol()))
+                || !base.getProtocol().equalsIgnoreCase(target.getProtocol())
+                || !base.getHost().equalsIgnoreCase(target.getHost())
+                || basePort != targetPort) {
+            throw new IllegalStateException("URL do toolchain aponta para origem não autorizada");
+        }
+        return target;
+    }
+
+    private static final class HttpResult {
+        final byte[] body;
+        final String signature;
+        final String timestamp;
+        HttpResult(byte[] body, String signature, String timestamp) {
+            this.body = body;
+            this.signature = signature == null ? "" : signature;
+            this.timestamp = timestamp == null ? "" : timestamp;
+        }
+    }
+
+    private static HttpResult authenticatedGet(URL url, String workerId, String token, long maxBytes) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(15_000);
+        connection.setReadTimeout(30_000);
+        connection.setInstanceFollowRedirects(false);
+        connection.setRequestProperty("Authorization", "Bearer " + token);
+        connection.setRequestProperty("X-Core-Worker-Id", workerId);
+        connection.setRequestProperty("Accept-Encoding", "identity");
+        int status = connection.getResponseCode();
+        if (status < 200 || status >= 300) {
+            connection.disconnect();
+            throw new IllegalStateException("VPS recusou manifesto do toolchain: HTTP " + status);
+        }
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (InputStream input = new BufferedInputStream(connection.getInputStream())) {
+            byte[] buffer = new byte[64 * 1024];
+            long total = 0L;
+            int read;
+            while ((read = input.read(buffer)) >= 0) {
+                if (read <= 0) continue;
+                total += read;
+                if (total > maxBytes) throw new IllegalStateException("resposta do manifesto excede limite");
+                output.write(buffer, 0, read);
+            }
+        }
+        HttpResult result = new HttpResult(output.toByteArray(),
+                connection.getHeaderField("X-Core-Worker-Signature"),
+                connection.getHeaderField("X-Core-Worker-Timestamp"));
+        connection.disconnect();
+        return result;
+    }
+
+    private static Mac newHmac(String token) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(token.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        return mac;
+    }
+
+    private static void verifySignedResponse(HttpResult result, String token) throws Exception {
+        verifyTimestamp(result.timestamp);
+        String expected = result.signature.startsWith("sha256=") ? result.signature.substring(7) : "";
+        Mac mac = newHmac(token);
+        mac.update(result.timestamp.trim().getBytes(StandardCharsets.US_ASCII));
+        mac.update((byte) '\n');
+        String actual = hex(mac.doFinal(result.body));
+        if (!expected.matches("[0-9a-fA-F]{64}") || !MessageDigest.isEqual(
+                expected.toLowerCase(Locale.ROOT).getBytes(StandardCharsets.US_ASCII),
+                actual.getBytes(StandardCharsets.US_ASCII))) {
+            throw new SecurityException("HMAC inválido no manifesto do toolchain");
+        }
+    }
+
+    private static void verifyTimestamp(String raw) throws Exception {
+        long timestamp;
+        try { timestamp = Long.parseLong(raw == null ? "" : raw.trim()); }
+        catch (NumberFormatException error) { throw new SecurityException("timestamp autenticado ausente"); }
+        long now = System.currentTimeMillis() / 1000L;
+        if (Math.abs(now - timestamp) > 300L) throw new SecurityException("resposta autenticada expirada");
+    }
+
+    private static void downloadAuthenticated(
+            URL url, String workerId, String token, File target, long expectedBytes, String expectedSha) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(20_000);
+        connection.setReadTimeout(120_000);
+        connection.setInstanceFollowRedirects(false);
+        connection.setRequestProperty("Authorization", "Bearer " + token);
+        connection.setRequestProperty("X-Core-Worker-Id", workerId);
+        connection.setRequestProperty("Accept-Encoding", "identity");
+        int status = connection.getResponseCode();
+        if (status < 200 || status >= 300) {
+            connection.disconnect();
+            throw new IllegalStateException("download do toolchain falhou: HTTP " + status);
+        }
+        String signature = connection.getHeaderField("X-Core-Worker-Signature");
+        String timestamp = connection.getHeaderField("X-Core-Worker-Timestamp");
+        verifyTimestamp(timestamp);
+        String expectedHmac = signature != null && signature.startsWith("sha256=") ? signature.substring(7) : "";
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        Mac mac = newHmac(token);
+        mac.update(timestamp.trim().getBytes(StandardCharsets.US_ASCII));
+        mac.update((byte) '\n');
+        long total = 0L;
+        try (InputStream input = new BufferedInputStream(connection.getInputStream());
+             BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(target, false))) {
+            byte[] buffer = new byte[1024 * 1024];
+            int read;
+            while ((read = input.read(buffer)) >= 0) {
+                if (read <= 0) continue;
+                total += read;
+                if (total > expectedBytes || total > 1024L * 1024L * 1024L) {
+                    throw new IllegalStateException("download do toolchain excedeu tamanho declarado");
+                }
+                output.write(buffer, 0, read);
+                digest.update(buffer, 0, read);
+                mac.update(buffer, 0, read);
+            }
+            output.flush();
+        } catch (Throwable error) {
+            target.delete();
+            connection.disconnect();
+            throw error;
+        }
+        connection.disconnect();
+        String actualSha = hex(digest.digest());
+        String actualHmac = hex(mac.doFinal());
+        if (total != expectedBytes || !actualSha.equals(expectedSha)
+                || !expectedHmac.matches("[0-9a-fA-F]{64}")
+                || !MessageDigest.isEqual(expectedHmac.toLowerCase(Locale.ROOT).getBytes(StandardCharsets.US_ASCII),
+                actualHmac.getBytes(StandardCharsets.US_ASCII))) {
+            target.delete();
+            throw new SecurityException("tamanho/SHA-256/HMAC divergente no toolchain externo");
+        }
     }
 
     private static void retainAssetIfPresent(Context context, String asset, File target) {
@@ -580,21 +966,49 @@ final class CoreWorkerApkBuildManager {
         if (!manifestFile.isFile()) throw new IllegalStateException("manifest.json ausente no toolchain extraído");
         byte[] raw = java.nio.file.Files.readAllBytes(manifestFile.toPath());
         JSONObject manifest = new JSONObject(new String(raw, StandardCharsets.UTF_8));
-        if (!"core-worker-android-builder-v1".equals(manifest.optString("schema", ""))) {
+        String schema = manifest.optString("schema", "");
+        boolean legacyV1 = "core-worker-android-builder-v1".equals(schema);
+        boolean externalV2 = "core-worker-android-builder-v2".equals(schema);
+        if (!legacyV1 && !externalV2) {
             throw new IllegalStateException("schema inválido no toolchain extraído");
         }
-        if (manifest.optInt("version", 0) < 7) {
-            throw new IllegalStateException("toolchain antigo: validação executável v7 ausente");
-        }
-        JSONObject gradleLauncher = manifest.optJSONObject("gradleLauncher");
-        if (gradleLauncher == null || !"android-sh-resolved-app-home-jvm-opts-v2".equals(
-                gradleLauncher.optString("strategy", ""))) {
-            throw new IllegalStateException("launcher Gradle incompatível com /system/bin/sh");
+        if (legacyV1) {
+            if (manifest.optInt("version", 0) < 7) {
+                throw new IllegalStateException("toolchain legado antigo: validação executável v7 ausente");
+            }
+            JSONObject gradleLauncher = manifest.optJSONObject("gradleLauncher");
+            if (gradleLauncher == null || !"android-sh-resolved-app-home-jvm-opts-v2".equals(
+                    gradleLauncher.optString("strategy", ""))) {
+                throw new IllegalStateException("launcher Gradle legado incompatível com /system/bin/sh");
+            }
+        } else {
+            if (manifest.optInt("version", 0) < 2) {
+                throw new IllegalStateException("toolchain externo v2 antigo");
+            }
+            JSONObject versions = manifest.optJSONObject("versions");
+            if (versions == null || versions.optInt("jdkMajor", 0) != 17
+                    || !"8.9".equals(versions.optString("gradle", ""))
+                    || !"8.7.3".equals(versions.optString("agp", ""))
+                    || versions.optInt("compileSdk", 0) != 34
+                    || !"34.0.0".equals(versions.optString("buildTools", ""))
+                    || !"17.0.0".equals(versions.optString("chaquopy", ""))) {
+                throw new IllegalStateException("matriz de versões do toolchain externo incompatível");
+            }
         }
         JSONObject validation = manifest.optJSONObject("validation");
         if (validation == null || !"required-executable-smoke-v2".equals(
                 validation.optString("strategy", ""))) {
             throw new IllegalStateException("estratégia de validação executável ausente no toolchain");
+        }
+        JSONArray requiredSmoke = validation.optJSONArray("requiredSmokeChecks");
+        Set<String> requiredNames = new HashSet<>();
+        if (requiredSmoke != null) {
+            for (int i = 0; i < requiredSmoke.length(); i++) requiredNames.add(requiredSmoke.optString(i, ""));
+        }
+        if (externalV2 && !(requiredNames.size() == 5 && requiredNames.contains("java")
+                && requiredNames.contains("javac") && requiredNames.contains("jar")
+                && requiredNames.contains("gradle") && requiredNames.contains("aapt2"))) {
+            throw new IllegalStateException("toolchain externo não declara os cinco smokes obrigatórios");
         }
         JSONArray executablePaths = manifest.optJSONArray("executablePaths");
         if (executablePaths == null || executablePaths.length() == 0

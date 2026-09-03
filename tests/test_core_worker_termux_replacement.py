@@ -69,12 +69,12 @@ def _worker_record(*, worker_id: str, token: str, apk: bool, ready: bool) -> dic
 
 def test_version_marks_bootstrap_to_self_builder_release() -> None:
     gradle = read(ANDROID / "app/build.gradle")
-    assert "versionCode 126" in gradle
-    assert 'versionName "0.7.8"' in gradle
+    assert "versionCode 127" in gradle
+    assert 'versionName "0.8.0"' in gradle
     assert "def coreWorkerSelfBuilderTargetSdk = 28" in gradle
     assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
     assert "verifyCoreWorkerSelfBuilderTargetSdk" in gradle
-    assert read(ANDROID / "README.md").startswith("# Core Worker 0.7.8 — toolchain particionado")
+    assert read(ANDROID / "README.md").startswith("# Core Worker 0.8.0")
 
 
 def test_android_runtime_has_no_legacy_termux_protocol_or_package_dependency() -> None:
@@ -151,62 +151,47 @@ def test_runtime_dispatches_builder_before_regular_jobs() -> None:
     assert "callPythonPreflight(context, true)" in manager
 
 
-def test_self_builder_has_strict_toolchain_and_no_arbitrary_command() -> None:
+def test_self_builder_has_external_transactional_toolchain_and_no_arbitrary_command() -> None:
     manager = read(JAVA / "CoreWorkerApkBuildManager.java")
     builder = read(PYTHON / "apk_self_builder.py")
     gradle = read(ANDROID / "app/build.gradle")
-    assert "core-linux/android-builder/android-builder-toolchain.zip" in manager
-    assert "android-builder-toolchain.parts.json" in manager
+    # Leitor antigo permanece apenas para migração; o caminho normal é remoto e transacional.
     assert "materializeChunkedToolchain" in manager
+    assert "toolchain-previous" in manager
+    assert "downloadAuthenticated(releaseUrl" in manager
+    assert "promoteToolchain" in manager
+    assert "finalizeToolchainPreflight" in manager
     assert "core-worker-android-builder-v1" in builder
     assert 'manifest_version >= 7' in builder
-    assert 'android-sh-resolved-app-home-jvm-opts-v2' in builder
     assert 'required-executable-smoke-v2' in builder
-    assert 'manifest.optInt("version", 0) < 7' in manager
-    assert 'required-executable-smoke-v2' in manager
-    assert 'launcher Gradle incompatível com /system/bin/sh' in manager
     assert '"runtime": "android-private-toolchain-direct"' in builder
-    assert 'del native_dir  # assinatura mantida para compatibilidade Java; builder não depende do rootfs/PRoot.' in builder
-    assert '"javac": javac.is_file()' in builder
-    assert '"jar": jar.is_file()' in builder
     assert "MAX_SOURCE_BYTES = 1024 * 1024 * 1024" in builder
-    assert "MAX_SOURCE_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024" in builder
     assert "def _toolchain_smoke(" in builder
-    assert '["/system/bin/sh", paths["gradle"], "--version", "--no-daemon"]' in builder
-    assert '[paths["aapt2"], "version"]' in builder
-    assert '"CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN": "true"' in builder
-    assert '"/system/bin/sh", paths["gradle"], "assembleDebug"' in builder
-    assert "subprocess.Popen(command" in builder
-    assert "payload.get(\"command\")" not in builder
-    assert "payload.get(\"shell\")" not in builder
-    assert "verifyCoreWorkerSelfBuilderToolchain" in gradle
-    assert "CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN" in gradle
-    assert "core-worker-android-builder-v1" in gradle
-    assert "android-sh-resolved-app-home-jvm-opts-v2" in gradle
-    assert "core-worker-toolchain-chunks-v1" in gradle
-    assert '"cwpart"' in gradle
+    assert 'payload.get("command")' not in builder
+    assert 'payload.get("shell")' not in builder
+    assert "verifyCoreWorkerNoEmbeddedToolchain" in gradle
+    assert "android-builder-toolchain.zip" in gradle
+    assert '".cwpart"' in gradle
+    assert (ANDROID / "gradle/wrapper/gradle-wrapper.jar").is_file()
     assert "pip = false" in gradle
     assert "stdlib = false" in gradle
-    assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
 
 
-def test_termux_bootstrap_requires_self_builder_toolchain() -> None:
+def test_termux_bootstrap_publishes_external_toolchain_and_stays_fallback() -> None:
     phone_worker = read(ROOT / "deploy/termux/phone-worker/phone_worker.py")
     automation = read(ROOT / "scripts/core-worker-automation.py")
     workers = read(ROOT / "utility/commands/workers.py")
-    assert 'PHONE_WORKER_VERSION = "1.10.43"' in phone_worker
-    assert 'env["CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN"] = "true"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.11.0"' in phone_worker
     assert '_prepare_apk_self_builder_toolchain(project_dir, env)' in phone_worker
-    assert 'publish_toolchain_chunk_assets' in phone_worker
-    assert '"runtime": "termux-bionic-direct"' in phone_worker
+    assert '_upload_core_worker_toolchain' in phone_worker
+    assert 'publish_toolchain_chunk_assets' not in phone_worker
+    assert '"runtime": "android-private-bionic"' in phone_worker
     assert '"generatedOnTermux": True' in phone_worker
-    assert 'toolchain self-builder ausente e geração bootstrap só é permitida no Termux' in phone_worker
-    assert '_env_int("PHONE_WORKER_APK_BUILD_SOURCE_MAX_BYTES", 1024 * 1024 * 1024)' in phone_worker
     assert '"selfBuilderRequired": True' in automation
     assert '"selfBuilderRequired": True' in workers
-    assert "external_build_required" not in automation
-    assert "build/publicação de APK não fazem parte do worker móvel" not in workers
-    assert '"builder": ("phone-worker"' in workers
+    assert 'subprocess.run(["gradle"' not in automation
+    assert 'subprocess.Popen(["gradle"' not in automation
+    assert 'runtime APK não recebe worker_update' in automation
 
 
 def test_vps_only_orchestrates_and_streams_published_apk() -> None:

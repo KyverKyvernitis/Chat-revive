@@ -25,6 +25,10 @@ STATUS_FILE="${PHONE_WORKER_STATUS_FILE:-$WORKER_DIR/phone-worker.status}"
 MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
 SSHD_AUTO_START="${PHONE_WORKER_SSHD_AUTO_START:-true}"
 SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
+RUNTIME_ROOT="${PHONE_WORKER_RUNTIME_ROOT:-$HOME/.core-worker-runtime}"
+BOOTSTRAP_INTERVAL="${PHONE_WORKER_BOOTSTRAP_INTERVAL_SECONDS:-300}"
+BOOTSTRAP_JITTER="${PHONE_WORKER_BOOTSTRAP_JITTER_SECONDS:-30}"
+BOOTSTRAP_MAX_BACKOFF="${PHONE_WORKER_BOOTSTRAP_MAX_BACKOFF_SECONDS:-1800}"
 
 # Não use fallback para ~/start-phone-worker.sh: versões antigas nesse atalho
 # já causaram loops de pip/clang e aquecimento. O instalador cria um wrapper
@@ -85,29 +89,81 @@ ensure_sshd_running() {
 
 # Impede múltiplos watchdogs competindo entre si. Lock velho é removido se o PID
 # gravado nele não existir mais.
+watch_pid_is_ours() {
+  local pid="${1:-}" cmdline=""
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -r "/proc/$pid/cmdline" ]] || return 1
+  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$cmdline" == *"watch-phone-worker.sh"* ]]
+}
+
 if ! mkdir "$WATCH_LOCK_DIR" 2>/dev/null; then
   old_pid=""
-  [[ -f "$WATCH_PID_FILE" ]] && old_pid="$(cat "$WATCH_PID_FILE" 2>/dev/null | head -n 1)"
-  if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+  [[ -f "$WATCH_LOCK_DIR/owner.pid" ]] && old_pid="$(head -n 1 "$WATCH_LOCK_DIR/owner.pid" 2>/dev/null || true)"
+  if watch_pid_is_ours "$old_pid"; then
     log "watchdog já ativo; pid=$old_pid"
     write_status "watchdog_already_online pid=$old_pid $(now_iso)"
     exit 0
   fi
-  rm -rf "$WATCH_LOCK_DIR" 2>/dev/null || true
-  mkdir "$WATCH_LOCK_DIR" 2>/dev/null || true
+  log "lock do watchdog órfão confirmado; recuperando"
+  rm -rf "$WATCH_LOCK_DIR" 2>/dev/null || exit 1
+  mkdir "$WATCH_LOCK_DIR" 2>/dev/null || exit 1
 fi
-trap 'rm -rf "$WATCH_LOCK_DIR" "$WATCH_PID_FILE" 2>/dev/null || true' EXIT INT TERM
+printf '%s\n' "$$" > "$WATCH_LOCK_DIR/owner.pid" 2>/dev/null || true
+trap 'if [[ -f "$WATCH_LOCK_DIR/owner.pid" ]] && [[ "$(cat "$WATCH_LOCK_DIR/owner.pid" 2>/dev/null)" == "$$" ]]; then rm -rf "$WATCH_LOCK_DIR" "$WATCH_PID_FILE" 2>/dev/null || true; fi' EXIT INT TERM
 
 printf '%s\n' "$$" > "$WATCH_PID_FILE" 2>/dev/null || true
 termux-wake-lock 2>/dev/null || true
 write_status "watchdog_running pid=$$ $(now_iso)"
 log "watchdog ativo; worker_dir=$WORKER_DIR intervalo=${INTERVAL}s"
 
+bootstrap_script() {
+  local active=""
+  if [[ -L "$RUNTIME_ROOT/current" || -d "$RUNTIME_ROOT/current" ]]; then
+    active="$(cd "$RUNTIME_ROOT/current" 2>/dev/null && pwd -P || true)"
+    if [[ -n "$active" && -f "$active/phone_worker_bootstrap.py" ]]; then
+      printf '%s\n' "$active/phone_worker_bootstrap.py"
+      return 0
+    fi
+  fi
+  [[ -f "$WORKER_DIR/phone_worker_bootstrap.py" ]] && printf '%s\n' "$WORKER_DIR/phone_worker_bootstrap.py"
+}
+
+run_bootstrap_check() {
+  local script="$(bootstrap_script)"
+  [[ -n "$script" ]] || return 0  # protocolo antigo ainda em migração
+  command -v python >/dev/null 2>&1 || return 1
+  log "verificação pull do bootstrap iniciada"
+  if python "$script" --check >> "$WATCH_LOG" 2>&1; then
+    log "verificação pull do bootstrap concluída"
+    return 0
+  fi
+  log "verificação pull do bootstrap falhou; worker atual será preservado"
+  return 1
+}
+
+next_bootstrap=0
+bootstrap_failures=0
 failures=0
 while true; do
   rotate_watch_log_if_needed
   termux-wake-lock 2>/dev/null || true
   ensure_sshd_running
+  now_epoch="$(date +%s 2>/dev/null || echo 0)"
+  if [[ "$now_epoch" =~ ^[0-9]+$ && "$now_epoch" -ge "$next_bootstrap" ]]; then
+    if run_bootstrap_check; then
+      bootstrap_failures=0
+      backoff="$BOOTSTRAP_INTERVAL"
+    else
+      bootstrap_failures=$((bootstrap_failures + 1))
+      backoff=$((BOOTSTRAP_INTERVAL * (1 << (bootstrap_failures > 3 ? 3 : bootstrap_failures))))
+      [[ "$backoff" -gt "$BOOTSTRAP_MAX_BACKOFF" ]] && backoff="$BOOTSTRAP_MAX_BACKOFF"
+    fi
+    jitter=0
+    if [[ "$BOOTSTRAP_JITTER" =~ ^[0-9]+$ && "$BOOTSTRAP_JITTER" -gt 0 ]]; then jitter=$((RANDOM % (BOOTSTRAP_JITTER + 1))); fi
+    next_bootstrap=$((now_epoch + backoff + jitter))
+  fi
   if [[ -x "$START_SCRIPT" ]]; then
     if "$START_SCRIPT" >> "$WATCH_LOG" 2>&1; then
       failures=0

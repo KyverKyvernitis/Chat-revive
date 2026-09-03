@@ -1,10 +1,10 @@
 """Builder autocontido do Core Worker APK.
 
 Executa somente jobs allowlist de build/publicação. O primeiro APK é compilado
-no Termux, que empacota seu toolchain Bionic privado (JDK, Gradle, SDK e aapt2).
-Depois da instalação, o APK retém esse bundle e executa o Gradle diretamente no
-armazenamento privado. A VPS apenas entrega fonte/segredos temporários e recebe
-o APK pronto; nunca executa o build.
+no Termux sem toolchain gigante nos assets. Depois da instalação, o APK baixa e
+valida um toolchain Bionic externo, retém o último slot saudável e executa o
+Gradle diretamente no armazenamento privado. A VPS entrega fonte/artefatos e
+recebe o APK pronto; nunca executa Gradle, JDK ou Android SDK.
 """
 
 from __future__ import annotations
@@ -27,7 +27,8 @@ from typing import Any
 from coreworker.apk_identity import assert_expected_apk_identity, inspect_apk_identity
 
 SCHEMA = "core-worker-apk-self-builder-v1"
-TOOLCHAIN_SCHEMA = "core-worker-android-builder-v1"
+TOOLCHAIN_SCHEMA_V1 = "core-worker-android-builder-v1"
+TOOLCHAIN_SCHEMA_V2 = "core-worker-android-builder-v2"
 MAX_SOURCE_BYTES = 1024 * 1024 * 1024
 MAX_SOURCE_ENTRIES = 16000
 MAX_SOURCE_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
@@ -114,6 +115,7 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
     gradle_launcher = manifest.get("gradleLauncher") if isinstance(manifest.get("gradleLauncher"), dict) else {}
     bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
     validation = manifest.get("validation") if isinstance(manifest.get("validation"), dict) else {}
+    versions = manifest.get("versions") if isinstance(manifest.get("versions"), dict) else {}
     raw_executables = manifest.get("executablePaths") if isinstance(manifest.get("executablePaths"), list) else []
 
     paths = manifest.get("paths") if isinstance(manifest.get("paths"), dict) else {}
@@ -164,14 +166,27 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
             returncode_ok = False
         bootstrap_smoke_valid = bootstrap_smoke_valid and check.get("ok") is True and returncode_ok
 
+    legacy_v1 = schema == TOOLCHAIN_SCHEMA_V1
+    external_v2 = schema == TOOLCHAIN_SCHEMA_V2
+    required_smoke = set(validation.get("requiredSmokeChecks") or [])
+    exact_v2_versions = (
+        int(versions.get("jdkMajor") or 0) == 17
+        and str(versions.get("gradle") or "") == "8.9"
+        and str(versions.get("agp") or "") == "8.7.3"
+        and int(versions.get("compileSdk") or 0) == 34
+        and str(versions.get("buildTools") or "") == "34.0.0"
+        and str(versions.get("chaquopy") or "") == "17.0.0"
+    )
     checks = {
         "manifest": manifest_path.is_file(),
-        "schema": schema == TOOLCHAIN_SCHEMA,
-        "manifestVersion": manifest_version >= 7,
+        "schema": legacy_v1 or external_v2,
+        "manifestVersion": (legacy_v1 and manifest_version >= 7) or (external_v2 and manifest_version >= 2),
+        "versions": (not external_v2) or exact_v2_versions,
         "executablePaths": declared_executables_valid,
         "runtimeLibraries": runtime_libraries.get("strategy") == "dt-needed-transitive-v1",
-        "gradleLauncher": gradle_launcher.get("strategy") == "android-sh-resolved-app-home-jvm-opts-v2",
-        "validation": validation.get("strategy") == "required-executable-smoke-v2",
+        "gradleLauncher": (not legacy_v1) or gradle_launcher.get("strategy") == "android-sh-resolved-app-home-jvm-opts-v2",
+        "validation": validation.get("strategy") == "required-executable-smoke-v2"
+            and ((not external_v2) or required_smoke == {"java", "javac", "jar", "gradle", "aapt2"}),
         "bootstrapSmoke": bootstrap_smoke_valid,
         "arch": arch in {"aarch64", "arm64", "arm64-v8a"},
         "java": java.is_file() and java.stat().st_size > 0 and os.access(java, os.X_OK),
@@ -572,6 +587,202 @@ def _inject_private_files(project: Path, payload: dict[str, Any]) -> dict[str, A
     }
 
 
+
+def _read_meminfo_bytes() -> dict[str, int]:
+    result: dict[str, int] = {}
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if ":" not in line:
+                continue
+            key, rest = line.split(":", 1)
+            match = re.search(r"(\d+)", rest)
+            if match:
+                result[key] = int(match.group(1)) * 1024
+    except Exception:
+        pass
+    return result
+
+
+def _tree_bytes(root: Path, *, entry_limit: int = 80_000) -> int:
+    total = 0
+    count = 0
+    try:
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            count += 1
+            if count > entry_limit:
+                break
+            try:
+                total += int(path.stat().st_size)
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return total
+
+
+def _active_heavy_build_processes() -> list[dict[str, Any]]:
+    current = os.getpid()
+    found: list[dict[str, Any]] = []
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return found
+    needles = ("org.gradle.launcher", "gradledaemon", "gradleworker", "aapt2")
+    for item in proc.iterdir():
+        if not item.name.isdigit() or int(item.name) == current:
+            continue
+        try:
+            raw = (item / "cmdline").read_bytes().replace(b"\x00", b" ")
+            text = raw.decode("utf-8", errors="replace").strip()
+        except Exception:
+            continue
+        lower = text.lower()
+        if text and any(needle in lower for needle in needles):
+            found.append({"pid": int(item.name), "cmd": _short(text, 220)})
+            if len(found) >= 8:
+                break
+    return found
+
+
+def _effective_gradle_heap_mb(available_bytes: int) -> int:
+    available_mb = max(0, int(available_bytes // (1024 * 1024)))
+    # Reserva memória para Android/Chaquopy/aapt2/filesystem. Sem configuração
+    # global: cada build calcula o heap a partir do estado atual do aparelho.
+    if available_mb <= 0:
+        return 512
+    usable = max(256, available_mb - max(384, int(available_mb * 0.18)))
+    return max(384, min(1280, int(usable * 0.55)))
+
+
+def _resource_preflight(
+    files: Path,
+    project: Path | None,
+    payload: dict[str, Any],
+    tool: dict[str, Any],
+) -> dict[str, Any]:
+    mem = _read_meminfo_bytes()
+    total = int(mem.get("MemTotal") or 0)
+    available = int(mem.get("MemAvailable") or mem.get("MemFree") or 0)
+    xmx_mb = _effective_gradle_heap_mb(available)
+    metaspace_mb = max(192, min(384, xmx_mb // 3))
+    builder = files / "apk-self-builder"
+    free = int(shutil.disk_usage(builder if builder.exists() else files).free)
+    source_compressed = int(payload.get("source_bytes") or payload.get("sourceBytes") or 0)
+    project_bytes = _tree_bytes(project) if project is not None and project.is_dir() else 0
+    toolchain = Path(str((tool.get("paths") or {}).get("toolchain") or ""))
+    toolchain_bytes = _tree_bytes(toolchain, entry_limit=60_000) if toolchain.is_dir() else 0
+    # Antes do download usamos o tamanho compactado declarado. Depois da
+    # extração, o tamanho real da árvore substitui a estimativa.
+    source_estimate = project_bytes or min(MAX_SOURCE_EXPANDED_BYTES, max(source_compressed * 4, source_compressed))
+    required_temp = max(1024 * 1024 * 1024, source_compressed + source_estimate * 2 + 512 * 1024 * 1024)
+
+    supplied = payload.get("builderResources") if isinstance(payload.get("builderResources"), dict) else {}
+    battery_percent = int(supplied.get("batteryPercent", -1) or -1)
+    charging = bool(supplied.get("charging", False))
+    try:
+        temperature_c = float(supplied.get("temperatureC", -1.0))
+    except Exception:
+        temperature_c = -1.0
+    try:
+        thermal_status = int(supplied.get("thermalStatus", -1))
+    except Exception:
+        thermal_status = -1
+    heavy = _active_heavy_build_processes()
+
+    blockers: list[str] = []
+    if available and available < (xmx_mb + 256) * 1024 * 1024:
+        blockers.append("memory_low")
+    if free < required_temp:
+        blockers.append("storage_low")
+    if battery_percent >= 0 and battery_percent < 25 and not charging:
+        blockers.append("battery_low")
+    if temperature_c >= 45.0:
+        blockers.append("temperature_high")
+    # Android Q+: SEVERE=3, CRITICAL=4, EMERGENCY=5, SHUTDOWN=6.
+    if thermal_status >= 3:
+        blockers.append("thermal_severe")
+    if heavy:
+        blockers.append("builder_busy")
+
+    return {
+        "ok": not blockers,
+        "state": "ready" if not blockers else "preflight_blocked",
+        "blockers": blockers,
+        "memoryTotalBytes": total,
+        "memoryAvailableBytes": available,
+        "storageFreeBytes": free,
+        "sourceCompressedBytes": source_compressed,
+        "sourceEstimatedExpandedBytes": source_estimate,
+        "projectTreeBytes": project_bytes,
+        "toolchainBytes": toolchain_bytes,
+        "estimatedRequiredTempBytes": required_temp,
+        "batteryPercent": battery_percent,
+        "charging": charging,
+        "temperatureC": temperature_c,
+        "thermalStatus": thermal_status,
+        "concurrentBuildProcesses": heavy,
+        "xmxMb": xmx_mb,
+        "maxMetaspaceMb": metaspace_mb,
+    }
+
+
+_TRANSIENT_FAILURE_RE = re.compile(
+    r"outofmemoryerror|java heap space|gc overhead|killed|signal 9|cannot allocate memory|"
+    r"no space left on device|enospc|timed? ?out|timeout|connection reset|network is unreachable|"
+    r"temporary failure|preflight_blocked|battery_low|temperature_high|thermal_severe|builder_busy",
+    re.IGNORECASE,
+)
+_DETERMINISTIC_FAILURE_RE = re.compile(
+    r"cannot find symbol|compilation failed|manifest merger failed|resource .* not found|"
+    r"aapt2? .*error:|google-services|signing|keystore|package .* does not exist|"
+    r"source zip contém caminho inseguro|sha256 do source zip divergente|toolchain .* inválido|"
+    r"versionname .* divergente|versioncode .* divergente",
+    re.IGNORECASE,
+)
+
+
+def _classify_failure(detail: Any) -> str:
+    text = str(detail or "")
+    if _TRANSIENT_FAILURE_RE.search(text):
+        return "transient"
+    if _DETERMINISTIC_FAILURE_RE.search(text):
+        return "deterministic"
+    return "unknown"
+
+
+def _acquire_build_lock(builder: Path) -> tuple[bool, Path, dict[str, Any]]:
+    lock = builder / ".apk-build-active"
+    owner = lock / "owner.json"
+    for _attempt in range(2):
+        try:
+            lock.mkdir(parents=False, exist_ok=False)
+            _atomic_json(owner, {"pid": os.getpid(), "startedAt": time.time(), "schema": SCHEMA})
+            return True, lock, {"pid": os.getpid(), "path": str(lock)}
+        except FileExistsError:
+            data = _safe_json_load(owner)
+            pid = int(data.get("pid") or 0)
+            started = float(data.get("startedAt") or 0.0)
+            alive = pid > 0 and Path(f"/proc/{pid}").exists()
+            fresh = started > 0 and time.time() - started < 4 * 60 * 60
+            if alive and fresh:
+                return False, lock, {"pid": pid, "startedAt": started, "path": str(lock)}
+            shutil.rmtree(lock, ignore_errors=True)
+        except Exception as exc:
+            return False, lock, {"error": f"{type(exc).__name__}: {_short(exc, 300)}", "path": str(lock)}
+    return False, lock, {"error": "lock ativo", "path": str(lock)}
+
+
+def _release_build_lock(lock: Path) -> None:
+    try:
+        data = _safe_json_load(lock / "owner.json")
+        if int(data.get("pid") or 0) not in {0, os.getpid()}:
+            return
+    except Exception:
+        return
+    shutil.rmtree(lock, ignore_errors=True)
+
+
 def _hydrate_runtime_assets(project: Path, native_dir: Path, repro_assets: Path) -> dict[str, Any]:
     copied: list[str] = []
     jni = project / "app/src/main/jniLibs/arm64-v8a"
@@ -600,23 +811,27 @@ def _hydrate_runtime_assets(project: Path, native_dir: Path, repro_assets: Path)
             if not target.is_file() or target.stat().st_size != source.stat().st_size:
                 shutil.copy2(source, target)
                 copied.append(str(target.relative_to(project)))
+    # Compatibilidade .cwpart é apenas de LEITURA no APK já instalado. Nunca
+    # propagamos o toolchain legado para o APK seguinte, mesmo se repro-assets
+    # antigos ainda estiverem no armazenamento privado.
     toolchain_assets = project / "app/src/main/assets/core-linux/android-builder"
-    chunk_manifest = toolchain_assets / "android-builder-toolchain.parts.json"
-    chunked = chunk_manifest.is_file()
-    if chunked:
-        try:
-            descriptor = json.loads(chunk_manifest.read_text(encoding="utf-8"))
-            parts = descriptor.get("parts") if isinstance(descriptor.get("parts"), list) else []
-            declared = {str(item.get("name") or "") for item in parts if isinstance(item, dict)}
-        except Exception:
-            declared = set()
-        for stale in toolchain_assets.glob("android-builder-toolchain.part-*.cwpart"):
-            if stale.name not in declared:
+    removed_forbidden: list[str] = []
+    if toolchain_assets.is_dir():
+        forbidden = [
+            toolchain_assets / "android-builder-toolchain.zip",
+            toolchain_assets / "android-builder-toolchain.parts.json",
+            *toolchain_assets.glob("*.cwpart"),
+        ]
+        for stale in forbidden:
+            if stale.is_file():
+                removed_forbidden.append(str(stale.relative_to(project)))
                 stale.unlink()
-        legacy = toolchain_assets / "android-builder-toolchain.zip"
-        if legacy.exists():
-            legacy.unlink()
-    return {"copied": copied, "count": len(copied), "chunkedToolchain": chunked}
+    return {
+        "copied": copied,
+        "count": len(copied),
+        "removedForbiddenToolchainAssets": removed_forbidden,
+        "externalToolchainOnly": True,
+    }
 
 
 def _tail(path: Path, limit: int = 16000) -> str:
@@ -629,7 +844,7 @@ def _tail(path: Path, limit: int = 16000) -> str:
     return raw.decode("utf-8", errors="replace")[-limit:]
 
 
-def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any], work: Path, log_path: Path) -> dict[str, Any]:
+def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any], work: Path, log_path: Path, resources: dict[str, Any]) -> dict[str, Any]:
     del native
     # O _build já executou o smoke forçado; aqui reutilizamos o fingerprint salvo.
     pre = json.loads(preflight(str(files), "", False))
@@ -645,6 +860,8 @@ def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any
     for path in (gradle_home, home, temp):
         path.mkdir(parents=True, exist_ok=True)
 
+    xmx_mb = int(resources.get("xmxMb") or 512)
+    metaspace_mb = int(resources.get("maxMetaspaceMb") or 256)
     gradle_props = gradle_home / "gradle.properties"
     gradle_props.write_text(
         "\n".join((
@@ -652,7 +869,8 @@ def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any
             "org.gradle.daemon=false",
             "org.gradle.workers.max=1",
             "org.gradle.parallel=false",
-            "org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m -Dfile.encoding=UTF-8 -Djdk.lang.Process.launchMechanism=FORK",
+            "org.gradle.vfs.watch=false",
+            f"org.gradle.jvmargs=-Xmx{xmx_mb}m -Xms64m -XX:MaxMetaspaceSize={metaspace_mb}m -Dfile.encoding=UTF-8 -Djdk.lang.Process.launchMechanism=FORK",
             "",
         )), encoding="utf-8"
     )
@@ -667,7 +885,7 @@ def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any
         "CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN": "true",
         # Mantém o launcher e o daemon de uso único com os mesmos argumentos e
         # evita depender de jspawnhelper ao iniciar aapt2/Java no Android.
-        "GRADLE_OPTS": "-Xmx768m -XX:MaxMetaspaceSize=384m -Dfile.encoding=UTF-8 -Dorg.gradle.daemon=false -Djdk.lang.Process.launchMechanism=FORK",
+        "GRADLE_OPTS": f"-Xmx{xmx_mb}m -Xms64m -XX:MaxMetaspaceSize={metaspace_mb}m -Dfile.encoding=UTF-8 -Dorg.gradle.daemon=false -Dorg.gradle.vfs.watch=false -Djdk.lang.Process.launchMechanism=FORK",
         "JAVA_TOOL_OPTIONS": "-Djdk.lang.Process.launchMechanism=FORK",
     })
     command = [
@@ -683,6 +901,15 @@ def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any
         log.write("===== Core Worker APK self-build =====\n")
         log.write(f"schema={SCHEMA}\nstarted_at={int(started)}\nproject={project}\n")
         log.write("runtime=android-private-toolchain-direct\n")
+        log.write(f"worker_version={payload.get('requiredAgentVersion') or ''}\n")
+        log.write(f"agent_source_hash={payload.get('requiredAgentSourceHash') or ''}\n")
+        log.write(f"source_fingerprint={payload.get('sourceFingerprint') or payload.get('source_sha256') or ''}\n")
+        log.write(f"apk_target={payload.get('versionName') or ''} code={payload.get('versionCode') or 0}\n")
+        log.write("jdk=17 gradle=8.9 agp=8.7.3 compileSdk=34 buildTools=34.0.0 chaquopy=17.0.0\n")
+        log.write(f"aapt2={paths['aapt2']}\n")
+        log.write(f"xmx_mb={xmx_mb} memory_available_bytes={resources.get('memoryAvailableBytes', 0)} storage_free_bytes={resources.get('storageFreeBytes', 0)}\n")
+        log.write(f"toolchain_fingerprint={payload.get('toolchainFingerprint') or _toolchain_fingerprint(tool)}\n")
+        log.write(f"toolchain_bytes={resources.get('toolchainBytes', 0)} project_bytes={resources.get('projectTreeBytes', 0)}\n")
         log.write("===== Gradle output =====\n")
         log.flush()
         process = subprocess.Popen(command, cwd=str(project), env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -842,6 +1069,19 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
     version_code = int(payload.get("versionCode") or payload.get("version_code") or 0)
     notification_id = str(payload.get("notificationId") or f"apk-{version_code}-{source_fingerprint[:12]}").strip()
 
+    early_resources = _resource_preflight(files, None, payload, pre["toolchain"])
+    if not early_resources.get("ok"):
+        detail = "preflight_blocked: " + ", ".join(early_resources.get("blockers") or [])
+        return {
+            "ok": False,
+            "summary": detail,
+            "error": detail,
+            "preflight": pre,
+            "resource_preflight": early_resources,
+            "failure_category": "transient",
+            "retryable": True,
+        }
+
     builder = files / "apk-self-builder"
     work_root = builder / "work"
     artifacts = builder / "artifacts"
@@ -849,23 +1089,47 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
     repro_assets = builder / "repro-assets"
     for path in (work_root, artifacts, logs):
         path.mkdir(parents=True, exist_ok=True)
+    lock_ok, build_lock, lock_info = _acquire_build_lock(builder)
+    if not lock_ok:
+        return {
+            "ok": False,
+            "summary": "preflight_blocked: builder_busy",
+            "error": "builder_busy: outro build ainda possui o lock",
+            "builder_lock": lock_info,
+            "failure_category": "transient",
+            "retryable": True,
+        }
     job_slug = _safe_filename(notification_id or f"build-{int(time.time())}", "apk-build")
     work = work_root / (job_slug + "-" + hashlib.sha256(f"{time.time()}".encode()).hexdigest()[:8])
     source_zip = work / "source.zip"
     source_root = work / "source"
     log_path = logs / (job_slug + "-gradle.log")
-    work.mkdir(parents=True, exist_ok=False)
     started = time.time()
     try:
+        work.mkdir(parents=True, exist_ok=False)
         download = _download_source(source_url, source_zip, expected_sha, expected_bytes, server_url)
         extracted = _safe_extract_zip(source_zip, source_root)
         project = _find_project(source_root, str(payload.get("project_subdir") or "android/core-worker-app"))
         private = _inject_private_files(project, payload)
         hydrated = _hydrate_runtime_assets(project, native, repro_assets)
+        resources = _resource_preflight(files, project, payload, pre["toolchain"])
+        if not resources.get("ok"):
+            detail = "preflight_blocked: " + ", ".join(resources.get("blockers") or [])
+            return {
+                "ok": False,
+                "summary": detail,
+                "error": detail,
+                "resource_preflight": resources,
+                "builder_environment": {"preflight": pre, "hydrated": hydrated, "resources": resources},
+                "failure_category": "transient",
+                "retryable": True,
+            }
         output_dir = project / "app/build/outputs/apk/debug"
         shutil.rmtree(output_dir, ignore_errors=True)
-        build = _run_gradle(files, native, project, payload, work, log_path)
+        build = _run_gradle(files, native, project, payload, work, log_path, resources)
         if build["returncode"] != 0:
+            detail = (build.get("logTail") or "") + "\nGradle retornou código " + str(build["returncode"])
+            category = _classify_failure(detail)
             return {
                 "ok": False,
                 "summary": "autobuild do APK falhou; consulte gradle_log_tail",
@@ -873,8 +1137,9 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
                 "returncode": build["returncode"],
                 "gradle_log_tail": build["logTail"],
                 "duration_seconds": round(time.time() - started, 3),
-                "builder_environment": {"preflight": pre, "hydrated": hydrated},
-                "retryable": False,
+                "builder_environment": {"preflight": pre, "hydrated": hydrated, "resources": resources},
+                "failure_category": category,
+                "retryable": category != "deterministic",
             }
         candidates = sorted((project / "app/build/outputs/apk/debug").glob("*.apk"), key=lambda path: path.stat().st_mtime, reverse=True)
         if not candidates:
@@ -939,6 +1204,7 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
     finally:
         # O workspace contém keystore e senhas temporárias; nunca é preservado.
         shutil.rmtree(work, ignore_errors=True)
+        _release_build_lock(build_lock)
 
 
 def run(task: str, payload_json: str, files_dir: str, cache_dir: str, native_dir: str, server_url: str, worker_id: str, token: str, worker_version: str) -> str:
@@ -959,12 +1225,15 @@ def run(task: str, payload_json: str, files_dir: str, cache_dir: str, native_dir
         else:
             result = {"ok": False, "error": "task de autobuild não permitida", "task": task}
     except Exception as exc:
+        detail = f"{type(exc).__name__}: {_short(exc, 800)}"
+        category = _classify_failure(detail)
         result = {
             "ok": False,
             "task": task,
             "summary": "falha no autobuilder do APK",
-            "error": f"{type(exc).__name__}: {_short(exc, 800)}",
-            "retryable": False,
+            "error": detail,
+            "failure_category": category,
+            "retryable": category != "deterministic",
         }
     result.setdefault("task", task)
     result.setdefault("type", task)

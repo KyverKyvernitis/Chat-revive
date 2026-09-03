@@ -131,6 +131,13 @@ final class CoreWorkerRuntimeIdentity {
         return value >= 1024 && value <= 65535 ? value : fallback;
     }
 
+    static int effectiveDirectHttpPort(Context context) {
+        SharedPreferences prefs = prefs(context);
+        int configured = directHttpPort(context);
+        int value = prefs.getInt("direct_http_effective_port", configured);
+        return value >= 1024 && value <= 65535 ? value : configured;
+    }
+
     static void putRuntimeFields(Context context, JSONObject payload) throws Exception {
         if (context == null || payload == null) return;
         String runtime = runtimeWorkerId(context);

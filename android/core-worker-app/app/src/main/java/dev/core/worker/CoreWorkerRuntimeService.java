@@ -249,7 +249,7 @@ public class CoreWorkerRuntimeService extends Service {
         } catch (Throwable error) {
             directHttpServer = null;
             prefs().edit().putBoolean("direct_http_active", false)
-                    .putString("direct_http_error", "porta " + CoreWorkerRuntimeIdentity.directHttpPort(getApplicationContext()) + ": " + shortThrowable(error))
+                    .putString("direct_http_error", "porta " + CoreWorkerRuntimeIdentity.effectiveDirectHttpPort(getApplicationContext()) + ": " + shortThrowable(error))
                     .putLong("direct_http_last_failure_at", System.currentTimeMillis()).apply();
         }
     }
@@ -737,7 +737,9 @@ public class CoreWorkerRuntimeService extends Service {
         status.put("bedrock_start_allowed", coreLinux.optBoolean("bedrockStartAllowed", false));
         status.put("native_tts_bridge_active", nativeTtsServer != null);
         status.put("direct_http_active", directHttpServer != null && directHttpServer.isRunning());
-        status.put("direct_http_port", CoreWorkerRuntimeIdentity.directHttpPort(getApplicationContext()));
+        status.put("direct_http_port", CoreWorkerRuntimeIdentity.effectiveDirectHttpPort(getApplicationContext()));
+        status.put("direct_http_requested_port", prefs().getInt("direct_http_requested_port", CoreWorkerRuntimeIdentity.directHttpPort(getApplicationContext())));
+        status.put("direct_http_state", prefs().getString("direct_http_state", directHttpServer != null && directHttpServer.isRunning() ? "listening" : "stopped"));
         status.put("termux_replaced", !CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext()));
         status.put("termux_bootstrap_active", CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext()));
         status.put("termux_bootstrap_builder_supported", true);

@@ -54,52 +54,25 @@ def test_phone_worker_update_targets_preserve_nested_paths(tmp_path: Path, monke
             module._normalize_worker_update_target(invalid)
 
 
-def test_phone_worker_update_archive_is_immutable_and_verified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    automation = _load("core_worker_update_archive_build_test", AUTOMATION_PATH)
-    phone_worker = _load("phone_worker_update_archive_read_test", PHONE_WORKER_PATH)
+def test_phone_worker_release_is_immutable_and_registry_payload_is_small(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    automation = _load("core_worker_release_build_test", AUTOMATION_PATH)
     raw = b"print('updated')\n"
     source_hash = "a" * 64
     inline = {
-        "version": "1.10.39",
-        "source_hash": source_hash,
-        "restart": True,
-        "auto": True,
-        "source": "test",
-        "files": [{
-            "target": "phone_worker.py",
-            "mode": 0o755,
-            "sha256": hashlib.sha256(raw).hexdigest(),
-            "data_b64": base64.b64encode(raw).decode("ascii"),
-        }],
+        "version": "1.11.0", "source_hash": source_hash, "restart": True, "auto": True, "source": "test",
+        "files": [{"target": "phone_worker.py", "mode": 0o755, "sha256": hashlib.sha256(raw).hexdigest(), "data_b64": base64.b64encode(raw).decode("ascii")}],
     }
-    monkeypatch.delenv("CORE_WORKER_APK_DIR", raising=False)
-    monkeypatch.setattr(automation, "ROOT", tmp_path)
+    monkeypatch.setattr(automation, "AGENT_RELEASE_ROOT", tmp_path / "agent")
     monkeypatch.setattr(automation, "_public_base_url", lambda: "https://vps.invalid")
     artifact = automation._build_worker_update_artifact_payload(inline)
     artifact_again = automation._build_worker_update_artifact_payload(inline)
-    archive = next((tmp_path / "android/core-worker-app/releases").glob("phone-worker-update-*.zip"))
+    archive = tmp_path / "agent/releases" / f"{source_hash}.zip"
 
-    def fake_download(_url, target, **_kwargs):
-        target.write_bytes(archive.read_bytes())
-        return {
-            "ok": True,
-            "bytes": target.stat().st_size,
-            "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
-        }
-
-    monkeypatch.setattr(phone_worker, "_download_url_to_file", fake_download)
-    files, transport = phone_worker._load_worker_update_files(
-        artifact,
-        max_file_bytes=1024,
-        max_total_bytes=2048,
-    )
-
-    assert transport == "zip-v1"
-    assert files[0]["target"] == "phone_worker.py"
-    assert files[0]["raw"] == raw
-    assert archive.name.endswith(f"-{artifact['update_zip_sha256'][:12]}.zip")
-    assert artifact_again["update_zip_sha256"] == artifact["update_zip_sha256"]
-    assert artifact_again["update_zip_url"] == artifact["update_zip_url"]
+    assert archive.is_file()
+    assert artifact["update_transport"] == "bootstrap-manifest-v2"
+    assert "files" not in artifact and "data_b64" not in json.dumps(artifact)
+    assert artifact_again["release_sha256"] == artifact["release_sha256"]
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == artifact["release_sha256"]
 
 
 def test_vps_and_phone_worker_compute_the_same_runtime_source_hash(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,21 +85,16 @@ def test_vps_and_phone_worker_compute_the_same_runtime_source_hash(monkeypatch: 
     assert automation._hash_phone_worker_files(worker_dir) == phone_worker._phone_worker_source_hash()
 
 
-def test_legacy_agent_gets_small_compatible_core_bootstrap() -> None:
-    automation = _load("core_worker_legacy_bootstrap_test", AUTOMATION_PATH)
-    inline = automation._build_worker_update_payload()
-    bootstrap = automation._build_legacy_worker_bootstrap_payload(inline)
-    encoded = json.dumps(bootstrap, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-
-    assert len(encoded) <= automation.PHONE_WORKER_LEGACY_RESPONSE_BUDGET_BYTES
-    assert len(encoded) < 1024 * 1024
-    assert {item["target"] for item in bootstrap["files"]} == {"phone_worker.py"}
-    assert len(base64.b64decode(bootstrap["files"][0]["data_b64"])) <= 512 * 1024
-    assert bootstrap["bootstrap_stage"] is True
-    assert bootstrap["bootstrap_complete"] is False
-    assert "source_hash" not in bootstrap
-    assert bootstrap["bootstrap_source_hash"] == bootstrap["files"][0]["sha256"]
-    assert bootstrap["target_source_hash"] == inline["source_hash"]
+def test_recovery_bootstrap_is_small_and_legacy_requires_manual_repair() -> None:
+    automation = _load("core_worker_bootstrap_budget_test", AUTOMATION_PATH)
+    bootstrap = ROOT / "deploy/termux/phone-worker/phone_worker_bootstrap.py"
+    repair = ROOT / "deploy/termux/phone-worker/repair-phone-worker.sh"
+    assert bootstrap.stat().st_size < 256 * 1024
+    assert repair.is_file()
+    source = AUTOMATION_PATH.read_text(encoding="utf-8")
+    assert "bootstrap_required: execute repair-phone-worker.sh uma vez" in source
+    assert "_build_legacy_worker_bootstrap_payload" not in source
+    assert automation.PHONE_WORKER_BOOTSTRAP_MIN_VERSION == "1.0.0"
 
 
 def test_bootstrap_core_starts_before_optional_runtime_files_arrive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,9 +113,10 @@ def test_bootstrap_core_starts_before_optional_runtime_files_arrive(tmp_path: Pa
 
     monkeypatch.setattr(module.importlib, "import_module", import_without_preloaded_identity)
 
-    assert module.PHONE_WORKER_VERSION == "1.10.43"
+    assert module.PHONE_WORKER_VERSION == "1.11.0"
     assert module._APK_IDENTITY_MODULE is None
-    assert bootstrap_core.stat().st_size <= 512 * 1024
+    assert bootstrap_core.stat().st_size > 512 * 1024
+    assert (ROOT / "deploy/termux/phone-worker/phone_worker_bootstrap.py").stat().st_size < 256 * 1024
     with pytest.raises(RuntimeError, match="segundo estágio"):
         module.inspect_apk_identity(tmp_path / "missing.apk")
 
@@ -535,17 +504,18 @@ def test_ui_and_versions_expose_builder_state_without_vps_gradle() -> None:
     gradle = (ANDROID / "app/build.gradle").read_text(encoding="utf-8")
     workers = WORKERS_PATH.read_text(encoding="utf-8")
 
-    assert 'versionCode 126' in gradle
-    assert 'versionName "0.7.8"' in gradle
+    assert 'versionCode 127' in gradle
+    assert 'versionName "0.8.0"' in gradle
     assert 'builderHeroText = smallText("Autobuild: verificando toolchain local")' in activity
     assert '"✅ Autobuild pronto' in activity
     assert 'sectionTitle("Diagnóstico e manutenção")' in activity
     assert 'bottomNavButton("⚙  Core")' in activity
     assert 'runtime_libraries.get("strategy") == "dt-needed-transitive-v1"' in builder
-    assert '"manifestVersion": manifest_version >= 7' in builder
+    assert '"manifestVersion": (legacy_v1 and manifest_version >= 7) or (external_v2 and manifest_version >= 2)' in builder
     assert 'gradle_launcher.get("strategy") == "android-sh-resolved-app-home-jvm-opts-v2"' in builder
     assert 'validation.get("strategy") == "required-executable-smoke-v2"' in builder
-    assert 'android-builder-toolchain.parts.json' in gradle
-    assert '"cwpart"' in gradle
+    assert 'verifyCoreWorkerNoEmbeddedToolchain' in gradle
+    assert 'android-builder-toolchain.zip' in gradle
+    assert '".cwpart"' in gradle
     assert 'f"**Atualização:** {automation_label}"' in workers
     assert 'discord.ui.ActionRow(refresh, pairing, cleanup_jobs)' not in workers

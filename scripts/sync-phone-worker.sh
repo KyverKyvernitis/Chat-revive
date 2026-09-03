@@ -61,7 +61,7 @@ scp -P "$PHONE_PORT" \
 
 # Scripts reais ficam apenas em ~/phone-worker. Em ~/ ficam wrappers pequenos
 # para não preservar cópias antigas que possam disparar pip/clang pesado.
-for f in start-phone-worker.sh start-phone-music-agent.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
+for f in phone_worker_bootstrap.py repair-phone-worker.sh accept-core-worker-on-device.sh start-phone-worker.sh start-phone-music-agent.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [ -f "$SRC_DIR/$f" ]; then
     "${SCP_BASE[@]}" "$SRC_DIR/$f" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/$f"
   fi
@@ -69,7 +69,7 @@ done
 
 log "ajustando permissões no celular"
 "${SSH_BASE[@]}" "
-chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/music_agent.py' '$REMOTE_DIR/start-phone-worker.sh' '$REMOTE_DIR/start-phone-music-agent.sh' '$REMOTE_DIR/watch-phone-worker.sh' '$REMOTE_DIR/pair-phone-worker.sh' '$REMOTE_DIR/bootstrap-phone-worker.sh' 2>/dev/null || true
+chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/phone_worker_bootstrap.py' '$REMOTE_DIR/repair-phone-worker.sh' '$REMOTE_DIR/accept-core-worker-on-device.sh' '$REMOTE_DIR/music_agent.py' '$REMOTE_DIR/start-phone-worker.sh' '$REMOTE_DIR/start-phone-music-agent.sh' '$REMOTE_DIR/watch-phone-worker.sh' '$REMOTE_DIR/pair-phone-worker.sh' '$REMOTE_DIR/bootstrap-phone-worker.sh' 2>/dev/null || true
 for f in start-phone-worker.sh start-phone-music-agent.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
   cat > '$REMOTE_HOME/'\$f <<EOF_WRAPPER
 #!/data/data/com.termux/files/usr/bin/bash
@@ -84,12 +84,38 @@ chmod +x '$REMOTE_HOME/.termux/boot/10-core-worker' 2>/dev/null || true
 "
 
 log "reiniciando phone-worker no celular"
-"${SSH_BASE[@]}" "
-tmux kill-session -t phone-worker 2>/dev/null || true
-pkill -f '[p]hone_worker.py' 2>/dev/null || true
+"${SSH_BASE[@]}" 'bash -s' <<'REMOTE_RESTART'
+set -u
+pid_file="$HOME/.local/state/core-worker-phone-worker/phone-worker.pid"
+start_command="$HOME/phone-worker/start-phone-worker.sh"
+if [ -f "$pid_file" ]; then
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  case "$pid" in
+    ''|*[!0-9]*) pid='' ;;
+  esac
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    cmdline="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    case "$cmdline" in
+      *phone_worker.py*)
+        kill "$pid" 2>/dev/null || true
+        for _i in 1 2 3 4 5; do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+          cmdline="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+          case "$cmdline" in
+            *phone_worker.py*) kill -9 "$pid" 2>/dev/null || true ;;
+          esac
+        fi
+        ;;
+      *) echo '[phone-worker-sync] pid file aponta para processo não confirmado; não encerrado' >&2 ;;
+    esac
+  fi
+fi
 sleep 1
-$PHONE_START_COMMAND
-"
+exec /data/data/com.termux/files/usr/bin/bash "$start_command"
+REMOTE_RESTART
 
 sleep 2
 

@@ -4544,10 +4544,13 @@ PYJSON
   [[ -n "${CORE_WORKER_APK_BUILD_STATUS//[[:space:]]/}" ]] || CORE_WORKER_APK_BUILD_STATUS="executado; sem resumo"
   [[ -n "${CORE_WORKER_NOTIFY_STATUS//[[:space:]]/}" ]] || CORE_WORKER_NOTIFY_STATUS="executado"
   if (( automation_rc != 0 )); then
-    CORE_WORKER_AGENT_UPDATE_STATUS="${CORE_WORKER_AGENT_UPDATE_STATUS} · automação degradada (rc=$automation_rc)"
-    CORE_WORKER_APK_BUILD_STATUS="${CORE_WORKER_APK_BUILD_STATUS} · automação degradada (rc=$automation_rc)"
-    CORE_WORKER_NOTIFY_STATUS="falha da automação registrada; updater principal preservado"
-    logger -t "$LOG_TAG" "Core Worker automation terminou degradada (rc=$automation_rc)"
+    # Telefone offline/pending é um estado normal e o orquestrador retorna rc=0.
+    # rc != 0 significa falha interna real: preserve o deploy do bot, mas não
+    # pinte a automação como sucesso/degradação genérica.
+    CORE_WORKER_AGENT_UPDATE_STATUS="FALHA INTERNA na automação (rc=$automation_rc) · ${CORE_WORKER_AGENT_UPDATE_STATUS}"
+    CORE_WORKER_APK_BUILD_STATUS="FALHA INTERNA na automação (rc=$automation_rc) · ${CORE_WORKER_APK_BUILD_STATUS}"
+    CORE_WORKER_NOTIFY_STATUS="falha interna persistida; deploy principal concluído sem rollback por worker offline"
+    logger -t "$LOG_TAG" "Core Worker automation FALHOU internamente (rc=$automation_rc); deploy principal preservado"
   fi
   return 0
 }

@@ -75,6 +75,9 @@ WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 pkg install python tmux curl termux-api -y || pkg install python tmux curl -y
 mkdir -p "$WORKER_DIR"
 cp "$SRC_DIR/phone_worker.py" "$WORKER_DIR/phone_worker.py"
+cp "$SRC_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/phone_worker_bootstrap.py"
+cp "$SRC_DIR/repair-phone-worker.sh" "$WORKER_DIR/repair-phone-worker.sh"
+cp "$SRC_DIR/accept-core-worker-on-device.sh" "$WORKER_DIR/accept-core-worker-on-device.sh"
 cp "$SRC_DIR/apk_identity.py" "$WORKER_DIR/apk_identity.py"
 cp "$SRC_DIR/music_agent.py" "$WORKER_DIR/music_agent.py" 2>/dev/null || true
 cp "$SRC_DIR/start-phone-worker.sh" "$WORKER_DIR/start-phone-worker.sh"
@@ -91,7 +94,7 @@ cp "$SRC_DIR/scripts/validate-teto-assets.py" "$WORKER_DIR/scripts/validate-teto
 chmod +x "$WORKER_DIR/scripts/validate-teto-assets.py" 2>/dev/null || true
 # Compatibilidade com atalhos antigos em ~/ como wrappers pequenos, nunca cópia
 # completa: isso evita script antigo fora de ~/phone-worker disparar pip/clang.
-chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/music_agent.py" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/start-phone-music-agent.sh" "$WORKER_DIR/pair-phone-worker.sh" "$WORKER_DIR/bootstrap-phone-worker.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true
+chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/repair-phone-worker.sh" "$WORKER_DIR/accept-core-worker-on-device.sh" "$WORKER_DIR/music_agent.py" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/start-phone-music-agent.sh" "$WORKER_DIR/pair-phone-worker.sh" "$WORKER_DIR/bootstrap-phone-worker.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true
 for f in start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
   write_compat_wrapper "$f"
 done

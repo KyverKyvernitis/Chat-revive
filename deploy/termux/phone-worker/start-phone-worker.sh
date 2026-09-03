@@ -12,6 +12,10 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
+RUNTIME_ROOT="${PHONE_WORKER_RUNTIME_ROOT:-$HOME/.core-worker-runtime}"
+ACTIVE_RELEASE_LINK="$RUNTIME_ROOT/current"
+RUNTIME_STATE_DIR="${PHONE_WORKER_STATE_DIR:-$HOME/.local/state/core-worker-phone-worker}"
+RUNTIME_STATUS_JSON="$RUNTIME_STATE_DIR/runtime-status.json"
 MUSIC_AGENT_ENV_FILE="${MUSIC_AGENT_ENV:-$WORKER_DIR/secrets/music-agent.env}"
 if [[ -f "$MUSIC_AGENT_ENV_FILE" ]]; then
   set -a
@@ -107,58 +111,172 @@ now_iso() {
   date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date
 }
 
-mkdir -p "$WORKER_DIR"
+mkdir -p "$WORKER_DIR" "$RUNTIME_STATE_DIR"
+
+lock_owner_alive() {
+  local owner="" cmdline=""
+  [[ -f "$LOCK_DIR/owner.pid" ]] && owner="$(head -n 1 "$LOCK_DIR/owner.pid" 2>/dev/null || true)"
+  [[ "$owner" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$owner" 2>/dev/null || return 1
+  [[ -r "/proc/$owner/cmdline" ]] || return 1
+  cmdline="$(tr '\0' ' ' < "/proc/$owner/cmdline" 2>/dev/null || true)"
+  [[ "$cmdline" == *"start-phone-worker.sh"* ]]
+}
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  log "start já em andamento; aguardando lock liberar"
-  waited=0
-  while [[ -d "$LOCK_DIR" && "$waited" -lt 20 ]]; do
-    sleep 1
-    waited=$((waited + 1))
-  done
-  if [[ -d "$LOCK_DIR" ]]; then
-    log "lock antigo encontrado; removendo: $LOCK_DIR"
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
-    mkdir "$LOCK_DIR" 2>/dev/null || true
+  if lock_owner_alive; then
+    log "start já em andamento; lock pertence a processo vivo"
+    exit 0
   fi
+  log "lock órfão confirmado; recuperando"
+  rm -rf "$LOCK_DIR" 2>/dev/null || exit 1
+  mkdir "$LOCK_DIR" 2>/dev/null || exit 1
 fi
-trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+printf '%s\n' "$$" > "$LOCK_DIR/owner.pid"
+trap 'if [[ -f "$LOCK_DIR/owner.pid" ]] && [[ "$(cat "$LOCK_DIR/owner.pid" 2>/dev/null)" == "$$" ]]; then rm -rf "$LOCK_DIR" 2>/dev/null || true; fi' EXIT INT TERM
 
 termux-wake-lock 2>/dev/null || true
 ensure_sshd_running
 
-health_ok() {
+active_release_dir() {
+  if [[ -L "$ACTIVE_RELEASE_LINK" || -d "$ACTIVE_RELEASE_LINK" ]]; then
+    local resolved
+    resolved="$(cd "$ACTIVE_RELEASE_LINK" 2>/dev/null && pwd -P || true)"
+    if [[ -n "$resolved" && -f "$resolved/phone_worker.py" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$WORKER_DIR"
+}
+
+pid_is_official_worker() {
+  local pid="${1:-}" cmdline="" cwd="" release=""
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$pid" != "1" && "$pid" != "$$" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -r "/proc/$pid/cmdline" ]] || return 1
+  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$cmdline" == *"python"* && "$cmdline" == *"phone_worker.py"* ]] || return 1
+  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+  release="$(active_release_dir)"
+  [[ "$cwd" == "$WORKER_DIR" || "$cwd" == "$release" ]]
+}
+
+pid_from_file() {
+  local pid=""
+  [[ -f "$PID_FILE" ]] && pid="$(head -n 1 "$PID_FILE" 2>/dev/null || true)"
+  if pid_is_official_worker "$pid"; then printf '%s\n' "$pid"; fi
+}
+
+list_worker_pids() {
+  local proc pid
+  for proc in /proc/[0-9]*; do
+    [[ -d "$proc" ]] || continue
+    pid="${proc##*/}"
+    pid_is_official_worker "$pid" && printf '%s\n' "$pid"
+  done | awk 'NF && !seen[$0]++'
+}
+
+worker_pid_count() { list_worker_pids | awk 'NF {c++} END {print c+0}'; }
+
+kill_worker_processes() {
+  local pid
+  while read -r pid; do
+    pid_is_official_worker "$pid" || continue
+    log "encerrando phone-worker confirmado pid=$pid"
+    kill "$pid" 2>/dev/null || true
+  done < <(list_worker_pids)
+  sleep 1
+  while read -r pid; do
+    pid_is_official_worker "$pid" || continue
+    kill -9 "$pid" 2>/dev/null || true
+  done < <(list_worker_pids)
+}
+
+health_json_on_port() {
+  local port="${1:-}"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 0
   if [[ -n "$TOKEN" ]]; then
-    curl --max-time 4 -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/health" >/dev/null 2>&1
+    curl --max-time 3 -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$port/health" 2>/dev/null || true
   else
-    curl --max-time 4 -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1
+    curl --max-time 3 -fsS "http://127.0.0.1:$port/health" 2>/dev/null || true
   fi
 }
 
-health_json() {
-  if [[ -n "$TOKEN" ]]; then
-    curl --max-time 4 -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/health" 2>/dev/null || true
-  else
-    curl --max-time 4 -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null || true
-  fi
+strict_health_for_pid() {
+  local pid="$1" port="$2" expected_worker="${CORE_WORKER_ID:-${CORE_WORKER_WORKER_ID:-}}"
+  pid_is_official_worker "$pid" || return 1
+  health_json_on_port "$port" | "$PYTHON_BIN" -c 'import json,sys,time
+pid=int(sys.argv[1]); expected=sys.argv[2].strip()
+try: d=json.load(sys.stdin)
+except Exception: raise SystemExit(1)
+kind=str(d.get("runtime_kind") or "").lower(); source=str(d.get("source") or ""); mode=str(d.get("runtime_mode") or "")
+wid=str(d.get("worker_id") or d.get("physical_worker_id") or "")
+try: got_pid=int(d.get("pid") or -1); updated=float(d.get("status_updated_at") or time.time())
+except Exception: raise SystemExit(1)
+version=str(d.get("version") or ""); source_hash=str(d.get("source_hash") or "")
+ok=(kind=="termux" and mode=="termux" and source=="termux-phone-worker" and got_pid==pid and bool(version) and len(source_hash)==64 and abs(time.time()-updated)<=45)
+if expected: ok=ok and wid==expected
+raise SystemExit(0 if ok else 1)' "$pid" "$expected_worker"
 }
 
-running_version() {
-  health_json | "$PYTHON_BIN" -c 'import json,sys;
+runtime_status_for_pid() {
+  local pid="$1" expected_worker="${CORE_WORKER_ID:-${CORE_WORKER_WORKER_ID:-}}"
+  pid_is_official_worker "$pid" || return 1
+  [[ -s "$RUNTIME_STATUS_JSON" ]] || return 1
+  "$PYTHON_BIN" - "$RUNTIME_STATUS_JSON" "$pid" "$expected_worker" <<'PYSTATUS'
+import json,sys,time
+p,pid,expected=sys.argv[1],int(sys.argv[2]),sys.argv[3].strip()
+try: d=json.load(open(p,encoding='utf-8'))
+except Exception: raise SystemExit(1)
+try: got_pid=int(d.get('pid') or -1); updated=float(d.get('updated_at') or 0); hb=float(d.get('last_heartbeat_ok_at') or 0)
+except Exception: raise SystemExit(1)
+ok=(d.get('runtime_kind')=='termux' and d.get('runtime_mode')=='termux' and d.get('source')=='termux-phone-worker' and got_pid==pid and d.get('control_plane_alive') is True and time.time()-updated<=45 and bool(d.get('version')) and len(str(d.get('source_hash') or ''))==64)
+if expected: ok=ok and str(d.get('worker_id') or '')==expected
+# No modo sem HTTP, uma conexão de saída recente é a prova de control plane real.
+if not d.get('http_port'): ok=ok and hb>0 and time.time()-hb<=180
+raise SystemExit(0 if ok else 1)
+PYSTATUS
+}
+
+runtime_http_port() {
+  [[ -s "$RUNTIME_STATUS_JSON" ]] || return 0
+  "$PYTHON_BIN" - "$RUNTIME_STATUS_JSON" <<'PYPORT' 2>/dev/null || true
+import json,sys
+try: d=json.load(open(sys.argv[1],encoding='utf-8')); p=d.get('http_port'); print(int(p) if p else '')
+except Exception: pass
+PYPORT
+}
+
+worker_healthy_for_pid() {
+  local pid="$1" port=""
+  runtime_status_for_pid "$pid" && return 0
+  port="$(runtime_http_port)"
+  [[ -n "$port" ]] && strict_health_for_pid "$pid" "$port" && return 0
+  strict_health_for_pid "$pid" "$PORT"
+}
+
+running_version_for_pid() {
+  local pid="$1"
+  [[ -s "$RUNTIME_STATUS_JSON" ]] || return 0
+  "$PYTHON_BIN" - "$RUNTIME_STATUS_JSON" "$pid" <<'PYVER' 2>/dev/null || true
+import json,sys
 try:
- data=json.load(sys.stdin); print(str(data.get("version") or ""))
-except Exception: pass' 2>/dev/null || true
+ d=json.load(open(sys.argv[1],encoding='utf-8'))
+ if int(d.get('pid') or -1)==int(sys.argv[2]): print(str(d.get('version') or ''))
+except Exception: pass
+PYVER
 }
 
 file_version() {
-  "$PYTHON_BIN" - "$WORKER_DIR/phone_worker.py" <<'PYVER' 2>/dev/null || true
+  local release="$(active_release_dir)"
+  "$PYTHON_BIN" - "$release/phone_worker.py" <<'PYVER' 2>/dev/null || true
 import re, sys
-try:
-    text=open(sys.argv[1], encoding="utf-8", errors="ignore").read()
-except Exception:
-    text=""
+try: text=open(sys.argv[1], encoding='utf-8', errors='ignore').read()
+except Exception: text=''
 m=re.search(r'^PHONE_WORKER_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
-print(m.group(1) if m else "")
+print(m.group(1) if m else '')
 PYVER
 }
 
@@ -170,41 +288,6 @@ def parts(v):
     return tuple(xs or [0])
 sys.exit(0 if parts(sys.argv[1]) < parts(sys.argv[2]) else 1)
 PYVERCMP
-}
-
-list_worker_pids() {
-  # No Android/Termux, pgrep -f can occasionally match wrappers or report
-  # misleading entries. Use ps and require a real python command running the
-  # official phone_worker.py file. Exclude this helper and shell wrappers.
-  ps -ef 2>/dev/null | awk '
-    /phone_worker\.py/ && /python/ && !/awk/ && !/grep/ && !/start-phone-worker/ && !/watch-phone-worker/ {
-      pid=$2; if (pid ~ /^[0-9]+$/ && pid != "1") print pid
-    }
-  ' | awk 'NF && !seen[$0]++' || true
-}
-
-worker_pid_count() {
-  list_worker_pids | awk 'NF {c++} END {print c+0}'
-}
-
-kill_worker_processes() {
-  list_worker_pids | while read -r pid; do
-    case "$pid" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    if [[ "$pid" != "$$" ]]; then
-      kill "$pid" 2>/dev/null || true
-    fi
-  done
-  sleep 1
-  list_worker_pids | while read -r pid; do
-    case "$pid" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    if [[ "$pid" != "$$" ]]; then
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-  done
 }
 
 rotate_log_if_needed() {
@@ -657,62 +740,70 @@ cleanup_stale_heavy_dependency_builds
 cleanup_heavy_services_for_safe_mode
 
 count="$(worker_pid_count)"
-if health_ok && [[ "$count" -le 1 ]]; then
-  running_ver="$(running_version)"
+existing_pid="$(pid_from_file)"
+if [[ -n "$existing_pid" && "$count" -le 1 ]] && worker_healthy_for_pid "$existing_pid"; then
+  running_ver="$(running_version_for_pid "$existing_pid")"
   file_ver="$(file_version)"
   if [[ "$APK_BUILDER_ENV_CHANGED" == "1" ]]; then
-    log "capacidade apk-builder alterada; reiniciando para anunciar o novo contrato"
-    write_status "restart_for_apk_builder_capability $(now_iso)"
+    log "capacidade apk-builder alterada; reiniciando processo Termux confirmado"
+    write_status "restart_for_apk_builder_capability pid=$existing_pid $(now_iso)"
     kill_worker_processes
   elif [[ -n "$running_ver" && -n "$file_ver" ]] && version_lt "$running_ver" "$file_ver"; then
-    log "worker online está desatualizado; runtime=$running_ver arquivo=$file_ver; reiniciando"
-    write_status "restart_for_update runtime=$running_ver file=$file_ver $(now_iso)"
+    log "worker Termux confirmado está desatualizado; runtime=$running_ver arquivo=$file_ver"
+    write_status "restart_for_update pid=$existing_pid runtime=$running_ver file=$file_ver $(now_iso)"
     kill_worker_processes
   else
-    # Worker saudável fica online; manutenção/deps/serviços auxiliares rodam em
-    # segundo plano com lock/cooldown para não travar o watchdog nem o celular.
     run_post_start_maintenance_async
-    log "worker já está online; pid(s)=$count"
-    write_status "ok already_online $(now_iso)"
+    log "worker Termux já saudável; pid=$existing_pid"
+    write_status "ok already_online pid=$existing_pid $(now_iso)"
     exit 0
   fi
 fi
 
-# O worker principal deve subir leve primeiro. Dependências turbo e serviços de
-# música são preparados depois, em background, para evitar aquecimento/travamento.
-
-if [[ "$KILL_DUPLICATES" != "false" ]]; then
-  log "limpando processos antigos/duplicados do phone-worker"
+# Duplicatas só são encerradas depois de confirmação por /proc/cmdline + cwd.
+if [[ "$KILL_DUPLICATES" != "false" && "$(worker_pid_count)" -gt 0 ]]; then
+  log "limpando somente processos phone-worker confirmados"
   kill_worker_processes
 fi
 
 rm -f "$PID_FILE" 2>/dev/null || true
 rotate_log_if_needed
+ACTIVE_DIR="$(active_release_dir)"
+if [[ ! -f "$ACTIVE_DIR/phone_worker.py" ]]; then
+  log "phone_worker.py oficial não encontrado em $ACTIVE_DIR"
+  exit 1
+fi
 
-log "iniciando worker em $HOST:$PORT"
+log "iniciando Termux control plane; release=$ACTIVE_DIR porta_preferida=$PORT"
 (
-  cd "$WORKER_DIR" || exit 1
+  cd "$ACTIVE_DIR" || exit 1
+  export PHONE_WORKER_RELEASE_DIR="$ACTIVE_DIR"
   exec "$PYTHON_BIN" phone_worker.py --host "$HOST" --port "$PORT"
 ) >> "$LOG_FILE" 2>&1 &
 child_pid=$!
 printf '%s\n' "$child_pid" > "$PID_FILE" 2>/dev/null || true
-write_status "starting pid=$child_pid $(now_iso)"
+write_status "starting pid=$child_pid release=$ACTIVE_DIR $(now_iso)"
 
 sleep "$START_WAIT"
 
-if health_ok; then
-  log "worker iniciado com sucesso; pid=$child_pid"
-  write_status "ok pid=$child_pid $(now_iso)"
+if ! kill -0 "$child_pid" 2>/dev/null || ! pid_is_official_worker "$child_pid"; then
+  log "processo recém-iniciado morreu ou não corresponde ao agent oficial; nenhuma resposta de outra porta será aceita"
+  write_status "failed child_dead_or_identity_mismatch pid=$child_pid $(now_iso)"
+  rm -f "$PID_FILE" 2>/dev/null || true
+  exit 1
+fi
+
+if worker_healthy_for_pid "$child_pid"; then
+  effective_port="$(runtime_http_port)"
+  log "worker Termux iniciado e validado; pid=$child_pid http_port=${effective_port:-none}"
+  write_status "ok pid=$child_pid http_port=${effective_port:-none} $(now_iso)"
   run_post_start_maintenance_async
   exit 0
 fi
 
-if kill -0 "$child_pid" 2>/dev/null; then
-  log "processo iniciou, mas health ainda não respondeu; pid=$child_pid"
-  write_status "starting_health_pending pid=$child_pid $(now_iso)"
-  exit 0
-fi
+# O filho ainda está vivo. Não invente sucesso a partir de HTTP 200 de outro
+# runtime; deixe explícito que a confirmação do control plane está pendente.
+log "processo Termux vivo, mas identidade/control-plane ainda não foram confirmados; pid=$child_pid"
+write_status "starting_verification_pending pid=$child_pid $(now_iso)"
+exit 0
 
-log "falha ao iniciar worker. Veja: tail -n 80 '$LOG_FILE'"
-write_status "failed pid=$child_pid $(now_iso)"
-exit 1

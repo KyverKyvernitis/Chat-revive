@@ -1,19 +1,35 @@
-# Core Worker 0.7.8 — toolchain particionado
+# Core Worker 0.8.0 — self-builder com toolchain externo
 
-A versão `0.7.8` usa o Termux somente como **builder bootstrap**, mantendo Termux e APK como runtimes separados durante a transição. O primeiro APK dessa transição é compilado e assinado pelo `phone_worker.py` no celular, com a mesma keystore das versões já instaladas. A VPS não executa Gradle, Android SDK, NDK ou `aapt2`: ela prepara o ZIP de fontes, entrega segredos temporários por job autenticado e publica o APK pronto recebido do celular.
+A versão `0.8.0` (`versionCode 127`) remove o toolchain de build dos assets do APK. Nenhum novo APK pode conter `android-builder-toolchain.zip`, `.cwpart`, JDK, distribuição Gradle ou Android SDK em `app/src/main/assets`. O gate do Gradle falha se esses artefatos reaparecerem, evitando regressão para o caminho que sobrecarregava `compressDebugAssets`.
 
-O bundle do toolchain usa manifesto v7 e transporte `chunked-assets-v1`. O ZIP já validado é dividido em partes de 16 MiB antes do Gradle, evitando que `compressDebugAssets` carregue um único asset de centenas de megabytes na heap. Cada parte tem tamanho e SHA-256 próprios; Gradle e APK também validam tamanho e SHA-256 do conjunto completo. O APK reconstitui o ZIP em streaming, extrai em staging e só promove o toolchain depois de repetir as validações de caminhos e executáveis. A validação funcional continua exigindo Java, Javac, Jar, Gradle e `aapt2` com código zero no smoke bootstrap.
+### Migração segura
 
-Durante o bootstrap, o Termux preserva o worker canônico e a porta `8766`; o APK usa o runtime filho `<worker-id>-apk` e a porta `8767`. Isso impede que heartbeats Android sobrescrevam a versão/capabilities do `phone_worker.py` e garante que `worker_update` e o primeiro `apk_build_debug` continuem chegando ao Termux. Pareamentos novos criados diretamente pelo APK permanecem dedicados e usam a porta `8766`.
+1. Termux 1.11.0 permanece runtime canônico/bootstrap e builder de fallback.
+2. Ele usa o Gradle Wrapper fixado em `8.9` + checksum, JDK 17, AGP 8.7.3, SDK/build-tools 34 e `aapt2` Bionic.
+3. O Termux prepara um toolchain mínimo **fora do APK**, executa os cinco smokes e publica o ZIP autenticado na VPS; a VPS apenas armazena/publica bytes e nunca executa Gradle/SDK.
+4. O primeiro APK 0.8.x é pequeno, preserva assinatura/identidade e é publicado apenas após validação compilada.
+5. Depois da instalação, o APK baixa o manifesto/toolchain por streaming para staging, verifica origem/HMAC/SHA-256/tamanho/matriz/paths, extrai com limites, restaura executáveis e promove para `toolchain`. A versão anterior permanece em `toolchain-previous` até o smoke novo passar.
+6. Apenas após `java`, `javac`, `jar`, `gradle` e `aapt2` retornarem sucesso o APK anuncia `apk-builder`. Se o toolchain desaparecer ou falhar, a capability é retirada e o Termux volta a ser o builder elegível.
 
-Durante esse primeiro build, o próprio `phone_worker.py` monta automaticamente um bundle privado com o JDK, Gradle, Android SDK 34, `aapt2` compatível com Termux e **somente as bibliotecas Bionic encontradas pela árvore transitiva `DT_NEEDED`**. O worker não copia mais todo o `$PREFIX/lib`, não inclui LLVM/FFmpeg/Python sem necessidade e reprova o bundle se Java, Javac, Jar, Gradle ou `aapt2` falharem no smoke isolado. A árvore ELF é lida com `readelf`/`llvm-readelf` quando disponível e possui parser ELF64 interno como fallback, portanto o bootstrap não passa a depender de outro pacote do Termux. Esse bundle entra no APK bootstrap. Depois da instalação, o APK extrai e retém o toolchain no armazenamento interno, executa smoke tests reais dos cinco comandos e somente então anuncia:
+O arquivo compactado baixado é removido depois da promoção, portanto não fica uma segunda cópia completa do toolchain. O leitor de `android-builder-toolchain.zip`/`.cwpart` permanece apenas para migrar instalações 0.7.x já existentes; novos builds nunca escrevem esses assets.
 
-- role/capability `apk-builder`;
-- job `apk_build_debug`;
-- job `apk_publish_last`;
-- estado `apk_self_builder.ready=true` no heartbeat.
+### Identidade e portas
 
-A partir desse momento, os jobs de build preferem o APK. O Termux continua disponível como fallback controlado até que um build completo feito pelo próprio APK seja homologado. Se o bundle estiver ausente, incompleto ou não executar no aparelho, o APK não anuncia capacidade de build e o job permanece no Termux, sem falso positivo.
+No bootstrap compartilhado, Termux usa `8766` e o APK filho usa `8767` com worker ID `<physical-worker-id>-apk`; heartbeat/capabilities/tasks do APK não sobrescrevem o Termux e `worker_update` nunca é entregue ao APK. Um APK dedicado pode preferir `8766`, mas se houver listener ele não mata nem toma a porta: usa `8767` e reporta `requested_port`, `effective_port` e conflito. O Termux pode usar `8768` como recuperação explícita.
+
+### Publicação e fonte desejada
+
+A VPS mantém `desired-source.json` atômico. Quando surge fonte nova, jobs APK ainda não iniciados são marcados `superseded`; builds em execução podem terminar, mas ficam inelegíveis para publicação. O endpoint `/core-worker/apk/publish` compara novamente fingerprint, versão, builder selecionado, runtime, agent hash e toolchain fingerprint dentro do lock imediatamente antes de trocar `latest.json`. Um build atrasado não pode sobrescrever uma fonte mais nova.
+
+O Termux continua fallback até existir homologação on-device de um build completo produzido pelo APK. A existência de um artifact anterior **não** basta para anunciar `apk-builder`.
+
+### Estados do pipeline
+
+Agent: `target_published`, `waiting_device`, `downloading`, `validating`, `installing`, `restart_pending`, `verifying_runtime`, `succeeded`, `rolled_back`, `blocked_by_config`, `port_conflict_control_plane_alive`, `failed`.
+
+APK: `waiting_agent`, `waiting_toolchain`, `toolchain_downloading`, `preflight_blocked`, `queued`, `building`, `publish_pending`, `succeeded`, `failed_transient`, `failed_deterministic`.
+
+> As seções históricas abaixo podem citar o antigo transporte `chunked-assets-v1`; ele não é o caminho normal da versão 0.8.0.
 
 ## Interface e estado do build
 
@@ -37,10 +53,12 @@ aapt2 version
 
 Se o Android ou o fabricante bloquear qualquer etapa, o APK permanece sem a capability `apk-builder` e o Termux continua responsável pelo build.
 
-## Fluxo de build
+## Histórico 0.7.x — não usar em novos builds
+
+O fluxo abaixo documenta somente a implementação anterior para facilitar migração/diagnóstico. O caminho normal 0.8.x é o toolchain externo descrito no início deste arquivo.
 
 ```text
-Primeira transição
+Primeira transição (legado)
 VPS prepara fonte/segredos → Termux gera e particiona o bundle mínimo, compila/assina → VPS valida a identidade compilada e publica → APK 0.7.8 é instalado
 
 Atualizações seguintes

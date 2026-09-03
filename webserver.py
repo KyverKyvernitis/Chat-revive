@@ -3,8 +3,10 @@ from waitress import serve
 import os
 import json
 import hashlib
+import hmac
 import re
 import contextlib
+import fcntl
 import threading
 import time
 import uuid
@@ -70,6 +72,106 @@ def _core_worker_apk_dir() -> str:
     if not base:
         base = os.path.join(os.getcwd(), "android", "core-worker-app", "releases")
     return os.path.abspath(base)
+
+
+def _core_worker_desired_source_path() -> str:
+    return os.path.join(_core_worker_apk_dir(), "desired-source.json")
+
+
+def _core_worker_desired_source_lock_path() -> str:
+    return os.path.join(_core_worker_apk_dir(), ".desired-source.lock")
+
+
+@contextlib.contextmanager
+def _core_worker_desired_source_lock():
+    os.makedirs(_core_worker_apk_dir(), exist_ok=True)
+    fh = open(_core_worker_desired_source_lock_path(), "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(Exception):
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
+def _load_core_worker_desired_source() -> dict:
+    path = _core_worker_desired_source_path()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:
+        return {"_invalid": True, "_error": f"{type(exc).__name__}: {exc}"[:180]}
+    if not isinstance(data, dict) or data.get("schema") != "core-worker-apk-desired-source-v1":
+        return {"_invalid": True, "_error": "schema inválido"}
+    fingerprint = str(data.get("sourceFingerprint") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return {"_invalid": True, "_error": "sourceFingerprint inválido"}
+    return data
+
+
+def _worker_apk_toolchain_fingerprint(worker: dict) -> str:
+    for container in (worker.get("status"), worker.get("health"), worker):
+        if not isinstance(container, dict):
+            continue
+        preflight = container.get("apk_self_builder")
+        if not isinstance(preflight, dict):
+            continue
+        for value in (
+            preflight.get("toolchainReleaseFingerprint"),
+            preflight.get("toolchainFingerprint"),
+            (preflight.get("toolchain") or {}).get("releaseFingerprint") if isinstance(preflight.get("toolchain"), dict) else "",
+        ):
+            clean = str(value or "").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{64}", clean):
+                return clean
+    return ""
+
+
+def _desired_source_publish_error(
+    desired: dict,
+    *,
+    worker: dict,
+    requested_version_name: str,
+    requested_version_code: int,
+    requested_source_fingerprint: str,
+) -> str:
+    if not desired:
+        return ""  # compatibilidade durante a primeira implantação do protocolo novo
+    if desired.get("_invalid"):
+        return "desired-source inválido na VPS"
+    expected_fp = str(desired.get("sourceFingerprint") or "").strip().lower()
+    actual_fp = str(requested_source_fingerprint or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", actual_fp):
+        return "publicação sem source fingerprint válido"
+    if actual_fp != expected_fp:
+        return "APK pertence a uma fonte superada"
+    expected_code = int(desired.get("versionCode") or 0)
+    expected_name = str(desired.get("versionName") or "").strip()
+    if expected_code and int(requested_version_code or 0) != expected_code:
+        return "versionCode não corresponde ao target desejado"
+    if expected_name and requested_version_name and requested_version_name != expected_name:
+        return "versionName não corresponde ao target desejado"
+    if str(desired.get("publicationPolicy") or "") == "selected-builder-v1":
+        expected_worker = str(desired.get("selectedBuilderWorkerId") or "").strip()
+        if not expected_worker:
+            return "target ainda não possui builder selecionado"
+        actual_worker = str(worker.get("worker_id") or "").strip()
+        if actual_worker != expected_worker:
+            return "APK produzido por builder diferente do selecionado"
+        expected_runtime = str(desired.get("selectedBuilderRuntimeKind") or "").strip().lower()
+        actual_runtime = str(worker.get("runtime_kind") or "").strip().lower()
+        if expected_runtime and actual_runtime and actual_runtime != expected_runtime:
+            return "runtime do builder não corresponde ao target"
+        required_agent_hash = str(desired.get("requiredAgentSourceHash") or "").strip().lower()
+        if required_agent_hash and str(worker.get("source_hash") or "").strip().lower() != required_agent_hash:
+            return "Termux builder não está no source hash mínimo requerido"
+        expected_toolchain = str(desired.get("toolchainFingerprint") or "").strip().lower()
+        if expected_toolchain and _worker_apk_toolchain_fingerprint(worker) != expected_toolchain:
+            return "toolchain do builder não corresponde ao target selecionado"
+    return ""
 
 
 def _safe_core_worker_apk_file(filename: str) -> str | None:
@@ -3204,6 +3306,31 @@ def core_worker_app_publish():
     if requested_version_code < 0:
         return jsonify({"ok": False, "error": "versionCode solicitado é inválido"}), 400
 
+    requested_source_fingerprint = str(
+        form.get("sourceFingerprint")
+        or form.get("source_fingerprint")
+        or form.get("sourceSha256")
+        or form.get("source_sha256")
+        or ""
+    ).strip().lower()
+    with _core_worker_desired_source_lock():
+        desired_source = _load_core_worker_desired_source()
+        desired_error = _desired_source_publish_error(
+            desired_source,
+            worker=worker,
+            requested_version_name=requested_version_name,
+            requested_version_code=requested_version_code,
+            requested_source_fingerprint=requested_source_fingerprint,
+        )
+    if desired_error:
+        status_code = 503 if desired_source.get("_invalid") else 409
+        return jsonify({
+            "ok": False,
+            "error": desired_error,
+            "preservedPreviousRelease": True,
+            "desiredSourceFingerprint": str(desired_source.get("sourceFingerprint") or "")[:64],
+        }), status_code
+
     requested_filename = _safe_release_filename(
         form.get("filename") or upload.filename or "CoreWorker.apk",
         default="CoreWorker.apk",
@@ -3310,7 +3437,7 @@ def core_worker_app_publish():
         if not isinstance(changelog, list):
             changelog = [str(changelog)[:160]]
         required_agent = str(form.get("requiredAgentVersion") or "").strip()[:48]
-        source_sha = str(form.get("sourceFingerprint") or form.get("source_fingerprint") or form.get("sourceSha256") or form.get("source_sha256") or "").strip().lower()[:96]
+        source_sha = requested_source_fingerprint[:96]
         notification_id = _safe_short_text(
             form.get("notificationId") or _notification_event_id(version_name=version_name, version_code=version_code, sha256=actual_sha),
             96,
@@ -3349,72 +3476,93 @@ def core_worker_app_publish():
 
         manifest_path = os.path.join(base, "latest.json")
         with _core_worker_apk_publish_lock:
-            current_identity = _current_core_worker_release_identity(base)
-            if current_identity:
-                current_code = int(current_identity.get("versionCode") or 0)
-                current_name = str(current_identity.get("versionName") or "")
-                if version_code < current_code or (version_code == current_code and current_name and version_name != current_name):
+            # A comparação final ocorre sob o mesmo lock de arquivo usado pelo
+            # publicador de desired-source. Assim um novo target não pode surgir
+            # entre a última comparação e o os.replace(latest.json).
+            with _core_worker_desired_source_lock():
+                desired_source = _load_core_worker_desired_source()
+                desired_error = _desired_source_publish_error(
+                    desired_source,
+                    worker=worker,
+                    requested_version_name=version_name,
+                    requested_version_code=version_code,
+                    requested_source_fingerprint=requested_source_fingerprint,
+                )
+                if desired_error:
+                    status_code = 503 if desired_source.get("_invalid") else 409
                     return jsonify({
                         "ok": False,
-                        "error": "publicação recusada para impedir downgrade do APK",
-                        "compiled": identity,
-                        "current": current_identity,
+                        "error": desired_error,
                         "preservedPreviousRelease": True,
-                    }), 409
+                        "desiredSourceFingerprint": str(desired_source.get("sourceFingerprint") or "")[:64],
+                    }), status_code
 
-            fd, manifest_stage = tempfile.mkstemp(prefix=".core-worker-latest-", suffix=".json", dir=base)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(manifest, fh, ensure_ascii=False, indent=2)
-                fh.flush()
-                os.fsync(fh.fileno())
+                current_identity = _current_core_worker_release_identity(base)
+                if current_identity:
+                    current_code = int(current_identity.get("versionCode") or 0)
+                    current_name = str(current_identity.get("versionName") or "")
+                    if version_code < current_code or (version_code == current_code and current_name and version_name != current_name):
+                        return jsonify({
+                            "ok": False,
+                            "error": "publicação recusada para impedir downgrade do APK",
+                            "compiled": identity,
+                            "current": current_identity,
+                            "preservedPreviousRelease": True,
+                        }), 409
 
-            backup_target = ""
-            try:
-                if os.path.isfile(target):
-                    backup_target = target + ".rollback-" + uuid.uuid4().hex
-                    try:
-                        os.link(target, backup_target)
-                    except Exception:
-                        shutil.copy2(target, backup_target)
-                os.replace(signed_stage, target)
-                signed_stage = ""
-                os.replace(manifest_stage, manifest_path)
-                manifest_stage = ""
-            except Exception:
-                with contextlib.suppress(Exception):
-                    os.remove(target)
-                if backup_target and os.path.isfile(backup_target):
-                    os.replace(backup_target, target)
-                    backup_target = ""
-                raise
-            finally:
-                if backup_target:
+                fd, manifest_stage = tempfile.mkstemp(prefix=".core-worker-latest-", suffix=".json", dir=base)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(manifest, fh, ensure_ascii=False, indent=2)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+
+                backup_target = ""
+                try:
+                    if os.path.isfile(target):
+                        backup_target = target + ".rollback-" + uuid.uuid4().hex
+                        try:
+                            os.link(target, backup_target)
+                        except Exception:
+                            shutil.copy2(target, backup_target)
+                    os.replace(signed_stage, target)
+                    signed_stage = ""
+                    os.replace(manifest_stage, manifest_path)
+                    manifest_stage = ""
+                except Exception:
                     with contextlib.suppress(Exception):
-                        os.remove(backup_target)
+                        os.remove(target)
+                    if backup_target and os.path.isfile(backup_target):
+                        os.replace(backup_target, target)
+                        backup_target = ""
+                    raise
+                finally:
+                    if backup_target:
+                        with contextlib.suppress(Exception):
+                            os.remove(backup_target)
 
-            # A publicação já é íntegra neste ponto. A poda roda sob o mesmo
-            # lock, preserva sempre o APK atual e nunca transforma uma falha de
-            # housekeeping em falha da atualização entregue ao dispositivo.
-            try:
-                release_cleanup = prune_core_worker_releases(
-                    base,
-                    filename,
-                    keep=_env_int("CORE_WORKER_APK_RETAIN_RELEASES", 3, minimum=1, maximum=10),
-                    max_total_bytes=_env_int(
-                        "CORE_WORKER_APK_RELEASE_MAX_BYTES",
-                        256 * 1024 * 1024,
-                        minimum=64 * 1024 * 1024,
-                        maximum=2 * 1024 * 1024 * 1024,
-                    ),
-                )
-            except Exception as cleanup_exc:
-                release_cleanup = {
-                    "ok": False,
-                    "removedCount": 0,
-                    "reclaimedBytes": 0,
-                    "error": f"{type(cleanup_exc).__name__}: {cleanup_exc}"[:240],
-                }
-                app.logger.warning("poda de releases do Core Worker ignorada: %s", cleanup_exc)
+                # A publicação já é íntegra neste ponto. A poda roda sob o mesmo
+                # lock, preserva sempre o APK atual e nunca transforma uma falha de
+                # housekeeping em falha da atualização entregue ao dispositivo.
+                try:
+                    release_cleanup = prune_core_worker_releases(
+                        base,
+                        filename,
+                        keep=_env_int("CORE_WORKER_APK_RETAIN_RELEASES", 3, minimum=1, maximum=10),
+                        max_total_bytes=_env_int(
+                            "CORE_WORKER_APK_RELEASE_MAX_BYTES",
+                            256 * 1024 * 1024,
+                            minimum=64 * 1024 * 1024,
+                            maximum=2 * 1024 * 1024 * 1024,
+                        ),
+                    )
+                except Exception as cleanup_exc:
+                    release_cleanup = {
+                        "ok": False,
+                        "removedCount": 0,
+                        "reclaimedBytes": 0,
+                        "error": f"{type(cleanup_exc).__name__}: {cleanup_exc}"[:240],
+                    }
+                    app.logger.warning("poda de releases do Core Worker ignorada: %s", cleanup_exc)
 
         _kick_core_worker_fcm_push(manifest, reason="apk_published")
         _kick_core_worker_pending_automation(str(worker.get("worker_id") or ""))
@@ -3996,6 +4144,317 @@ def core_worker_heartbeat():
 
 
 
+
+
+def _core_worker_agent_root() -> Path:
+    configured = str(os.getenv("CORE_WORKER_AGENT_RELEASE_DIR") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path(os.getcwd()) / "data" / "core_worker_agent").resolve()
+
+
+def _core_worker_request_bearer() -> str:
+    auth = str(request.headers.get("Authorization") or "").strip()
+    if not auth.lower().startswith("bearer "):
+        return ""
+    return auth[7:].strip()
+
+
+def _authenticate_core_worker_agent_request(worker_id: str) -> tuple[bool, tuple | None, str]:
+    from utility.commands.workers_registry import core_worker_authenticate_http
+
+    token = _core_worker_request_bearer()
+    if not token:
+        return False, (jsonify({"ok": False, "error": "token ausente"}), 401), ""
+    payload = {"worker_id": str(worker_id or "").strip()}
+    status, body = core_worker_authenticate_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    if status != 200 or not isinstance(body, dict) or not body.get("ok"):
+        return False, (jsonify(body if isinstance(body, dict) else {"ok": False, "error": "não autorizado"}), status), ""
+    worker = body.get("worker") if isinstance(body.get("worker"), dict) else {}
+    runtime_kind = str(worker.get("runtime_kind") or "").strip().lower()
+    source = str(worker.get("source") or "").strip().lower()
+    if runtime_kind == "apk" or source.startswith("core-worker-apk"):
+        return False, (jsonify({"ok": False, "error": "manifesto do agent é exclusivo do runtime Termux"}), 403), ""
+    return True, None, token
+
+
+def _core_worker_response_hmac(token: str, timestamp: str, body: bytes) -> str:
+    # O timestamp faz parte da mensagem autenticada. Sem isso, um adversário que
+    # capturasse body+HMAC poderia trocar apenas o header de tempo e prolongar um
+    # replay. O artefato pode ser imutável; a resposta autenticada continua curta.
+    mac = hmac.new(token.encode("utf-8"), digestmod=hashlib.sha256)
+    mac.update(timestamp.encode("ascii"))
+    mac.update(b"\n")
+    mac.update(body)
+    return mac.hexdigest()
+
+
+def _signed_agent_response_headers(body: bytes, token: str) -> dict[str, str]:
+    timestamp = str(int(time.time()))
+    digest = _core_worker_response_hmac(token, timestamp, body)
+    return {
+        "X-Core-Worker-Timestamp": timestamp,
+        "X-Core-Worker-Signature": f"sha256={digest}",
+        "X-Core-Worker-Signature-Schema": "ts-body-v1",
+        "X-Content-Type-Options": "nosniff",
+    }
+
+
+def _safe_agent_release_hash(value: str) -> str:
+    value = str(value or "").strip().lower()
+    return value if re.fullmatch(r"[0-9a-f]{64}", value) else ""
+
+
+@app.get("/core-worker/agent/latest")
+def core_worker_agent_latest():
+    worker_id = str(request.args.get("worker_id") or request.headers.get("X-Core-Worker-Id") or "").strip()
+    ok, error_response, token = _authenticate_core_worker_agent_request(worker_id)
+    if not ok:
+        return error_response
+    path = _core_worker_agent_root() / "latest.json"
+    try:
+        body = path.read_bytes()
+        parsed = json.loads(body.decode("utf-8"))
+        if not isinstance(parsed, dict) or not _safe_agent_release_hash(parsed.get("source_hash")):
+            raise ValueError("manifesto latest inválido")
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "nenhuma release do agent publicada"}), 404
+    except Exception as exc:
+        app.logger.error("core-worker agent latest inválido: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "manifesto do agent inválido"}), 500
+    response = app.response_class(body, status=200, mimetype="application/json")
+    response.headers["Cache-Control"] = "private, no-store"
+    for key, value in _signed_agent_response_headers(body, token).items():
+        response.headers[key] = value
+    return response
+
+
+@app.get("/core-worker/agent/releases/<source_hash>.zip")
+def core_worker_agent_release(source_hash: str):
+    worker_id = str(request.args.get("worker_id") or request.headers.get("X-Core-Worker-Id") or "").strip()
+    ok, error_response, token = _authenticate_core_worker_agent_request(worker_id)
+    if not ok:
+        return error_response
+    safe_hash = _safe_agent_release_hash(source_hash)
+    if not safe_hash:
+        return jsonify({"ok": False, "error": "source hash inválido"}), 400
+    root = _core_worker_agent_root()
+    path = (root / "releases" / f"{safe_hash}.zip").resolve()
+    expected_parent = (root / "releases").resolve()
+    if path.parent != expected_parent or not path.is_file():
+        return jsonify({"ok": False, "error": "release não encontrada"}), 404
+    max_bytes = _env_int("CORE_WORKER_AGENT_RELEASE_MAX_BYTES", 16 * 1024 * 1024, minimum=1024, maximum=64 * 1024 * 1024)
+    try:
+        stat_info = path.stat()
+        if stat_info.st_size <= 0 or stat_info.st_size > max_bytes:
+            raise ValueError("release fora do limite")
+        timestamp = str(int(time.time()))
+        mac = hmac.new(token.encode("utf-8"), digestmod=hashlib.sha256)
+        mac.update(timestamp.encode("ascii"))
+        mac.update(b"\n")
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(256 * 1024)
+                if not chunk:
+                    break
+                mac.update(chunk)
+    except Exception as exc:
+        app.logger.error("core-worker agent release inválida hash=%s error=%s", safe_hash[:12], type(exc).__name__)
+        return jsonify({"ok": False, "error": "release do agent inválida"}), 500
+    response = send_file(path, mimetype="application/zip", as_attachment=False, conditional=False, etag=safe_hash)
+    response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+    response.headers["X-Core-Worker-Timestamp"] = timestamp
+    response.headers["X-Core-Worker-Signature"] = f"sha256={mac.hexdigest()}"
+    response.headers["X-Core-Worker-Signature-Schema"] = "ts-body-v1"
+    response.headers["X-Core-Worker-Source-Hash"] = safe_hash
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+
+def _core_worker_toolchain_root() -> Path:
+    configured = str(os.getenv("CORE_WORKER_TOOLCHAIN_RELEASE_DIR") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path(os.getcwd()) / "data" / "core_worker_toolchain").resolve()
+
+
+def _authenticate_core_worker_artifact_request(worker_id: str) -> tuple[bool, tuple | None, str, dict]:
+    from utility.commands.workers_registry import core_worker_authenticate_http
+
+    token = _core_worker_request_bearer()
+    if not token:
+        return False, (jsonify({"ok": False, "error": "token ausente"}), 401), "", {}
+    payload = {"worker_id": str(worker_id or "").strip()}
+    status, body = core_worker_authenticate_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    if status != 200 or not isinstance(body, dict) or not body.get("ok"):
+        return False, (jsonify(body if isinstance(body, dict) else {"ok": False, "error": "não autorizado"}), status), "", {}
+    worker = body.get("worker") if isinstance(body.get("worker"), dict) else {}
+    return True, None, token, worker
+
+
+def _validate_external_toolchain_archive(path: Path) -> dict:
+    max_entries = _env_int("CORE_WORKER_TOOLCHAIN_MAX_ENTRIES", 50000, minimum=10, maximum=100000)
+    max_expanded = _env_int("CORE_WORKER_TOOLCHAIN_MAX_EXPANDED_BYTES", 4 * 1024 * 1024 * 1024, minimum=16 * 1024 * 1024, maximum=8 * 1024 * 1024 * 1024)
+    entries = 0
+    expanded = 0
+    with zipfile.ZipFile(path, "r") as archive:
+        infos = archive.infolist()
+        for info in infos:
+            name = str(info.filename or "").replace("\\", "/")
+            if not name or name.startswith("/") or ".." in name.split("/"):
+                raise ValueError("caminho inseguro no toolchain")
+            entries += 1
+            expanded += max(0, int(info.file_size or 0))
+            if entries > max_entries or expanded > max_expanded:
+                raise ValueError("toolchain excede limites de extração")
+        try:
+            raw_manifest = archive.read("manifest.json")
+        except KeyError as exc:
+            raise ValueError("manifest.json ausente no toolchain") from exc
+    manifest = json.loads(raw_manifest.decode("utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("schema") != "core-worker-android-builder-v2":
+        raise ValueError("schema inválido do toolchain externo")
+    if str(manifest.get("arch") or "").lower() not in {"aarch64", "arm64", "arm64-v8a"}:
+        raise ValueError("arquitetura do toolchain incompatível")
+    versions = manifest.get("versions") if isinstance(manifest.get("versions"), dict) else {}
+    if int(versions.get("jdkMajor") or 0) != 17:
+        raise ValueError("JDK do toolchain precisa ser major 17")
+    if str(versions.get("gradle") or "") != "8.9":
+        raise ValueError("Gradle do toolchain precisa ser 8.9")
+    if int(versions.get("compileSdk") or 0) != 34 or str(versions.get("buildTools") or "") != "34.0.0":
+        raise ValueError("SDK/build-tools do toolchain incompatíveis")
+    validation = manifest.get("validation") if isinstance(manifest.get("validation"), dict) else {}
+    required = set(validation.get("requiredSmokeChecks") or [])
+    if required != {"java", "javac", "jar", "gradle", "aapt2"}:
+        raise ValueError("toolchain não declara os cinco smokes obrigatórios")
+    return {"manifest": manifest, "entries": entries, "expandedBytes": expanded}
+
+
+@app.post("/core-worker/toolchain/publish")
+def core_worker_toolchain_publish():
+    worker_id = str(request.form.get("worker_id") or request.headers.get("X-Core-Worker-Id") or "").strip()
+    ok, error_response, _token, worker = _authenticate_core_worker_artifact_request(worker_id)
+    if not ok:
+        return error_response
+    runtime_kind = str(worker.get("runtime_kind") or "").lower()
+    source = str(worker.get("source") or "").lower()
+    if runtime_kind == "apk" or source.startswith("core-worker-apk"):
+        return jsonify({"ok": False, "error": "publicação inicial do toolchain é reservada ao Termux"}), 403
+    upload = request.files.get("toolchain")
+    if upload is None:
+        return jsonify({"ok": False, "error": "arquivo toolchain ausente"}), 400
+    root = _core_worker_toolchain_root()
+    releases = root / "releases"
+    releases.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".toolchain-upload-", suffix=".zip", dir=str(root))
+    os.close(fd)
+    temp = Path(temp_name)
+    max_bytes = _env_int("CORE_WORKER_TOOLCHAIN_MAX_BYTES", 1024 * 1024 * 1024, minimum=1024 * 1024, maximum=2 * 1024 * 1024 * 1024)
+    try:
+        upload.save(str(temp))
+        size = temp.stat().st_size
+        if size <= 0 or size > max_bytes:
+            raise ValueError("toolchain fora do limite compactado")
+        sha = hashlib.sha256()
+        with temp.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                sha.update(chunk)
+        fingerprint = sha.hexdigest()
+        declared_sha = str(request.form.get("sha256") or "").strip().lower()
+        if declared_sha and declared_sha != fingerprint:
+            raise ValueError("sha256 do toolchain divergente")
+        validated = _validate_external_toolchain_archive(temp)
+        manifest = validated["manifest"]
+        physical = str(manifest.get("physicalWorkerId") or request.form.get("physical_worker_id") or worker.get("physical_worker_id") or worker_id).strip()
+        target = releases / f"{fingerprint}.zip"
+        if target.exists():
+            if target.stat().st_size != size:
+                raise ValueError("artefato imutável existente diverge")
+            temp.unlink(missing_ok=True)
+        else:
+            os.replace(temp, target)
+        record = {
+            "schema": "core-worker-toolchain-release-v2",
+            "toolchainFingerprint": fingerprint,
+            "sha256": fingerprint,
+            "bytes": size,
+            "expandedBytes": validated["expandedBytes"],
+            "entries": validated["entries"],
+            "physicalWorkerId": physical,
+            "compatibility": manifest.get("compatibility") if isinstance(manifest.get("compatibility"), dict) else {"arch": manifest.get("arch")},
+            "versions": manifest.get("versions"),
+            "validation": manifest.get("validation"),
+            "publishedAt": int(time.time()),
+            "url": f"/core-worker/toolchain/releases/{fingerprint}.zip",
+        }
+        root.mkdir(parents=True, exist_ok=True)
+        stage = root / f".latest.{os.getpid()}.tmp"
+        stage.write_text(json.dumps(record, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(stage, root / "latest.json")
+        (releases / f"{fingerprint}.json").write_text(json.dumps(record, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        return jsonify({"ok": True, **record})
+    except (ValueError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        app.logger.error("core-worker toolchain publish falhou: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "falha interna publicando toolchain"}), 500
+    finally:
+        with contextlib.suppress(Exception):
+            temp.unlink()
+
+
+@app.get("/core-worker/toolchain/latest")
+def core_worker_toolchain_latest():
+    worker_id = str(request.args.get("worker_id") or request.headers.get("X-Core-Worker-Id") or "").strip()
+    ok, error_response, token, _worker = _authenticate_core_worker_artifact_request(worker_id)
+    if not ok:
+        return error_response
+    path = _core_worker_toolchain_root() / "latest.json"
+    if not path.is_file():
+        return jsonify({"ok": False, "error": "nenhum toolchain publicado"}), 404
+    try:
+        body = path.read_bytes()
+        parsed = json.loads(body.decode("utf-8"))
+        if not isinstance(parsed, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(parsed.get("toolchainFingerprint") or "")):
+            raise ValueError
+    except Exception:
+        return jsonify({"ok": False, "error": "manifesto do toolchain inválido"}), 500
+    response = app.response_class(body, status=200, mimetype="application/json")
+    response.headers["Cache-Control"] = "private, no-store"
+    for key, value in _signed_agent_response_headers(body, token).items():
+        response.headers[key] = value
+    return response
+
+
+@app.get("/core-worker/toolchain/releases/<fingerprint>.zip")
+def core_worker_toolchain_release(fingerprint: str):
+    worker_id = str(request.args.get("worker_id") or request.headers.get("X-Core-Worker-Id") or "").strip()
+    ok, error_response, token, _worker = _authenticate_core_worker_artifact_request(worker_id)
+    if not ok:
+        return error_response
+    fingerprint = str(fingerprint or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return jsonify({"ok": False, "error": "fingerprint inválido"}), 400
+    path = (_core_worker_toolchain_root() / "releases" / f"{fingerprint}.zip").resolve()
+    if not path.is_file() or path.parent != (_core_worker_toolchain_root() / "releases").resolve():
+        return jsonify({"ok": False, "error": "toolchain não encontrado"}), 404
+    timestamp = str(int(time.time()))
+    mac = hmac.new(token.encode("utf-8"), digestmod=hashlib.sha256)
+    mac.update(timestamp.encode("ascii"))
+    mac.update(b"\n")
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            mac.update(chunk)
+    response = send_file(path, mimetype="application/zip", as_attachment=False, conditional=False, etag=fingerprint)
+    response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+    response.headers["X-Core-Worker-Timestamp"] = timestamp
+    response.headers["X-Core-Worker-Signature"] = f"sha256={mac.hexdigest()}"
+    response.headers["X-Core-Worker-Signature-Schema"] = "ts-body-v1"
+    response.headers["X-Core-Worker-Toolchain-Fingerprint"] = fingerprint
+    return response
+
+
 @app.post("/core-worker/jobs/poll")
 def core_worker_jobs_poll():
     from utility.commands.workers_registry import core_worker_poll_job_http
@@ -4008,6 +4467,17 @@ def core_worker_jobs_poll():
         worker_id = str(body.get("worker_id") or payload.get("worker_id") or payload.get("id") or "")
         if worker_id:
             _kick_core_worker_pending_automation(worker_id)
+    return jsonify(body), status
+
+
+@app.post("/core-worker/jobs/progress")
+def core_worker_jobs_progress():
+    from utility.commands.workers_registry import core_worker_job_progress_http
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    status, body = core_worker_job_progress_http(request.headers, payload, remote_addr=request.remote_addr or "")
     return jsonify(body), status
 
 

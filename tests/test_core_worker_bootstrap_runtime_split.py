@@ -4,7 +4,7 @@ import json
 import time
 from pathlib import Path
 
-from utility.commands.workers_registry import CoreWorkersRegistry, _hash_secret
+from utility.commands.workers_registry import CoreWorkerRegistryError, CoreWorkersRegistry, _hash_secret
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,7 +152,7 @@ def test_old_apk_can_poll_child_and_submit_result_with_physical_id(tmp_path: Pat
     assert submitted["worker_id"] == child_id
 
 
-def test_registry_preserves_only_authenticated_opaque_job_payloads_above_text_limit(tmp_path: Path) -> None:
+def test_registry_rejects_phone_worker_agent_inline_base64(tmp_path: Path) -> None:
     token = "worker-update-bootstrap-token"
     worker_id = "phone-large-update"
     registry_path = tmp_path / "registry.json"
@@ -161,53 +161,26 @@ def test_registry_preserves_only_authenticated_opaque_job_payloads_above_text_li
         "pairings": {},
         "workers": {
             worker_id: _record(
-                worker_id,
-                token,
-                source="termux-phone-worker",
-                platform="android-termux",
-                roles=["phone-worker"],
-                tasks=["worker_update"],
+                worker_id, token, source="termux-phone-worker", platform="android-termux",
+                roles=["phone-worker"], tasks=["worker_update"],
             ),
         },
         "jobs": {},
     }), encoding="utf-8")
     registry = CoreWorkersRegistry(registry_path)
-    encoded = "A" * 700_000
-    ordinary_text = "x" * 300_000
-    target_hash = "c" * 64
-    bootstrap_hash = "d" * 64
-    created = registry.create_job(
-        job_type="worker_update",
-        target_worker_id=worker_id,
-        required_capabilities=["phone-worker"],
-        payload={
-            "version": "1.10.39",
-            "bootstrap_stage": True,
-            "bootstrap_complete": False,
-            "bootstrap_source_hash": bootstrap_hash,
-            "target_source_hash": target_hash,
-            "note": ordinary_text,
-            "files": [{"target": "phone_worker.py", "data_b64": encoded}],
-        },
-    )
-
-    polled = registry.poll_job({"worker_id": worker_id}, token=token)
-
-    assert polled["job"]["payload"]["files"][0]["data_b64"] == encoded
-    assert polled["job"]["payload"]["note"].endswith("…[truncated]")
-    assert len(polled["job"]["payload"]["note"]) < len(ordinary_text)
-    registry.submit_job_result({
-        "worker_id": worker_id,
-        "job_id": created["job"]["job_id"],
-        "status": "succeeded",
-        "result": {
-            "ok": True,
-            "applied_file_version": "1.10.39",
-        },
-    }, token=token)
-    current = next(item for item in registry.snapshot()["workers"] if item["worker_id"] == worker_id)
-    assert current["version"] == "1.10.39"
-    assert current["source_hash"] == bootstrap_hash
+    with __import__("pytest").raises(CoreWorkerRegistryError, match="inline/base64"):
+        registry.create_job(
+            job_type="worker_update",
+            target_worker_id=worker_id,
+            required_capabilities=["phone-worker"],
+            payload={
+                "version": "1.11.0",
+                "target_source_hash": "c" * 64,
+                "files": [{"target": "phone_worker.py", "data_b64": "A" * 700_000}],
+            },
+        )
+    stored = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert stored.get("jobs") == {}
 
 
 def test_android_runtime_uses_child_identity_and_bootstrap_port() -> None:
@@ -233,7 +206,7 @@ def test_automation_routes_apk_trigger_to_termux_bootstrap() -> None:
     assert "def _bootstrap_worker_id_for_runtime" in automation
     assert "runtime APK não recebe worker_update" in automation
     assert "worker_update continua reservado ao Termux bootstrap" in automation
-    assert 'PHONE_WORKER_VERSION = "1.10.43"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.11.0"' in phone_worker
     assert '"runtime_kind": "termux"' in phone_worker
     assert '"platform": "android-termux"' in phone_worker
     assert "def _core_worker_automation_transition_is_urgent" in webserver
@@ -375,7 +348,11 @@ def test_failed_direct_update_keeps_bootstrap_pending(monkeypatch) -> None:
     }
     pending = {}
     monkeypatch.setattr(module, "_load_registry_snapshot", lambda: snapshot)
-    monkeypatch.setattr(module, "_build_worker_update_payload", lambda: {"version": "1.10.34", "files": []})
+    monkeypatch.setattr(module, "_build_worker_update_payload", lambda: {"version": "1.11.0", "source_hash": "a" * 64, "files": [{"target": "phone_worker.py"}]})
+    monkeypatch.setattr(module, "_publish_phone_worker_release", lambda _payload: {
+        "version": "1.11.0", "source_hash": "a" * 64, "url": "https://example.invalid/agent.zip",
+        "sha256": "b" * 64, "bytes": 123, "min_bootstrap_version": "1.0.0",
+    })
     monkeypatch.setattr(module, "_direct_phone_worker_update_if_needed", lambda *a, **k: {
         "ok": False,
         "skipped": True,
@@ -576,8 +553,9 @@ def test_same_version_source_hash_difference_still_requires_agent_update() -> No
     assert module._workers_need_agent_version({"workers": [worker]}, "1.10.39", expected, force=True) is True
     assert module._worker_supports_update_archive(worker) is False
     worker["status"] = {"worker_update": {"transports": ["inline-b64-v1", "zip-v1"]}}
-    assert module._worker_supports_update_archive(worker) is True
+    assert module._worker_supports_update_archive(worker) is False
     worker["version"] = "1.11.0"
+    assert module._worker_supports_update_archive(worker) is True
     assert module._workers_need_agent_version({"workers": [worker]}, "1.10.39", expected, force=True) is False
     worker["version"] = "1.10.38"
     worker["online"] = False
@@ -585,78 +563,38 @@ def test_same_version_source_hash_difference_still_requires_agent_update() -> No
     assert module._registered_workers_need_agent_version({"workers": [worker]}, "1.10.39", expected) is True
 
 
-def test_agent_update_migrates_legacy_core_then_queues_verified_zip(tmp_path: Path, monkeypatch) -> None:
+def test_legacy_agent_requires_one_time_repair_but_target_stays_published(tmp_path: Path, monkeypatch) -> None:
     import importlib.util
 
     path = ROOT / "scripts/core-worker-automation.py"
-    spec = importlib.util.spec_from_file_location("core_worker_automation_two_stage_test", path)
+    spec = importlib.util.spec_from_file_location("core_worker_automation_legacy_repair_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    token = "two-stage-update-token"
-    worker_id = "phone-two-stage"
+    token = "legacy-repair-token"
+    worker_id = "phone-legacy-repair"
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(json.dumps({
-        "version": 1,
-        "pairings": {},
-        "workers": {
-            worker_id: _record(
-                worker_id,
-                token,
-                source="termux-phone-worker",
-                platform="android-termux",
-                roles=["phone-worker"],
-                tasks=["worker_update"],
-            ) | {"version": "1.10.25"},
-        },
+        "version": 1, "pairings": {},
+        "workers": {worker_id: _record(worker_id, token, source="termux-phone-worker", platform="android-termux", roles=["phone-worker"], tasks=["worker_update"]) | {"version": "1.10.43"}},
         "jobs": {},
     }), encoding="utf-8")
     registry = CoreWorkersRegistry(registry_path)
     monkeypatch.setattr(module, "get_core_workers_registry", lambda: registry)
     monkeypatch.setattr(module, "_load_registry_snapshot", lambda: registry.snapshot())
-    monkeypatch.setattr(module, "_direct_phone_worker_update_if_needed", lambda *_args, **_kwargs: {
-        "ok": False,
-        "skipped": True,
-        "summary": "rota direta desativada no teste",
-    })
-    monkeypatch.setattr(module, "PENDING_PATH", tmp_path / "pending.json")
-    monkeypatch.setattr(module, "_core_worker_release_dir", lambda: tmp_path / "releases")
+    monkeypatch.setattr(module, "AGENT_RELEASE_ROOT", tmp_path / "agent")
     monkeypatch.setattr(module, "_public_base_url", lambda: "https://vps.invalid")
+    monkeypatch.setattr(module, "_direct_phone_worker_update_if_needed", lambda *_a, **_k: {"ok": False, "skipped": True})
 
-    first = module.queue_agent_updates(force=True)
-    first_job = next(job for job in json.loads(registry_path.read_text(encoding="utf-8"))["jobs"].values() if job["status"] == "queued")
-    assert first["pending"] is True
-    assert first_job["payload"]["bootstrap_stage"] is True
-    assert [item["target"] for item in first_job["payload"]["files"]] == ["phone_worker.py"]
+    result = module.queue_agent_updates(force=True)
 
-    delivered = registry.poll_job({"worker_id": worker_id}, token=token)["job"]
-    registry.submit_job_result({
-        "worker_id": worker_id,
-        "job_id": delivered["job_id"],
-        "status": "succeeded",
-        "result": {"ok": True, "applied_file_version": "1.10.43"},
-    }, token=token)
-    registry.heartbeat({
-        "worker_id": worker_id,
-        "version": "1.10.43",
-        "source_hash": "",
-        "source": "termux-phone-worker",
-        "platform": "android-termux",
-        "runtime_kind": "termux",
-        "roles": ["phone-worker"],
-        "capabilities": ["phone-worker"],
-        "supported_tasks": ["worker_update"],
-        "status": {"worker_update": {"transports": ["inline-b64-v1", "zip-v1"]}},
-    }, token=token)
-
-    second = module.queue_agent_updates(force=True)
-    queued = [job for job in json.loads(registry_path.read_text(encoding="utf-8"))["jobs"].values() if job["status"] == "queued"]
-    assert second["pending"] is True
-    assert len(queued) == 1
-    assert queued[0]["payload"]["update_transport"] == "zip-v1"
-    assert "files" not in queued[0]["payload"]
-    archive = next((tmp_path / "releases").glob("phone-worker-update-*.zip"))
-    assert queued[0]["payload"]["update_zip_sha256"] == module._sha256_file(archive)
+    assert result["pending"] is True
+    assert (tmp_path / "agent/latest.json").is_file()
+    assert any("bootstrap_required" in item for item in result["skipped"])
+    raw = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert not [job for job in raw["jobs"].values() if job.get("status") == "queued"]
+    latest = json.loads((tmp_path / "agent/latest.json").read_text(encoding="utf-8"))
+    assert latest["source_hash"] == module._hash_phone_worker_files(module.PHONE_WORKER_CANONICAL_ROOT)
 
 
 def test_apk_retry_after_agent_update_bypasses_old_failure_once(monkeypatch) -> None:
@@ -729,7 +667,7 @@ def test_no_compatible_builder_is_transient_pending_not_build_failure(monkeypatc
     assert result["phase"] == "waiting_builder"
     assert result["transient"] is True
     assert result["error"] == ""
-    assert "nenhum worker online compatível" in result["last_enqueue_error"]
+    assert "aguardando um builder compatível" in result["message"]
 
 
 def test_turbo_profile_contract_cannot_lose_apk_builder_to_stale_env() -> None:
@@ -737,4 +675,4 @@ def test_turbo_profile_contract_cannot_lose_apk_builder_to_stale_env() -> None:
     assert "def _merge_profile_contract" in phone_worker
     assert "valores do env continuam aceitos como extensões" in phone_worker
     assert "roles, capabilities = _current_core_worker_roles_and_capabilities()" in phone_worker
-    assert 'PHONE_WORKER_VERSION = "1.10.43"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.11.0"' in phone_worker

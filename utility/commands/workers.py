@@ -1974,6 +1974,55 @@ def _dedupe_automation_parts(parts: list[str]) -> list[str]:
     return [selected[key][2] for key in sorted(order, key=lambda item: selected[item][1])]
 
 
+def _automation_phase_label(kind: str, item: dict[str, Any], *, target: object = "") -> str:
+    """Traduz o estado persistido sem apagar a causa real do pipeline."""
+    phase = str(item.get("phase") or item.get("state") or "").strip().lower()
+    version = _shorten(item.get("versionName") or target or "?", limit=24)
+    blocked_key = _shorten(item.get("blocked_key") or item.get("blockedKey") or item.get("block_reason") or "", limit=36)
+    hint = _automation_failure_hint(item)
+    if kind == "agent":
+        labels = {
+            "target_published": f"Worker: alvo {version} publicado",
+            "waiting_device": f"Worker: aguardando celular ({version})",
+            "waiting_worker": f"Worker: aguardando celular ({version})",
+            "job_queued": f"Worker: atualização na fila ({version})",
+            "downloading": f"Worker: baixando {version}",
+            "validating": f"Worker: validando {version}",
+            "installing": f"Worker: instalando {version}",
+            "restart_pending": f"Worker: reinício pendente ({version})",
+            "verifying_runtime": f"Worker: verificando runtime {version}",
+            "succeeded": f"Worker: {version} em dia",
+            "rolled_back": f"Worker: rollback de {version}",
+            "port_conflict_control_plane_alive": "Worker: conflito de porta · control plane ativo",
+            "failed": f"Worker: atualização falhou ({version})",
+        }
+        if phase == "blocked_by_config":
+            return f"Worker: bloqueado pela configuração{f' · {blocked_key}' if blocked_key else ''}"
+        value = labels.get(phase)
+        if value and phase in {"rolled_back", "failed"} and hint:
+            value += f" · {hint}"
+        return value or ""
+    labels = {
+        "waiting_agent": f"APK: aguardando agent ({version})",
+        "waiting_toolchain": f"APK: aguardando toolchain ({version})",
+        "toolchain_downloading": f"APK: baixando toolchain ({version})",
+        "preflight_blocked": f"APK: preflight bloqueado ({version})",
+        "queued": f"APK: na fila ({version})",
+        "job_queued": f"APK: na fila ({version})",
+        "building": f"APK: build em andamento ({version})",
+        "publish_pending": f"APK: publicação pendente ({version})",
+        "published": f"APK: publicado {version}",
+        "succeeded": f"APK: publicado {version}",
+        "failed_transient": f"APK: falha transitória ({version})",
+        "failed_deterministic": f"APK: falha determinística ({version})",
+        "failed": f"APK: falhou ({version})",
+    }
+    value = labels.get(phase) or ""
+    if value and (phase.startswith("failed") or phase == "preflight_blocked") and hint:
+        value += f" · {hint}"
+    return value
+
+
 def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None) -> str:
     """Resumo curto e humano do pipeline agent/APK para o painel.
 
@@ -1996,11 +2045,17 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
         apk = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
         if agent:
             target = agent.get('target_version') or _expected_phone_worker_version() or '?'
-            if _active_workers_need_agent_version(snapshot_workers, target):
+            phase_text = _automation_phase_label("agent", agent, target=target)
+            if phase_text:
+                parts.append(phase_text)
+            elif _active_workers_need_agent_version(snapshot_workers, target):
                 parts.append(f"Worker: atualização pendente ({target})")
         if apk:
+            phase_text = _automation_phase_label("apk", apk)
             published, label = _apk_build_effectively_published(apk)
-            if published:
+            if phase_text:
+                parts.append(phase_text)
+            elif published:
                 parts.append(f"APK: publicado {label or apk.get('versionName') or '?'}")
             elif apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
                 retry = apk.get("retry_after_seconds")
@@ -2024,13 +2079,19 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
             if agent:
                 queued = agent.get("queued") or []
                 target = agent.get("target_version") or _expected_phone_worker_version() or "?"
-                if queued:
+                phase_text = _automation_phase_label("agent", agent, target=target)
+                if phase_text:
+                    parts.append(phase_text)
+                elif queued:
                     parts.append(f"Worker: {len(queued)} atualização(ões) na fila")
                 elif agent.get("pending") and _active_workers_need_agent_version(snapshot_workers, target):
                     parts.append(f"Worker: atualização pendente ({target})")
             if apk:
+                phase_text = _automation_phase_label("apk", apk)
                 published, label = _apk_build_effectively_published(apk)
-                if apk.get("already_published") or published:
+                if phase_text:
+                    parts.append(phase_text)
+                elif apk.get("already_published") or published:
                     parts.append(f"APK: publicado {label or apk.get('versionName') or '?'}")
                 elif apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
                     suffix = " · correção necessária" if apk.get("permanent_failure") else ""

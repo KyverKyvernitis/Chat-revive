@@ -1,5 +1,34 @@
 # Phone Worker Termux
 
+## 1.11.0 — control plane recuperável e updater bootstrap independente
+
+A versão `1.11.0` elimina a dependência estrutural entre o agent Termux e a porta HTTP local. Heartbeat, polling de jobs, envio de resultados e pull de atualização iniciam antes do `ThreadingHTTPServer`; `8766` é apenas a porta direta principal do Termux, `8768` é recuperação explícita de conflito e o agent pode operar em `control-plane-only`. A porta `8767` permanece reservada ao runtime APK durante bootstrap compartilhado.
+
+O supervisor valida o PID recém-iniciado, `/proc/<pid>/cmdline`, diretório de execução e identidade do `/health`. Respostas com `runtime_kind=apk` nunca são aceitas como saúde do Termux. Em modo sem endpoint HTTP, a saúde usa PID confirmado, `runtime-status.json` recente e último heartbeat bem-sucedido. O fallback SSH legado é opt-in e também só encerra PID previamente confirmado; não há `pkill -f phone_worker.py`.
+
+O auto-update autoritativo agora é `phone_worker_bootstrap.py`, pequeno e baseado apenas na biblioteca padrão. Ele consulta um manifesto persistente autenticado, baixa uma release ZIP imutável por `source_hash`, valida HMAC/SHA-256/tamanho/manifesto/membros, extrai em staging com proteção contra traversal/symlink/zip bomb, roda `py_compile` e `bash -n`, promove a release atomicamente e só marca sucesso depois que o runtime reiniciado anuncia exatamente versão e hash esperados. Falha de boot/verificação restaura a release anterior. Estado, pareamento e `~/.phone-worker.env` permanecem fora da release.
+
+A configuração usa `PHONE_WORKER_CONFIG_SCHEMA=2`. Migrações fazem backup, adicionam apenas chaves ausentes e preservam token, URL, perfil, roles, capabilities e desativações intencionais. Configuração que bloqueia control plane/update é reportada como `blocked_by_config`, com a chave responsável, sem imprimir segredo.
+
+### Primeiro resgate de installations 1.10.x
+
+Agents antigos não possuem o bootstrap independente e não podem receber de forma confiável um `phone_worker.py` que já ultrapassou o limite legado. Faça **uma vez** no Termux, a partir dos arquivos desta release:
+
+```bash
+cd ~/phone-worker
+bash repair-phone-worker.sh
+```
+
+O script valida o env sem mostrar token, identifica listeners em 8766/8767/8768, executa o pull autoritativo, reinicia e confirma versão/hash; se a nova release não ficar saudável, restaura a anterior. Depois desse primeiro resgate, devices offline durante um deploy recuperam o target atual ao voltar, sem depender de job temporário.
+
+### Build Android 0.8.x
+
+O Termux continua sendo o builder bootstrap/fallback. O projeto exige Gradle Wrapper `8.9`, JDK `17`, AGP `8.7.3`, compileSdk `34`, build-tools `34.0.0`, Chaquopy `17.0.0` e `aapt2` Bionic. O preflight usa `GRADLE_USER_HOME` privado, calcula Xmx com a memória disponível e bloqueia antes do Gradle quando faltam RAM/espaço, a bateria está baixa sem carregamento, a temperatura está alta ou já existe build concorrente.
+
+O toolchain do self-builder **não entra mais nos assets do APK**. O Termux gera o toolchain mínimo, executa os cinco smokes (`java`, `javac`, `jar`, `gradle`, `aapt2`) e publica um artefato externo autenticado. O APK baixa esse artefato depois da instalação e só anuncia `apk-builder` depois de validar/promover/smoke. `.cwpart` antigo é aceito somente para migrar uma instalação que já o possua.
+
+> As seções abaixo são histórico de versões anteriores e podem descrever transportes substituídos em 1.11.0.
+
 ## Patch 86.6: toolchain particionado para o Gradle no Android
 
 A versão `1.10.43` não entrega mais o toolchain do autobuilder como um único

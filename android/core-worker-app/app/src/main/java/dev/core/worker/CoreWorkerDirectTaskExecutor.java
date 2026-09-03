@@ -189,7 +189,7 @@ final class CoreWorkerDirectTaskExecutor {
                 .put("executor_ready", prefs.getBoolean("job_executor_ready", false))
                 .put("foreground_active", prefs.getBoolean("foreground_runtime_active", false))
                 .put("direct_http_active", prefs.getBoolean("direct_http_active", false))
-                .put("direct_http_port", CoreWorkerRuntimeIdentity.directHttpPort(context))
+                .put("direct_http_port", CoreWorkerRuntimeIdentity.effectiveDirectHttpPort(context))
                 .put("last_job", prefs.getString("internal_light_jobs_last_summary", ""))
                 .put("last_error", prefs.getString("agent_last_error", ""));
     }
@@ -257,7 +257,7 @@ final class CoreWorkerDirectTaskExecutor {
         out.put("task", "vps_assist_probe");
         out.put("vps", normalizedServerUrl());
         out.put("endpoint", prefs.getString("direct_worker_endpoint", ""));
-        out.put("direct_http_port", CoreWorkerRuntimeIdentity.directHttpPort(context));
+        out.put("direct_http_port", CoreWorkerRuntimeIdentity.effectiveDirectHttpPort(context));
         boolean bootstrap = CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(context);
         out.put("termux_required", bootstrap);
         out.put("summary", bootstrap

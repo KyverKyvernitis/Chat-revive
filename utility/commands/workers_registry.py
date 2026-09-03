@@ -1131,6 +1131,29 @@ class CoreWorkersRegistry:
         data["jobs"] = jobs
         return {"expired_running": expired_running, "expired_queued": expired_queued, "trimmed": trimmed, "reconciled": reconciled}
 
+    @staticmethod
+    def _reject_inline_phone_worker_agent(job_type: str, payload: Mapping[str, Any] | None) -> None:
+        """Never persist the main Termux agent as base64 inside the registry.
+
+        Small legacy update metadata may still be accepted during migration, but
+        the canonical phone_worker.py must be delivered through the persistent
+        release manifest/bootstrap path.
+        """
+        if str(job_type or "").strip().lower() != "worker_update" or not isinstance(payload, Mapping):
+            return
+        files = payload.get("files")
+        if not isinstance(files, (list, tuple)):
+            return
+        for item in files:
+            if not isinstance(item, Mapping):
+                continue
+            target = str(item.get("target") or item.get("path") or "").replace("\\", "/").strip().lower()
+            if (target == "phone_worker.py" or target.endswith("/phone_worker.py")) and str(item.get("data_b64") or ""):
+                raise CoreWorkerRegistryError(
+                    "phone_worker.py inline/base64 não é permitido; use o manifesto persistente do bootstrap",
+                    status=400,
+                )
+
     def create_job(
         self,
         *,
@@ -1147,6 +1170,7 @@ class CoreWorkersRegistry:
         summary: str = "",
     ) -> dict[str, Any]:
         kind = _safe_job_type(job_type)
+        self._reject_inline_phone_worker_agent(kind, payload)
         ts = _now()
         ttl = max(30, min(7200, int(ttl_seconds or _env_int("CORE_WORKER_JOB_TTL_SECONDS", DEFAULT_JOB_TTL_SECONDS))))
         lease = max(10, min(7200, int(lease_seconds or _env_int("CORE_WORKER_JOB_LEASE_SECONDS", DEFAULT_JOB_LEASE_SECONDS))))
@@ -1293,6 +1317,8 @@ class CoreWorkersRegistry:
         source = str(worker.get("source") or "").strip().lower()
         platform = str(worker.get("platform") or "").strip().lower()
         is_apk = source.startswith("core-worker-apk") or platform == "android" or "apk-worker" in roles
+        if is_apk and job_type == "worker_update":
+            return False
         if is_apk and job_type in {"apk_build_debug", "apk_publish_last"}:
             if job_type == "apk_build_debug" and not builder_ready:
                 return False
@@ -1416,6 +1442,43 @@ class CoreWorkersRegistry:
             },
         }
 
+    def renew_job_lease(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
+        job_id = _short_text(payload.get("job_id"), limit=64)
+        if not job_id:
+            raise CoreWorkerRegistryError("job_id ausente", status=400)
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            job = jobs.get(job_id)
+            if not isinstance(job, dict):
+                raise CoreWorkerRegistryError("job não encontrado", status=404)
+            worker_id_from_payload = payload.get("worker_id") or payload.get("id") or job.get("worker_id")
+            worker_id, worker = self._authenticate_worker_unlocked(data, worker_id=worker_id_from_payload, token=token)
+            if str(job.get("worker_id") or "") != worker_id or str(job.get("status") or "") != "running":
+                raise CoreWorkerRegistryError("job não está leased para este worker", status=409)
+            lease = max(10, min(7200, int(job.get("lease_seconds") or DEFAULT_JOB_LEASE_SECONDS)))
+            job["lease_until"] = ts + lease
+            job["updated_at"] = ts
+            stage = _short_text(payload.get("stage"), limit=64)
+            progress = payload.get("progress")
+            if stage:
+                job["progress_stage"] = stage
+            if isinstance(progress, (int, float)):
+                job["progress"] = max(0.0, min(100.0, float(progress)))
+            summary = _short_text(payload.get("summary"), limit=160)
+            if summary:
+                job["progress_summary"] = summary
+            worker["updated_at"] = ts
+            worker["last_heartbeat_at"] = ts
+            worker["remote_addr"] = _short_text(remote_addr, limit=64)
+            data["workers"][worker_id] = worker
+            jobs[job_id] = job
+            data["jobs"] = jobs
+            self._save_unlocked(data)
+            public = _compact_job_public(job, include_result=False, now=ts)
+        return {"ok": True, "worker_id": worker_id, "job": public}
+
     def submit_job_result(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
         worker_id_from_payload = payload.get("worker_id") or payload.get("id")
         job_id = _short_text(payload.get("job_id"), limit=64)
@@ -1512,25 +1575,13 @@ class CoreWorkersRegistry:
                 and status == "succeeded"
                 and submitted_result.get("ok") is not False
             ):
-                applied_version = _short_text(
-                    submitted_result.get("applied_file_version")
-                    or submitted_result.get("target_version")
-                    or original_job_payload.get("version"),
-                    limit=48,
-                )
-                if applied_version:
-                    worker["version"] = applied_version
-                applied_source_hash = str(submitted_result.get("source_hash") or "").strip().lower()
-                if not applied_source_hash and original_job_payload.get("bootstrap_stage") is True:
-                    # O primeiro salto contém somente o núcleo aceito por agents
-                    # antigos. Registre um hash intermediário (nunca o hash final)
-                    # para manter o pacote completo pendente após o reinício.
-                    if original_job_payload.get("bootstrap_complete") is True:
-                        applied_source_hash = str(original_job_payload.get("target_source_hash") or "").strip().lower()
-                    else:
-                        applied_source_hash = str(original_job_payload.get("bootstrap_source_hash") or "").strip().lower()
-                if re.fullmatch(r"[0-9a-f]{64}", applied_source_hash):
-                    worker["source_hash"] = applied_source_hash
+                # Entrega/instalação não prova que o novo processo realmente subiu.
+                # A versão e o source_hash do worker só mudam no próximo heartbeat
+                # emitido pelo runtime reiniciado. Isso evita falso sucesso em update
+                # parcial ou rollback.
+                worker["updater_last_delivery_at"] = ts
+                worker["updater_last_delivery_target_version"] = _short_text(original_job_payload.get("version"), limit=48)
+                worker["updater_last_delivery_target_hash"] = _short_text(original_job_payload.get("source_hash") or original_job_payload.get("target_source_hash"), limit=64)
             status_dict = _worker_status_dict(worker)
             queue_status = status_dict.get("core_worker_jobs") if isinstance(status_dict.get("core_worker_jobs"), dict) else {}
             queue_status.update({
@@ -1635,6 +1686,69 @@ class CoreWorkersRegistry:
             if changed:
                 self._save_unlocked(data)
         return {"ok": True, "worker_id": safe_worker_id, "superseded": changed}
+
+    def supersede_apk_jobs_for_new_source(
+        self, source_fingerprint: str, *, version_code: int = 0, reason: str = "fonte APK mais nova publicada"
+    ) -> dict[str, Any]:
+        """Invalida jobs de APK que não pertencem mais ao target desejado.
+
+        Jobs ainda em fila são encerrados como ``superseded``. Um build que já
+        está rodando não é morto no meio do Gradle; ele recebe ``obsolete_source``
+        e a publicação também valida ``desired-source.json`` atomicamente.
+        """
+        expected = str(source_fingerprint or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise CoreWorkerRegistryError("source fingerprint inválido", status=400)
+        ts = _now()
+        superseded = 0
+        invalidated_running = 0
+        with self._lock:
+            data = self._load_unlocked()
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            for job in jobs.values():
+                if not isinstance(job, dict):
+                    continue
+                job_type = _normalize_job_type(job.get("type"))
+                if job_type not in {"apk_build_debug", "apk_publish_last"}:
+                    continue
+                payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+                old = str(
+                    payload.get("sourceFingerprint")
+                    or payload.get("source_fingerprint")
+                    or payload.get("sourceSha256")
+                    or payload.get("source_sha256")
+                    or ""
+                ).strip().lower()
+                if old == expected:
+                    continue
+                status = str(job.get("status") or "").strip().lower()
+                if status == "queued":
+                    job["status"] = "superseded"
+                    job["summary"] = _short_text(reason, limit=160)
+                    job["error"] = ""
+                    job["resolved_at"] = ts
+                    job["finished_at"] = ts
+                    job["obsolete_source"] = True
+                    job["superseded_by_source_fingerprint"] = expected
+                    if version_code:
+                        job["superseded_by_version_code"] = int(version_code)
+                    superseded += 1
+                elif status == "running":
+                    job["obsolete_source"] = True
+                    job["superseded_by_source_fingerprint"] = expected
+                    if version_code:
+                        job["superseded_by_version_code"] = int(version_code)
+                    job["updated_at"] = ts
+                    invalidated_running += 1
+            data["jobs"] = jobs
+            if superseded or invalidated_running:
+                self._save_unlocked(data)
+        return {
+            "ok": True,
+            "source_fingerprint": expected,
+            "superseded": superseded,
+            "invalidated_running": invalidated_running,
+        }
 
     def authenticate_worker(self, worker_id: str, token: str) -> dict[str, Any]:
         ts = _now()
@@ -1987,6 +2101,16 @@ def core_worker_heartbeat_http(headers: Mapping[str, Any], payload: Mapping[str,
 def core_worker_poll_job_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
     try:
         status, result = _retry_after_direct_autoregister(get_core_workers_registry().poll_job, headers, payload, remote_addr=remote_addr)
+        return status, result
+    except CoreWorkerRegistryError as exc:
+        return exc.status, {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return 500, {"ok": False, "error": f"falha interna: {type(exc).__name__}"}
+
+
+def core_worker_job_progress_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
+    try:
+        status, result = _retry_after_direct_autoregister(get_core_workers_registry().renew_job_lease, headers, payload, remote_addr=remote_addr)
         return status, result
     except CoreWorkerRegistryError as exc:
         return exc.status, {"ok": False, "error": str(exc)}

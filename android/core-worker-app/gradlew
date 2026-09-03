@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+# Core Worker portable Gradle Wrapper launcher.
+# Uses the official Gradle 8.9 wrapper JAR but deliberately avoids xargs-based
+# JVM option parsing, which is not portable across Termux/Android toolchains.
+set -eu
+
+APP_HOME=$(CDPATH= cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd -P)
+CLASSPATH="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+
+if [ -n "${JAVA_HOME:-}" ]; then
+    JAVACMD="$JAVA_HOME/bin/java"
+    if [ ! -x "$JAVACMD" ]; then
+        echo "ERROR: JAVA_HOME inválido: $JAVA_HOME" >&2
+        exit 1
+    fi
+else
+    JAVACMD=$(command -v java || true)
+    if [ -z "$JAVACMD" ]; then
+        echo "ERROR: java não encontrado; JDK 17 é obrigatório" >&2
+        exit 1
+    fi
+fi
+
+exec "$JAVACMD" \
+    -Dfile.encoding=UTF-8 \
+    -classpath "$CLASSPATH" \
+    org.gradle.wrapper.GradleWrapperMain \
+    "$@"

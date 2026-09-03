@@ -113,7 +113,7 @@ def test_bootstrap_core_starts_before_optional_runtime_files_arrive(tmp_path: Pa
 
     monkeypatch.setattr(module.importlib, "import_module", import_without_preloaded_identity)
 
-    assert module.PHONE_WORKER_VERSION == "1.11.0"
+    assert module.PHONE_WORKER_VERSION == "1.11.1"
     assert module._APK_IDENTITY_MODULE is None
     assert bootstrap_core.stat().st_size > 512 * 1024
     assert (ROOT / "deploy/termux/phone-worker/phone_worker_bootstrap.py").stat().st_size < 256 * 1024

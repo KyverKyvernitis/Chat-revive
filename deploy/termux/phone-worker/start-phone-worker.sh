@@ -46,6 +46,12 @@ MAINT_LOCK_DIR="${PHONE_WORKER_MAINT_LOCK_DIR:-$WORKER_DIR/.phone-worker-mainten
 MAINT_LOG_FILE="${PHONE_WORKER_MAINT_LOG_FILE:-$WORKER_DIR/phone-worker-maintenance.log}"
 DEPS_STATE_DIR="${PHONE_WORKER_DEPS_STATE_DIR:-$WORKER_DIR/.dependency-install}"
 APK_BUILDER_ENV_CHANGED=0
+FORCE_RESTART=0
+for arg in "$@"; do
+  case "$arg" in
+    --force-restart|--restart) FORCE_RESTART=1 ;;
+  esac
+done
 
 log() {
   printf '[phone-worker-start] %s\n' "$*"
@@ -744,7 +750,11 @@ existing_pid="$(pid_from_file)"
 if [[ -n "$existing_pid" && "$count" -le 1 ]] && worker_healthy_for_pid "$existing_pid"; then
   running_ver="$(running_version_for_pid "$existing_pid")"
   file_ver="$(file_version)"
-  if [[ "$APK_BUILDER_ENV_CHANGED" == "1" ]]; then
+  if [[ "$FORCE_RESTART" == "1" ]]; then
+    log "restart forçado solicitado; encerrando processo Termux confirmado pid=$existing_pid"
+    write_status "restart_forced pid=$existing_pid $(now_iso)"
+    kill_worker_processes
+  elif [[ "$APK_BUILDER_ENV_CHANGED" == "1" ]]; then
     log "capacidade apk-builder alterada; reiniciando processo Termux confirmado"
     write_status "restart_for_apk_builder_capability pid=$existing_pid $(now_iso)"
     kill_worker_processes

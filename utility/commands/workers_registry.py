@@ -394,6 +394,25 @@ def _compact_job_public(record: Mapping[str, Any], *, include_result: bool = Fal
         "summary": _short_text(record.get("summary"), limit=160),
         "error": _short_text(record.get("error"), limit=180),
     }
+    # Metadados de coordenação do build podem aparecer no snapshot público sem
+    # expor o payload completo (que contém Firebase/assinatura). A automação usa
+    # estes campos para relacionar uma falha ao mesmo source/agent/toolchain e
+    # impedir que um erro determinístico seja reenfileirado a cada heartbeat.
+    if str(record.get("type") or "") == "apk_build_debug":
+        payload = record.get("payload") if isinstance(record.get("payload"), Mapping) else {}
+        result = record.get("result") if isinstance(record.get("result"), Mapping) else {}
+        builder_env = result.get("builder_environment") if isinstance(result.get("builder_environment"), Mapping) else {}
+        self_builder = builder_env.get("self_builder_toolchain") if isinstance(builder_env.get("self_builder_toolchain"), Mapping) else {}
+        public.update({
+            "versionName": _short_text(payload.get("versionName") or result.get("versionName"), limit=48),
+            "versionCode": int(payload.get("versionCode") or result.get("versionCode") or 0),
+            "sourceFingerprint": _short_text(payload.get("sourceFingerprint") or result.get("sourceFingerprint"), limit=64),
+            "requiredAgentSourceHash": _short_text(payload.get("requiredAgentSourceHash") or result.get("phoneWorkerSourceHash"), limit=64),
+            "toolchainFingerprint": _short_text(payload.get("toolchainFingerprint") or result.get("toolchainFingerprint") or self_builder.get("toolchainFingerprint"), limit=64),
+            "selectedBuilderWorkerId": _short_text(payload.get("selectedBuilderWorkerId") or record.get("target_worker_id") or record.get("worker_id"), limit=64),
+            "selectedBuilderRuntimeKind": _short_text(payload.get("selectedBuilderRuntimeKind"), limit=24),
+            "failure_category": _short_text(result.get("failure_category") or result.get("failureCategory"), limit=24),
+        })
     if include_result:
         public["result"] = _safe_dict(record.get("result"), max_items=32)
     return public

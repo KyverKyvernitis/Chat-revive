@@ -101,7 +101,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.0"
+PHONE_WORKER_VERSION = "1.11.1"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -8103,8 +8103,33 @@ def _patch_gradle_launcher_for_android(path: Path) -> dict[str, Any]:
     }
 
 
+def _java_home_major(candidate: Path, env: dict[str, str]) -> int:
+    java = candidate / "bin/java"
+    if not java.is_file():
+        return 0
+    probe_env = dict(env)
+    probe_env["JAVA_HOME"] = str(candidate)
+    try:
+        completed = subprocess.run(
+            [str(java), "-version"],
+            env=probe_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except Exception:
+        return 0
+    text = str(completed.stdout or "")
+    match = re.search(r'(?:openjdk\s+version|java\s+version|version)\s+["\']?(?P<major>\d+)', text, flags=re.IGNORECASE)
+    return int(match.group("major")) if completed.returncode == 0 and match else 0
+
+
 def _find_termux_java_home(env: dict[str, str]) -> Path:
-    candidates: list[Path] = []
+    prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
+    candidates: list[Path] = [prefix / "lib/jvm/java-17-openjdk"]
     if env.get("JAVA_HOME"):
         candidates.append(Path(env["JAVA_HOME"]).expanduser())
     java_cmd = shutil.which("java", path=env.get("PATH")) or shutil.which("java")
@@ -8112,14 +8137,28 @@ def _find_termux_java_home(env: dict[str, str]) -> Path:
         resolved = Path(java_cmd).resolve()
         if resolved.parent.name == "bin":
             candidates.append(resolved.parent.parent)
-    prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
     for root in (prefix / "lib/jvm", prefix / "opt"):
         if root.is_dir():
-            candidates.extend(path for path in sorted(root.glob("*"), reverse=True) if path.is_dir())
+            candidates.extend(path for path in sorted(root.glob("*")) if path.is_dir())
+    seen: set[str] = set()
+    detected: list[str] = []
     for candidate in candidates:
-        if all((candidate / f"bin/{name}").is_file() for name in ("java", "javac", "jar")):
-            return candidate.resolve()
-    raise FileNotFoundError("JDK completo não encontrado no Termux (java/javac/jar)")
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not all((resolved / f"bin/{name}").is_file() for name in ("java", "javac", "jar")):
+            continue
+        major = _java_home_major(resolved, env)
+        detected.append(f"{resolved.name}:{major or '?'}")
+        if major == 17:
+            return resolved
+    detail = ", ".join(detected[:8]) or "nenhum JDK completo"
+    raise RuntimeError(f"JDK 17 completo não encontrado no Termux; detectados: {detail}")
 
 
 def _find_termux_gradle_home(env: dict[str, str]) -> Path:
@@ -8780,8 +8819,12 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
     try:
         _copy_tree_dereferenced(jdk_home, bundle_root / "jdk")
         _copy_tree_dereferenced(gradle_home, bundle_root / "gradle")
-        # O wrapper oficial já resolveu Gradle 8.9. Não reescrevemos o launcher
-        # da distribuição fixa: smokes precisam testar o que o APK realmente usará.
+        # O launcher Unix oficial do Gradle 8.9 ainda traz DEFAULT_JVM_OPTS com
+        # aspas aninhadas. Em /system/bin/sh no Android/Termux essas aspas podem
+        # sobreviver ao xargs/eval e o Java tenta carregar "-Xmx64m" como classe.
+        # Normalize a cópia do bundle (nunca a instalação global) ANTES do smoke,
+        # para testar exatamente o launcher que será publicado e usado pelo APK.
+        gradle_launcher = _patch_gradle_launcher_for_android(bundle_root / "gradle/bin/gradle")
         sdk_target = bundle_root / "android-sdk"
         _copy_tree_dereferenced(sdk_home / "platforms/android-34", sdk_target / "platforms/android-34")
         _copy_tree_dereferenced(build_tools, sdk_target / "build-tools/34.0.0")
@@ -8824,6 +8867,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
             "runtimeLibraries": runtime_library_report,
             "validation": {"strategy": "required-executable-smoke-v2", "requiredSmokeChecks": ["java", "javac", "jar", "gradle", "aapt2"]},
             "bootstrapSmoke": smoke,
+            "gradleLauncher": gradle_launcher,
             "executablePaths": executable_paths,
             "safety": {"generatedOnTermux": True, "vpsBuild": False, "embeddedInApk": False, "noRemoteShell": True},
         }
@@ -8845,6 +8889,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
             "publish": publish,
             "versions": manifest["versions"],
             "bootstrapSmoke": smoke,
+            "gradleLauncher": gradle_launcher,
             **generated,
         }
     finally:
@@ -9131,7 +9176,8 @@ def _classify_apk_failure_text(text: str) -> dict[str, Any]:
         r"assinatura.*(?:incompatível|divergente)|keystore.*(?:ausente|inválid|diverg)",
         r"arquivo obrigatório ausente|source.*(?:fingerprint|sha256).*diverg",
         r"toolchain.*manifest.*inválid|schema inválido.*toolchain|matriz de versões.*incompatível",
-        r"jdk incompatível|gradle wrapper.*(?:ausente|não está fixado)|compileSdk 34 ausente|build-tools 34\.0\.0 ausente",
+        r"jdk incompatível|jdk 17 completo não encontrado|gradle wrapper.*(?:ausente|não está fixado)|compileSdk 34 ausente|build-tools 34\.0\.0 ausente",
+        r"could not find or load main class.*-xmx|classnotfoundexception:.*-xmx|default_jvm_opts.*inválid|launcher gradle.*(?:inesperado|inválid|não portátil)",
         r"syntax error", r"cmake error|ninja:.*(?:error|failed)|clang: error",
     )
     for pattern in transient_patterns:

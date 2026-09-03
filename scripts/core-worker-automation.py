@@ -1447,8 +1447,11 @@ _APK_BUILD_DETERMINISTIC_ERROR_RE = re.compile(
     r"assinatura.*(?:incompat|diverg)|keystore.*(?:ausente|inválid|diverg)|"
     r"arquivo obrigatório ausente|source.*(?:fingerprint|sha256).*diverg|"
     r"toolchain.*manifest.*inválid|schema inválido.*toolchain|matriz de versões.*incompat|"
-    r"jdk incompatível|gradle wrapper.*(?:ausente|não está fixado)|compileSdk 34 ausente|"
-    r"build-tools 34\.0\.0 ausente|depend[êe]ncia elf obrigat[oó]ria ausente|syntax error|cmake error|ninja:.*(?:error|failed)|clang: error)",
+    r"jdk incompatível|jdk 17 completo não encontrado|gradle wrapper.*(?:ausente|não está fixado)|compileSdk 34 ausente|"
+    r"build-tools 34\.0\.0 ausente|depend[êe]ncia elf obrigat[oó]ria ausente|"
+    r"could not find or load main class.*-xmx|classnotfoundexception:.*-xmx|"
+    r"default_jvm_opts.*inválid|launcher gradle.*(?:inesperado|inválid|não portátil)|"
+    r"syntax error|cmake error|ninja:.*(?:error|failed)|clang: error)",
     re.IGNORECASE,
 )
 
@@ -1462,7 +1465,7 @@ def _apk_build_job_matches_source(job: dict[str, Any], version_name: str, source
             haystacks.append(str(value))
     payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
-    for obj in (payload, result):
+    for obj in (job, payload, result):
         for key in ("versionName", "version_name", "versionCode", "version_code", "sourceFingerprint", "source_fingerprint", "sourceSha256", "source_sha256", "notificationId", "notification_id"):
             value = obj.get(key) if isinstance(obj, dict) else None
             if value:
@@ -1489,17 +1492,19 @@ def _apk_build_failure_detail(job: dict[str, Any]) -> str:
 
 def _apk_build_failure_classification(job: dict[str, Any]) -> dict[str, Any]:
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
-    explicit = str(result.get("failure_category") or result.get("failureCategory") or "").strip().lower()
-    if explicit in {"transient", "deterministic", "unknown"}:
+    explicit = str(result.get("failure_category") or result.get("failureCategory") or job.get("failure_category") or "").strip().lower()
+    detail = _apk_build_failure_detail(job)
+    # transient/deterministic explícitos são autoritativos. ``unknown`` não é:
+    # versões anteriores do agent podem não conhecer uma falha determinística
+    # nova, então a VPS deve poder promovê-la pela mensagem sem criar loop.
+    if explicit in {"transient", "deterministic"}:
         category = explicit
+    elif detail and _APK_BUILD_TRANSIENT_ERROR_RE.search(detail):
+        category = "transient"
+    elif detail and _APK_BUILD_DETERMINISTIC_ERROR_RE.search(detail):
+        category = "deterministic"
     else:
-        detail = _apk_build_failure_detail(job)
-        if detail and _APK_BUILD_TRANSIENT_ERROR_RE.search(detail):
-            category = "transient"
-        elif detail and _APK_BUILD_DETERMINISTIC_ERROR_RE.search(detail):
-            category = "deterministic"
-        else:
-            category = "unknown"
+        category = "unknown"
     return {
         "category": category,
         "retryable": category != "deterministic",
@@ -1518,16 +1523,17 @@ def _job_failure_context(job: dict[str, Any]) -> dict[str, str]:
     self_builder = builder_environment.get("self_builder_toolchain") if isinstance(builder_environment.get("self_builder_toolchain"), dict) else {}
     return {
         "agent_source_hash": str(
-            payload.get("requiredAgentSourceHash") or result.get("phoneWorkerSourceHash") or ""
+            payload.get("requiredAgentSourceHash") or result.get("phoneWorkerSourceHash") or job.get("requiredAgentSourceHash") or ""
         ).strip().lower(),
         "toolchain_fingerprint": str(
             payload.get("toolchainFingerprint")
             or result.get("toolchainFingerprint")
             or self_builder.get("toolchainFingerprint")
+            or job.get("toolchainFingerprint")
             or ""
         ).strip().lower(),
-        "builder_worker_id": str(payload.get("selectedBuilderWorkerId") or job.get("target_worker_id") or job.get("worker_id") or "").strip(),
-        "builder_runtime_kind": str(payload.get("selectedBuilderRuntimeKind") or "").strip().lower(),
+        "builder_worker_id": str(payload.get("selectedBuilderWorkerId") or job.get("selectedBuilderWorkerId") or job.get("target_worker_id") or job.get("worker_id") or "").strip(),
+        "builder_runtime_kind": str(payload.get("selectedBuilderRuntimeKind") or job.get("selectedBuilderRuntimeKind") or "").strip().lower(),
     }
 
 
@@ -2086,20 +2092,6 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
     pending["apk_build"] = item
     _save_pending(pending)
 
-    recent_queue = {} if manual else _pending_apk_build_recently_queued(pending, version_code, source_fingerprint)
-    if recent_queue:
-        item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
-        item.update({
-            "ok": True,
-            "pending": True,
-            "blocked_by_recent_queue": True,
-            "retry_after_seconds": recent_queue.get("retry_after_seconds"),
-            "updated_at": time.time(),
-            "message": "build do APK já foi enfileirado recentemente; aguardando resultado/cooldown para evitar loop",
-        })
-        pending["apk_build"] = item
-        _save_pending(pending)
-        return item
     failed_recent = {} if manual else _recent_failed_apk_build(
         version_name,
         source_fingerprint,
@@ -2112,6 +2104,7 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         item.update({
             "ok": False,
             "pending": False,
+            "phase": "failed_deterministic" if failed_recent.get("permanent") else "failed_transient",
             "blocked_by_recent_failure": True,
             "last_failed_job_id": (failed_recent.get("job") or {}).get("job_id"),
             "retry_after_seconds": failed_recent.get("retry_after_seconds"),
@@ -2119,6 +2112,20 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
             "permanent_failure": bool(failed_recent.get("permanent")),
             "last_failure_detail": failed_recent.get("detail"),
             "message": "build do APK falhou recentemente; retry automático bloqueado para evitar loop; use retry manual após corrigir o erro",
+        })
+        pending["apk_build"] = item
+        _save_pending(pending)
+        return item
+    recent_queue = {} if manual else _pending_apk_build_recently_queued(pending, version_code, source_fingerprint)
+    if recent_queue:
+        item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
+        item.update({
+            "ok": True,
+            "pending": True,
+            "blocked_by_recent_queue": True,
+            "retry_after_seconds": recent_queue.get("retry_after_seconds"),
+            "updated_at": time.time(),
+            "message": "build do APK já foi enfileirado recentemente; aguardando resultado/cooldown para evitar loop",
         })
         pending["apk_build"] = item
         _save_pending(pending)

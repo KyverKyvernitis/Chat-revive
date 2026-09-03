@@ -230,7 +230,7 @@ def test_05_offline_device_target_is_published_persistently(tmp_path: Path, monk
     result = module.queue_agent_updates()
     latest = json.loads((tmp_path / "agent/latest.json").read_text(encoding="utf-8"))
     assert result["pending"] is True
-    assert latest["version"] == "1.11.0"
+    assert latest["version"] == "1.11.1"
     assert (tmp_path / "agent/releases" / f"{latest['source_hash']}.zip").is_file()
 
 
@@ -512,3 +512,127 @@ def test_28_apk_signature_and_identity_are_verified_before_publish():
     assert "assert_expected_apk_identity" in web or "inspect_apk_identity" in web
     assert "keystore" in automation.lower()
     assert "sourceFingerprint" in web and "desired_source" in web
+
+
+def test_hotfix_java_home_prefers_real_jdk17_over_path_java21(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load("phone_worker_hotfix_jdk17_test", PHONE_WORKER)
+    prefix = tmp_path / "usr"
+    j17 = prefix / "lib/jvm/java-17-openjdk"
+    j21 = prefix / "lib/jvm/java-21-openjdk"
+    for home, major in ((j17, 17), (j21, 21)):
+        bindir = home / "bin"
+        bindir.mkdir(parents=True)
+        for name in ("javac", "jar"):
+            path = bindir / name
+            path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            path.chmod(0o755)
+        java = bindir / "java"
+        java.write_text(f"#!/bin/sh\necho 'openjdk version \"{major}.0.1\"' >&2\n", encoding="utf-8")
+        java.chmod(0o755)
+    monkeypatch.setattr(module.shutil, "which", lambda name, path=None: str(j21 / "bin/java") if name == "java" else None)
+    env = {"PREFIX": str(prefix), "PATH": str(j21 / "bin"), "JAVA_HOME": str(j21)}
+    assert module._find_termux_java_home(env) == j17.resolve()
+
+
+def test_hotfix_gradle_xmx_failure_is_deterministic_even_if_old_agent_says_unknown() -> None:
+    automation = load("automation_hotfix_gradle_classification_test", AUTOMATION)
+    job = {
+        "status": "failed",
+        "error": 'preparação do autobuilder falhou: Could not find or load main class "-Xmx64m"',
+        "result": {
+            "failure_category": "unknown",
+            "summary": 'smoke gradle falhou: java.lang.ClassNotFoundException: "-Xmx64m"',
+        },
+    }
+    result = automation._apk_build_failure_classification(job)
+    assert result == {"category": "deterministic", "retryable": False, "permanent": True}
+
+
+def test_hotfix_toolchain_normalizes_copied_gradle_launcher_before_smoke() -> None:
+    source = text(PHONE_WORKER)
+    copy_marker = '_copy_tree_dereferenced(gradle_home, bundle_root / "gradle")'
+    patch_marker = '_patch_gradle_launcher_for_android(bundle_root / "gradle/bin/gradle")'
+    smoke_marker = 'smoke = _smoke_apk_self_builder_bundle(bundle_root)'
+    assert copy_marker in source and patch_marker in source and smoke_marker in source
+    assert source.index(copy_marker) < source.index(patch_marker) < source.index(smoke_marker)
+
+
+def test_hotfix_supervisor_force_restart_is_real() -> None:
+    source = text(PHONE / "start-phone-worker.sh")
+    assert '--force-restart|--restart' in source
+    assert 'FORCE_RESTART=1' in source
+    assert 'restart_forced pid=$existing_pid' in source
+    assert 'kill_worker_processes' in source
+
+
+def test_hotfix_registry_snapshot_preserves_only_safe_apk_failure_context() -> None:
+    reg = load("registry_hotfix_compact_context_test", REGISTRY)
+    record = {
+        "job_id": "job-test",
+        "type": "apk_build_debug",
+        "status": "failed",
+        "target_worker_id": "phone-1",
+        "worker_id": "phone-1",
+        "created_at": time.time() - 5,
+        "updated_at": time.time(),
+        "payload": {
+            "versionName": "0.8.0",
+            "versionCode": 127,
+            "sourceFingerprint": "a" * 64,
+            "requiredAgentSourceHash": "b" * 64,
+            "toolchainFingerprint": "",
+            "selectedBuilderWorkerId": "phone-1",
+            "selectedBuilderRuntimeKind": "termux",
+            "google_services_json_b64": "SECRET_FIREBASE",
+            "keystore_b64": "SECRET_KEYSTORE",
+        },
+        "result": {
+            "failure_category": "unknown",
+            "summary": 'Could not find or load main class "-Xmx64m"',
+        },
+    }
+    compact = reg._compact_job_public(record, include_result=False)
+    assert compact["sourceFingerprint"] == "a" * 64
+    assert compact["requiredAgentSourceHash"] == "b" * 64
+    assert compact["selectedBuilderWorkerId"] == "phone-1"
+    assert compact["selectedBuilderRuntimeKind"] == "termux"
+    serialized = json.dumps(compact)
+    assert "SECRET_FIREBASE" not in serialized
+    assert "SECRET_KEYSTORE" not in serialized
+    assert "payload" not in compact and "result" not in compact
+
+
+def test_hotfix_recent_deterministic_failure_blocks_requeue_from_compact_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    automation = load("automation_hotfix_compact_failure_test", AUTOMATION)
+    now = time.time()
+    compact_job = {
+        "job_id": "job-failed",
+        "type": "apk_build_debug",
+        "status": "failed",
+        "created_at": now - 20,
+        "updated_at": now - 10,
+        "worker_id": "phone-1",
+        "target_worker_id": "phone-1",
+        "summary": "build automático APK 0.8.0 " + ("a" * 12),
+        "error": 'smoke gradle falhou: Could not find or load main class "-Xmx64m"',
+        "versionName": "0.8.0",
+        "versionCode": 127,
+        "sourceFingerprint": "a" * 64,
+        "requiredAgentSourceHash": "b" * 64,
+        "toolchainFingerprint": "",
+        "selectedBuilderWorkerId": "phone-1",
+        "selectedBuilderRuntimeKind": "termux",
+        "failure_category": "unknown",
+    }
+    monkeypatch.setattr(automation, "_load_registry_snapshot", lambda: {"jobs": [compact_job], "workers": []})
+    failed = automation._recent_failed_apk_build(
+        "0.8.0",
+        "a" * 64,
+        agent_source_hash="b" * 64,
+        toolchain_fingerprint="",
+        builder_worker_id="phone-1",
+        cooldown_seconds=60,
+    )
+    assert failed["permanent"] is True
+    assert failed["category"] == "deterministic"
+    assert failed["job"]["job_id"] == "job-failed"

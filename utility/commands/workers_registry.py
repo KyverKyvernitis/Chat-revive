@@ -299,14 +299,14 @@ def _merge_worker_status(worker: dict[str, Any], incoming: object) -> None:
         return
     current = worker.get("status") if isinstance(worker.get("status"), dict) else {}
     merged = dict(current)
-    for key, value in _safe_dict(incoming, max_items=18, max_string=1024).items():
+    for key, value in _safe_dict(incoming, max_items=32, max_string=1024).items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             nested = dict(merged.get(key) or {})
             nested.update(value)
-            merged[key] = _safe_dict(nested, max_items=18, max_string=1024)
+            merged[key] = _safe_dict(nested, max_items=32, max_string=1024)
         else:
             merged[key] = value
-    worker["status"] = _safe_dict(merged, max_items=18, max_string=1024)
+    worker["status"] = _safe_dict(merged, max_items=32, max_string=1024)
 
 
 def _safe_dict(
@@ -425,7 +425,7 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
     enabled = bool(record.get("enabled", True))
     online = enabled and age is not None and age <= offline_after
     roles = _merge_unique(normalize_roles(record.get("roles"), limit=16), normalize_roles(record.get("manual_roles"), limit=16), limit=16)
-    capabilities = _merge_unique(normalize_roles(record.get("capabilities"), limit=24), normalize_roles(record.get("manual_capabilities"), limit=24), limit=24)
+    capabilities = _merge_unique(normalize_roles(record.get("capabilities"), limit=64), normalize_roles(record.get("manual_capabilities"), limit=64), limit=64)
     supported_tasks = _merge_unique(normalize_job_types(record.get("supported_tasks"), limit=96), normalize_job_types(record.get("manual_supported_tasks"), limit=96), limit=96)
     status = record.get("status") if isinstance(record.get("status"), Mapping) else {}
     runtime = status.get("runtime") if isinstance(status.get("runtime"), Mapping) else {}
@@ -458,7 +458,7 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "battery": _safe_dict(record.get("battery"), max_items=12, max_string=512),
         "network": _safe_dict(record.get("network"), max_items=12, max_string=512),
         "health": _safe_dict(record.get("health"), max_items=16, max_string=1024),
-        "status": _safe_dict(record.get("status"), max_items=18, max_string=1024),
+        "status": _safe_dict(record.get("status"), max_items=32, max_string=1024),
         "remote_addr": _short_text(record.get("remote_addr"), limit=64),
     }
     return public
@@ -590,7 +590,7 @@ def _sanitize_registry_for_storage(data: dict[str, Any]) -> None:
     for worker in workers.values():
         if not isinstance(worker, dict):
             continue
-        for key, max_items in (("battery", 12), ("network", 12), ("health", 16), ("status", 18)):
+        for key, max_items in (("battery", 12), ("network", 12), ("health", 16), ("status", 32)):
             if isinstance(worker.get(key), Mapping):
                 worker[key] = _safe_dict(worker.get(key), max_items=max_items, max_string=1024)
     jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
@@ -980,7 +980,7 @@ class CoreWorkersRegistry:
             token = "cw_" + secrets.token_urlsafe(32)
             name = _short_text(payload.get("name") or payload.get("device_name"), limit=64, default="Core Worker")
             roles = normalize_roles(payload.get("roles"), default=["worker", "diagnostics"], limit=16)
-            capabilities = normalize_roles(payload.get("capabilities"), default=roles, limit=24)
+            capabilities = normalize_roles(payload.get("capabilities"), default=roles, limit=64)
             endpoint = _short_text(payload.get("endpoint") or payload.get("base_url") or payload.get("url"), limit=160)
             version = _short_text(payload.get("version"), limit=48)
             source = _short_text(payload.get("source"), limit=32, default="apk")
@@ -1082,10 +1082,10 @@ class CoreWorkersRegistry:
             if payload.get("source_hash"):
                 record["source_hash"] = _short_text(payload.get("source_hash"), limit=64)
             roles = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles"), default=["apk-worker", "diagnostics"]), limit=16)
-            capabilities = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), default=roles), limit=24)
+            capabilities = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), default=roles, limit=64), limit=64)
             tasks = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=96)
             record["roles"] = _merge_unique(roles, normalize_roles(record.get("manual_roles"), limit=16), limit=16)
-            record["capabilities"] = _merge_unique(capabilities, normalize_roles(record.get("manual_capabilities"), limit=24), limit=24)
+            record["capabilities"] = _merge_unique(capabilities, normalize_roles(record.get("manual_capabilities"), limit=64), limit=64)
             if tasks:
                 record["supported_tasks"] = tasks
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
@@ -1124,7 +1124,7 @@ class CoreWorkersRegistry:
             if "roles" in payload:
                 record["roles"] = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles")), limit=16)
             if "capabilities" in payload:
-                record["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities")), limit=24)
+                record["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), limit=64), limit=64)
             if "supported_tasks" in payload:
                 record["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=96)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
@@ -1447,7 +1447,7 @@ class CoreWorkersRegistry:
             if "roles" in payload:
                 worker["roles"] = normalize_roles(payload.get("roles"), default=normalize_roles(worker.get("roles")), limit=16)
             if "capabilities" in payload:
-                worker["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(worker.get("capabilities")), limit=24)
+                worker["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(worker.get("capabilities"), limit=64), limit=64)
             if "supported_tasks" in payload:
                 worker["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(worker.get("supported_tasks")), limit=96)
             if "source_hash" in payload:
@@ -1892,7 +1892,7 @@ class CoreWorkersRegistry:
         new_roles = normalize_roles(roles, limit=16)
         if not new_roles:
             raise CoreWorkerRegistryError("roles ausentes", status=400)
-        new_capabilities = normalize_roles(capabilities if capabilities is not None else new_roles, default=new_roles, limit=24)
+        new_capabilities = normalize_roles(capabilities if capabilities is not None else new_roles, default=new_roles, limit=64)
         manual_tasks = normalize_job_types(supported_tasks, limit=96) if supported_tasks is not None else []
         ts = _now()
         with self._lock:
@@ -1909,7 +1909,7 @@ class CoreWorkersRegistry:
             if manual_tasks:
                 worker["manual_supported_tasks"] = manual_tasks
             worker["roles"] = _merge_unique(normalize_roles(worker.get("roles"), limit=16), new_roles, limit=16)
-            worker["capabilities"] = _merge_unique(normalize_roles(worker.get("capabilities"), limit=24), new_capabilities, limit=24)
+            worker["capabilities"] = _merge_unique(normalize_roles(worker.get("capabilities"), limit=64), new_capabilities, limit=64)
             if manual_tasks:
                 worker["supported_tasks"] = _merge_unique(normalize_job_types(worker.get("supported_tasks"), limit=96), manual_tasks, limit=96)
             worker["updated_at"] = ts

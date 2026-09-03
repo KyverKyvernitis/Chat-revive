@@ -293,3 +293,51 @@ def test_direct_http_secret_is_removed_when_connection_is_forgotten() -> None:
     activity = read(JAVA / "MainActivity.java")
     assert '.putString("direct_http_token"' in activity
     assert '.remove("direct_http_token")' in activity
+
+
+def test_registry_preserves_dynamic_apk_builder_after_large_android_heartbeat(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    token = "apk-child-token"
+    now = time.time()
+    worker_id = "phone-test-apk"
+    record = _worker_record(worker_id=worker_id, token=token, apk=True, ready=False)
+    record["roles"] = ["apk-worker"]
+    record["capabilities"] = ["apk-native"]
+    record["status"] = {}
+    registry_path.write_text(json.dumps({
+        "version": 2,
+        "pairings": {},
+        "workers": {worker_id: record},
+        "jobs": {},
+    }), encoding="utf-8")
+    registry = CoreWorkersRegistry(registry_path)
+
+    capabilities = [f"static-cap-{i:02d}" for i in range(25)] + ["apk-builder", "apk-self-builder"]
+    status = {f"field_{i:02d}": i for i in range(21)}
+    status["apk_self_builder"] = {
+        "ok": True,
+        "ready": True,
+        "publishReady": False,
+        "state": "ready",
+        "toolchainReleaseFingerprint": "f" * 64,
+    }
+    response = registry.heartbeat({
+        "worker_id": worker_id,
+        "source": "core-worker-apk-foreground-service",
+        "platform": "android",
+        "runtime_kind": "apk",
+        "roles": ["apk-worker"],
+        "capabilities": capabilities,
+        "supported_tasks": ["apk_builder_status", "apk_build_debug"],
+        "status": status,
+    }, token=token, remote_addr="127.0.0.1")
+
+    public = response["worker"]
+    assert "apk-builder" in public["capabilities"]
+    assert "apk-self-builder" in public["capabilities"]
+    assert public["status"]["apk_self_builder"]["ready"] is True
+
+    snap = registry.snapshot()
+    worker = next(w for w in snap["workers"] if w["worker_id"] == worker_id)
+    assert "apk-builder" in worker["capabilities"]
+    assert worker["status"]["apk_self_builder"]["state"] == "ready"

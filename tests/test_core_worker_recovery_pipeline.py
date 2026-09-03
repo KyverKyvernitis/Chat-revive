@@ -636,3 +636,120 @@ def test_hotfix_recent_deterministic_failure_blocks_requeue_from_compact_snapsho
     assert failed["permanent"] is True
     assert failed["category"] == "deterministic"
     assert failed["job"]["job_id"] == "job-failed"
+
+
+def test_29_publish_last_repairs_desired_source_with_original_builder_before_queue(monkeypatch: pytest.MonkeyPatch):
+    module = load("automation_publish_last_builder_repair_test", AUTOMATION)
+    calls: list[tuple[str, dict]] = []
+
+    class Registry:
+        def create_job(self, **kwargs):
+            calls.append(("create_job", kwargs))
+            return {"ok": True, "job": {"job_id": "job-publish-fixed"}}
+
+    monkeypatch.setattr(module, "get_core_workers_registry", lambda: Registry())
+    monkeypatch.setattr(module, "_active_job_exists", lambda **_kwargs: False)
+    monkeypatch.setattr(module, "_load_pending", lambda: {})
+    monkeypatch.setattr(module, "_save_pending", lambda _value: None)
+    monkeypatch.setattr(module, "_recent_failed_apk_publish_last", lambda **_kwargs: {})
+
+    def publish_desired(**kwargs):
+        calls.append(("desired", kwargs))
+        return {"record": kwargs, "previousRecord": {"selectedBuilderWorkerId": ""}, "changed": False}
+
+    monkeypatch.setattr(module, "_publish_desired_apk_source", publish_desired)
+    found = {
+        "worker_id": "phone-localhost-c1111fd9",
+        "selected_builder_worker_id": "phone-localhost-c1111fd9",
+        "selected_builder_runtime_kind": "termux",
+        "required_agent_source_hash": "a" * 64,
+        "toolchain_fingerprint": "b" * 64,
+        "artifact_path": "/tmp/CoreWorker-v0.8.0-debug.apk",
+        "filename": "CoreWorker-v0.8.0-debug.apk",
+    }
+    result = module._queue_apk_publish_last_from_build(
+        found,
+        version_name="0.8.0",
+        version_code=127,
+        source_fingerprint="c" * 64,
+        source_sha256="d" * 64,
+        notification_id="apk-127-test",
+    )
+    assert result["pending"] is True
+    assert [name for name, _ in calls][:2] == ["desired", "create_job"]
+    desired = calls[0][1]
+    assert desired["selected_builder_worker_id"] == "phone-localhost-c1111fd9"
+    assert desired["selected_builder_runtime_kind"] == "termux"
+    assert desired["required_agent_source_hash"] == "a" * 64
+    assert desired["toolchain_fingerprint"] == "b" * 64
+    payload = calls[1][1]["payload"]
+    assert payload["selectedBuilderWorkerId"] == "phone-localhost-c1111fd9"
+    assert payload["sourceFingerprint"] == "c" * 64
+
+
+def test_30_publish_last_failure_does_not_requeue_every_automation_cycle(monkeypatch: pytest.MonkeyPatch):
+    module = load("automation_publish_last_cooldown_test", AUTOMATION)
+
+    class Registry:
+        def create_job(self, **_kwargs):
+            raise AssertionError("não deveria criar outro apk_publish_last durante cooldown")
+
+    monkeypatch.setattr(module, "get_core_workers_registry", lambda: Registry())
+    monkeypatch.setattr(module, "_active_job_exists", lambda **_kwargs: False)
+    monkeypatch.setattr(module, "_publish_desired_apk_source", lambda **kwargs: {
+        "record": kwargs,
+        "previousRecord": {"selectedBuilderWorkerId": "phone-localhost-c1111fd9"},
+        "changed": False,
+    })
+    monkeypatch.setattr(module, "_recent_failed_apk_publish_last", lambda **_kwargs: {
+        "job": {"job_id": "job-old-failed"},
+        "retry_after_seconds": 541,
+    })
+    result = module._queue_apk_publish_last_from_build(
+        {
+            "worker_id": "phone-localhost-c1111fd9",
+            "selected_builder_worker_id": "phone-localhost-c1111fd9",
+            "selected_builder_runtime_kind": "termux",
+            "required_agent_source_hash": "a" * 64,
+            "toolchain_fingerprint": "b" * 64,
+            "artifact_path": "/tmp/CoreWorker-v0.8.0-debug.apk",
+        },
+        version_name="0.8.0",
+        version_code=127,
+        source_fingerprint="c" * 64,
+        source_sha256="d" * 64,
+        notification_id="apk-127-test",
+    )
+    assert result["phase"] == "publish_blocked"
+    assert result["blocked_by_recent_failure"] is True
+    assert result["last_failed_job_id"] == "job-old-failed"
+
+
+def test_31_built_unpublished_apk_carries_original_builder_context(monkeypatch: pytest.MonkeyPatch):
+    module = load("automation_built_artifact_context_test", AUTOMATION)
+    job = {
+        "job_id": "job-built",
+        "type": "apk_build_debug",
+        "status": "failed",
+        "worker_id": "phone-localhost-c1111fd9",
+        "updated_at": time.time(),
+        "payload": {
+            "versionName": "0.8.0",
+            "sourceFingerprint": "c" * 64,
+            "selectedBuilderWorkerId": "phone-localhost-c1111fd9",
+            "selectedBuilderRuntimeKind": "termux",
+            "requiredAgentSourceHash": "a" * 64,
+            "toolchainFingerprint": "b" * 64,
+        },
+        "result": {
+            "artifact_found": True,
+            "artifact_path": "/tmp/CoreWorker-v0.8.0-debug.apk",
+            "publish_ok": False,
+        },
+    }
+    monkeypatch.setattr(module, "_registry_raw", lambda: {"jobs": {"job-built": job}})
+    found = module._recent_built_unpublished_apk("0.8.0", "c" * 64)
+    assert found["selected_builder_worker_id"] == "phone-localhost-c1111fd9"
+    assert found["selected_builder_runtime_kind"] == "termux"
+    assert found["required_agent_source_hash"] == "a" * 64
+    assert found["toolchain_fingerprint"] == "b" * 64

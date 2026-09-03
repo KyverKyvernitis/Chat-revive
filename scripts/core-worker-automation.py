@@ -339,7 +339,7 @@ def _publish_desired_apk_source(
             # VPS ainda com registry antigo continua publicando o desired-source;
             # o endpoint /publish ainda bloqueia artefatos obsoletos por fingerprint.
             invalidation = {"ok": True, "superseded": 0, "invalidated_running": 0, "registry_legacy": True}
-    return {"record": record, "changed": changed, "invalidation": invalidation}
+    return {"record": record, "previousRecord": previous, "changed": changed, "invalidation": invalidation}
 
 
 def _canonical_phone_worker_root() -> Path:
@@ -1664,10 +1664,16 @@ def _recent_built_unpublished_apk(version_name: str, source_fingerprint: str) ->
     job = rows[0][1]
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
     apk = result.get("apk") if isinstance(result.get("apk"), dict) else {}
+    context = _job_failure_context(job)
+    worker_id = str(job.get("worker_id") or job.get("target_worker_id") or context.get("builder_worker_id") or "")
     return {
         "job": job,
         "result": result,
-        "worker_id": str(job.get("worker_id") or job.get("target_worker_id") or ""),
+        "worker_id": worker_id,
+        "selected_builder_worker_id": str(context.get("builder_worker_id") or worker_id),
+        "selected_builder_runtime_kind": str(context.get("builder_runtime_kind") or ""),
+        "required_agent_source_hash": str(context.get("agent_source_hash") or ""),
+        "toolchain_fingerprint": str(context.get("toolchain_fingerprint") or ""),
         "artifact_path": str(result.get("artifact_path") or apk.get("artifact_path") or ""),
         "filename": str((apk.get("filename") if isinstance(apk, dict) else "") or result.get("filename") or f"CoreWorker-v{version_name}-debug.apk"),
     }
@@ -1712,11 +1718,93 @@ def _stale_running_apk_build_for_source(version_name: str, source_fingerprint: s
     }
 
 
+def _recent_failed_apk_publish_last(*, worker_id: str, version_name: str, source_fingerprint: str, cooldown_seconds: int | None = None) -> dict[str, Any]:
+    cooldown = max(60, int(cooldown_seconds or int(os.getenv("CORE_WORKER_APK_PUBLISH_FAILURE_COOLDOWN_SECONDS", "600"))))
+    now = time.time()
+    rows: list[tuple[float, dict[str, Any]]] = []
+    data = _registry_raw()
+    jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+    for job in jobs.values():
+        if not isinstance(job, dict) or str(job.get("type") or "").replace("-", "_") != "apk_publish_last":
+            continue
+        if str(job.get("status") or "").lower() != "failed":
+            continue
+        if worker_id and str(job.get("worker_id") or job.get("target_worker_id") or "") != worker_id:
+            continue
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        fp = str(payload.get("sourceFingerprint") or payload.get("sourceSha256") or "")
+        if source_fingerprint and fp and fp != source_fingerprint:
+            continue
+        if version_name and str(payload.get("versionName") or "") not in {"", version_name}:
+            continue
+        updated = float(job.get("updated_at") or job.get("finished_at") or job.get("created_at") or 0.0)
+        rows.append((updated, job))
+    rows.sort(key=lambda item: item[0], reverse=True)
+    if not rows:
+        return {}
+    updated, job = rows[0]
+    age = now - updated if updated else cooldown + 1
+    if age >= cooldown:
+        return {}
+    return {
+        "job": job,
+        "cooldown_seconds": cooldown,
+        "retry_after_seconds": max(0, int(cooldown - age)),
+        "detail": _short(job.get("error") or ((job.get("result") or {}).get("summary") if isinstance(job.get("result"), dict) else ""), 240),
+    }
+
+
 def _queue_apk_publish_last_from_build(found: dict[str, Any], *, version_name: str, version_code: int, source_fingerprint: str, source_sha256: str, notification_id: str) -> dict[str, Any]:
     registry = get_core_workers_registry()
-    worker_id = str(found.get("worker_id") or "")
+    worker_id = str(found.get("selected_builder_worker_id") or found.get("worker_id") or "").strip()
+    if not worker_id:
+        raise RuntimeError("APK persistente sem identidade do builder original")
+    runtime_kind = str(found.get("selected_builder_runtime_kind") or "").strip().lower()
+    agent_hash = str(found.get("required_agent_source_hash") or "").strip().lower()
+    toolchain_fingerprint = str(found.get("toolchain_fingerprint") or "").strip().lower()
+
+    # O target inicial é publicado sem builder para invalidar sources antigas.
+    # Se já existe um APK compilado, esse early-return acontecia antes da seleção
+    # normal de builder. Persistimos aqui o builder REAL que produziu o artefato
+    # antes de enfileirar a republicação; o endpoint /publish pode então validar
+    # worker/runtime/agent/toolchain sem afrouxar a política selected-builder-v1.
+    desired = _publish_desired_apk_source(
+        version_name=version_name,
+        version_code=version_code,
+        source_fingerprint=source_fingerprint,
+        source_sha256=source_sha256,
+        selected_builder_worker_id=worker_id,
+        selected_builder_runtime_kind=runtime_kind,
+        required_agent_source_hash=(agent_hash if runtime_kind == "termux" else ""),
+        toolchain_fingerprint=toolchain_fingerprint,
+    )
+    previous = desired.get("previousRecord") if isinstance(desired.get("previousRecord"), dict) else {}
+    builder_was_already_selected = str(previous.get("selectedBuilderWorkerId") or "").strip() == worker_id
+
     if _active_job_exists(job_type="apk_publish_last", target_worker_id=worker_id, summary_contains=version_name):
         return {"ok": True, "pending": True, "message": "republicação do APK já está na fila", "versionName": version_name, "versionCode": version_code}
+    # Se o target JÁ estava corretamente ligado ao mesmo builder e a publicação
+    # acabou de falhar, não gere um job novo a cada execução da automação. Quando
+    # acabamos de reparar um target antigo sem builder, permitimos uma tentativa
+    # imediata para aproveitar o APK já compilado.
+    if builder_was_already_selected:
+        failed = _recent_failed_apk_publish_last(
+            worker_id=worker_id,
+            version_name=version_name,
+            source_fingerprint=source_fingerprint,
+        )
+        if failed:
+            return {
+                "ok": False,
+                "pending": False,
+                "phase": "publish_blocked",
+                "blocked_by_recent_failure": True,
+                "retry_after_seconds": failed.get("retry_after_seconds"),
+                "last_failed_job_id": (failed.get("job") or {}).get("job_id"),
+                "message": "republicação do APK em cooldown após falha recente",
+                "versionName": version_name,
+                "versionCode": version_code,
+            }
     payload = {
         "artifact_path": found.get("artifact_path") or "",
         "versionName": version_name,
@@ -1727,6 +1815,10 @@ def _queue_apk_publish_last_from_build(found: dict[str, Any], *, version_name: s
         "notificationId": notification_id,
         "notifyUsers": True,
         "notificationRequested": True,
+        "selectedBuilderWorkerId": worker_id,
+        "selectedBuilderRuntimeKind": runtime_kind,
+        "requiredAgentSourceHash": agent_hash,
+        "toolchainFingerprint": toolchain_fingerprint,
         "changelog": [
             "APK já compilado pelo worker builder",
             "Republicação automática sem rebuild",

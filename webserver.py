@@ -123,6 +123,7 @@ def _worker_apk_toolchain_fingerprint(worker: dict) -> str:
             preflight.get("toolchainReleaseFingerprint"),
             preflight.get("toolchainFingerprint"),
             (preflight.get("toolchain") or {}).get("releaseFingerprint") if isinstance(preflight.get("toolchain"), dict) else "",
+            (preflight.get("smoke") or {}).get("fingerprint") if isinstance(preflight.get("smoke"), dict) else "",
         ):
             clean = str(value or "").strip().lower()
             if re.fullmatch(r"[0-9a-f]{64}", clean):

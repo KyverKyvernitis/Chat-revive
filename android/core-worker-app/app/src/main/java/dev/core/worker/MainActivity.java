@@ -197,11 +197,28 @@ public class MainActivity extends Activity {
                 nativeWorkerOnline = true;
                 nativeWorkerState = "pareado automaticamente ao Termux pai";
                 showLocalAgentText();
+                refreshBuilderHeroStatus();
                 return;
             }
             mainHandler.postDelayed(this, 1500L);
         }
     };
+    private final SharedPreferences.OnSharedPreferenceChangeListener privateStateListener = (sharedPreferences, key) -> {
+        if (activityDestroyed || key == null) return;
+        if (key.startsWith("apk_self_builder_")
+                || key.startsWith("auto_enrollment_")
+                || "paired_via_native_apk".equals(key)
+                || "worker_token".equals(key)
+                || "server_url".equals(key)) {
+            mainHandler.post(() -> {
+                if (activityDestroyed || !fullStartupDone) return;
+                updatePairingUi();
+                showLocalAgentText();
+                refreshBuilderHeroStatus();
+            });
+        }
+    };
+
     private volatile String lastTerminalStatusLine = "";
     private volatile long lastTerminalStatusAt = 0L;
     private boolean suppressBedrockSwitchEvents = false;
@@ -231,6 +248,7 @@ public class MainActivity extends Activity {
     private LinearLayout profileDetailsContent;
     private Button profileToggleButton;
     private boolean profileExpanded = false;
+    private boolean pairingRecoveryExpanded = false;
     private volatile boolean fullStartupDone = false;
     private volatile boolean startupFallbackVisible = false;
     private final AtomicBoolean completingStartup = new AtomicBoolean(false);
@@ -339,6 +357,7 @@ public class MainActivity extends Activity {
         startupLog("onCreate:start v" + APP_VERSION + " code=" + BuildConfig.VERSION_CODE);
         try {
             prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            prefs.registerOnSharedPreferenceChangeListener(privateStateListener);
             CoreWorkerRuntimeIdentity.migrate(getApplicationContext());
             renderStartupFallbackUi(
                     "Core Worker iniciando",
@@ -462,6 +481,10 @@ public class MainActivity extends Activity {
         permissionGateDelayedRecheckScheduled.set(false);
         mainHandler.removeCallbacks(bedrockFullTerminalRefreshRunnable);
         mainHandler.removeCallbacks(autoEnrollmentUiRefreshRunnable);
+        try {
+            if (prefs != null) prefs.unregisterOnSharedPreferenceChangeListener(privateStateListener);
+        } catch (Throwable ignored) {
+        }
         try {
             if (bedrockFullTerminalDialog != null && bedrockFullTerminalDialog.isShowing()) {
                 bedrockFullTerminalDialog.dismiss();
@@ -802,43 +825,43 @@ public class MainActivity extends Activity {
 
         LinearLayout prepareCard = card();
         mainContent.addView(prepareCard);
-        prepareCard.addView(sectionTitle("Status do worker"));
-        prepareCard.addView(smallText("Conexão, execução em segundo plano e autobuild local."));
+        prepareCard.addView(sectionTitle("Neste celular"));
+        prepareCard.addView(smallText("O Core Worker trabalha sozinho em segundo plano e usa este aparelho quando necessário."));
 
-        localAgentText = smallText("Este celular ainda não foi verificado.");
+        coreHeroHeadlineText = largeStatusText("Preparando…");
+        prepareCard.addView(coreHeroHeadlineText);
+
+        localAgentText = smallText("Conectando ao Core Worker…");
         localAgentText.setTextColor(TEXT);
         localAgentText.setBackground(cardBackground(CARD_HIGHLIGHT));
         localAgentText.setPadding(dp(12), dp(10), dp(12), dp(10));
         prepareCard.addView(localAgentText);
 
-        coreHeroHeadlineText = largeStatusText("Pronto para trabalhar");
-        prepareCard.addView(coreHeroHeadlineText);
-
-        rootfsHeroText = smallText("Rootfs: aguardando status");
-        rootfsHeroText.setTextColor(TEXT);
-        rootfsHeroText.setBackground(cardBackground(CARD_SOFT));
-        rootfsHeroText.setPadding(dp(12), dp(10), dp(12), dp(10));
-        prepareCard.addView(rootfsHeroText);
-
-        runnerHeroText = smallText("Runner: bloqueado com segurança");
-        runnerHeroText.setTextColor(MUTED);
-        runnerHeroText.setPadding(0, dp(8), 0, dp(4));
-        prepareCard.addView(runnerHeroText);
-
-        builderHeroText = smallText("Autobuild: verificando toolchain local");
+        builderHeroText = smallText("Autobuild: preparando em segundo plano");
         builderHeroText.setTextColor(TEXT);
         builderHeroText.setBackground(cardBackground(Color.rgb(29, 42, 70)));
         builderHeroText.setPadding(dp(12), dp(10), dp(12), dp(10));
-        prepareCard.addView(builderHeroText);
+        LinearLayout.LayoutParams builderHeroParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        builderHeroParams.setMargins(0, dp(10), 0, 0);
+        prepareCard.addView(builderHeroText, builderHeroParams);
 
-        prepareButton = primaryButton("Sincronizar agora");
+        // Rootfs/runner pertencem à página Bedrock. Mantemos os TextViews apenas
+        // como sinks internos para o estado técnico, sem poluir a tela Core.
+        rootfsHeroText = smallText("");
+        runnerHeroText = smallText("");
+        rootfsHeroText.setVisibility(View.GONE);
+        runnerHeroText.setVisibility(View.GONE);
+
+        prepareButton = secondaryButton("Sincronizar status");
         prepareButton.setOnClickListener(v -> checkLocalAgent(true));
-        prepareCard.addView(prepareButton);
 
         connectCard = cardWithTopMargin(mainContent);
-        connectTitleText = sectionTitle("Vínculo com a VPS");
+        connectTitleText = sectionTitle("Conexão");
         connectCard.addView(connectTitleText);
-        connectHintText = smallText("Pareamento autenticado e identidade deste aparelho.");
+        connectHintText = smallText("Vínculo automático e seguro com a VPS principal.");
         connectCard.addView(connectHintText);
 
         pairingStatusText = smallText("");
@@ -847,13 +870,13 @@ public class MainActivity extends Activity {
         pairingStatusText.setPadding(dp(10), dp(10), dp(10), dp(10));
         connectCard.addView(pairingStatusText);
 
-        rePairButton = secondaryButton("Trocar pareamento");
-        rePairButton.setOnClickListener(v -> showPairingForm(true, "Modo de pareamento aberto. Gere um código novo no Discord se quiser trocar o vínculo deste celular."));
-        connectCard.addView(rePairButton);
+        // Recovery manual continua disponível, mas fica fora do fluxo normal.
+        rePairButton = secondaryButton("Recovery de pareamento");
+        rePairButton.setOnClickListener(v -> showPairingForm(!pairingRecoveryExpanded, pairingRecoveryExpanded ? null : "Recovery manual aberto. Use somente se o vínculo automático falhar."));
 
         pairingForm = new LinearLayout(this);
         pairingForm.setOrientation(LinearLayout.VERTICAL);
-        connectCard.addView(pairingForm);
+        pairingForm.setVisibility(View.GONE);
 
         serverUrlInput = input("", DEFAULT_VPS_URL);
         serverUrlInput.setVisibility(View.GONE);
@@ -866,7 +889,7 @@ public class MainActivity extends Activity {
 
         pairCodeInput = input("Código CORE-XXXX", "CORE-XXXXXXXX");
         pairCodeInput.setAllCaps(true);
-        pairingForm.addView(label("Código de pareamento"));
+        pairingForm.addView(label("Código de recovery"));
         pairingForm.addView(pairCodeInput);
 
         deviceNameInput = input("Nome do celular", defaultDeviceName());
@@ -877,13 +900,13 @@ public class MainActivity extends Activity {
         testButton.setOnClickListener(v -> testServer());
         pairingForm.addView(testButton);
 
-        pairButton = primaryButton("Conectar este celular");
+        pairButton = primaryButton("Aplicar recovery");
         pairButton.setOnClickListener(v -> pairWorker());
         pairingForm.addView(pairButton);
 
         LinearLayout profileCard = cardWithTopMargin(mainContent);
-        profileCard.addView(sectionTitle("Modo de operação"));
-        profileCard.addView(smallText("Quanto este celular pode ajudar quando estiver livre."));
+        profileCard.addView(sectionTitle("Desempenho"));
+        profileCard.addView(smallText("Escolha apenas quanto desempenho o Core Worker pode usar. O restante é automático."));
 
         profileSummaryText = smallText("");
         profileSummaryText.setTextColor(TEXT);
@@ -891,7 +914,7 @@ public class MainActivity extends Activity {
         profileSummaryText.setPadding(dp(10), dp(10), dp(10), dp(10));
         profileCard.addView(profileSummaryText);
 
-        profileToggleButton = secondaryButton("Alterar perfil");
+        profileToggleButton = secondaryButton("Alterar desempenho");
         profileToggleButton.setOnClickListener(v -> toggleProfileDetails());
         profileCard.addView(profileToggleButton);
 
@@ -903,48 +926,37 @@ public class MainActivity extends Activity {
         profileGroup = new RadioGroup(this);
         profileGroup.setOrientation(RadioGroup.VERTICAL);
         profileGroup.setPadding(0, dp(6), 0, dp(6));
-        addProfileRadio("leve", "Leve · economia de bateria");
-        addProfileRadio("midia", "Normal · recomendado");
-        addProfileRadio("completo", "Completo · tarefas extras");
-        addProfileRadio("builder", "Builder · compilar APK");
+        addProfileRadio("leve", "Economia · usa menos bateria");
+        addProfileRadio("midia", "Equilibrado · recomendado");
         addProfileRadio("turbo", "Turbo · máximo desempenho");
-        addProfileRadio("bedrock", "Bedrock · reservado");
         profileGroup.setOnCheckedChangeListener((group, checkedId) -> {
             String profile = selectedProfile();
             updateProfileSelectionHint(profile);
-            refreshLocalStatus("Perfil selecionado: " + profileLabel(profile) + ". Toque em Aplicar para sincronizar.");
         });
         profileDetailsContent.addView(profileGroup);
 
         profileHintText = smallText("");
         profileDetailsContent.addView(profileHintText);
 
-        saveProfileButton = primaryButton("Aplicar perfil");
+        saveProfileButton = primaryButton("Aplicar");
         saveProfileButton.setOnClickListener(v -> updateOwnProfile());
         profileDetailsContent.addView(saveProfileButton);
 
+        // Atualizações normais aparecem apenas no banner do topo. Controles
+        // manuais ficam no bloco Avançado para reduzir ruído visual.
         LinearLayout updateCard = cardWithTopMargin(mainContent);
-        updateCard.addView(sectionTitle("Versão e atualizações"));
-        updateCard.addView(smallText("Versão instalada, disponibilidade e instalação segura."));
-        updateText = smallText("APK " + APP_VERSION + " · ainda não verificado.");
-        updateText.setTextColor(TEXT);
-        updateText.setBackground(cardBackground(CARD_SOFT));
-        updateText.setPadding(dp(10), dp(10), dp(10), dp(10));
-        updateCard.addView(updateText);
-
-        updateCheckButton = secondaryButton("Verificar atualização");
+        updateCard.setVisibility(View.GONE);
+        updateText = smallText("APK " + APP_VERSION + " · atualização automática ativa");
+        updateCheckButton = secondaryButton("Verificar atualização agora");
         updateCheckButton.setOnClickListener(v -> checkForUpdate());
-        updateCard.addView(updateCheckButton);
-
-        updateCleanupButton = secondaryButton("Limpeza segura de updates");
+        updateCleanupButton = secondaryButton("Limpar arquivos de atualização");
         updateCleanupButton.setOnClickListener(v -> runManualUpdateCleanup());
         updateCleanupButton.setVisibility(View.GONE);
-        updateCard.addView(updateCleanupButton);
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
-        technicalCard.addView(sectionTitle("Diagnóstico e manutenção"));
-        technicalCard.addView(smallText("Diagnósticos, logs e detalhes do runtime direto ficam escondidos aqui."));
-        technicalToggleButton = secondaryButton("Abrir diagnóstico avançado");
+        technicalCard.addView(sectionTitle("Avançado"));
+        technicalCard.addView(smallText("Recovery, logs e controles técnicos ficam escondidos para não poluir o uso normal."));
+        technicalToggleButton = secondaryButton("Abrir opções avançadas");
         technicalToggleButton.setOnClickListener(v -> toggleTechnicalDetails());
         technicalCard.addView(technicalToggleButton);
 
@@ -963,6 +975,11 @@ public class MainActivity extends Activity {
         systemChecklistText = smallText(prepareChecklistText());
         systemChecklistText.setVisibility(View.GONE);
         technicalDetailsContent.addView(systemChecklistText);
+
+        technicalDetailsContent.addView(prepareButton);
+        technicalDetailsContent.addView(updateCheckButton);
+        technicalDetailsContent.addView(rePairButton);
+        technicalDetailsContent.addView(pairingForm);
 
         termuxButton = secondaryButton("Ver runtime de bootstrap");
         termuxButton.setOnClickListener(v -> openTermux());
@@ -1355,9 +1372,6 @@ public class MainActivity extends Activity {
             String detail = shortState + "\n" + summary;
             if (!rootfsLastStatsSummary.isEmpty()) detail += "\n" + rootfsLastStatsSummary;
             if (!rootfsLastSha256.isEmpty()) detail += "\nSHA-256: " + rootfsLastSha256.substring(0, Math.min(12, rootfsLastSha256.length())) + "…";
-            if (coreHeroHeadlineText != null) {
-                coreHeroHeadlineText.setText(real ? "Pronto · rootfs real validado" : (coreLinuxPrepared ? "Runtime APK pronto" : "Preparando runtime"));
-            }
             if (rootfsHeroText != null) rootfsHeroText.setText(detail);
             if (runnerHeroText != null) runnerHeroText.setText(runner);
             if (rootfsImportProgressText != null) rootfsImportProgressText.setText((importing ? "⏳ " : (real ? "✅ " : "• ")) + detail);
@@ -1914,7 +1928,7 @@ public class MainActivity extends Activity {
             setAnimatedVisibility(technicalDetailsContent, technicalExpanded);
         }
         if (technicalToggleButton != null) {
-            technicalToggleButton.setText(technicalExpanded ? "Fechar avançado" : "Abrir avançado");
+            technicalToggleButton.setText(technicalExpanded ? "Fechar opções avançadas" : "Abrir opções avançadas");
         }
         refreshLocalStatus(null);
     }
@@ -1967,47 +1981,43 @@ public class MainActivity extends Activity {
             profileDetailsContent.setVisibility(profileExpanded ? View.VISIBLE : View.GONE);
         }
         if (profileToggleButton != null) {
-            profileToggleButton.setText(profileExpanded ? "Fechar opções" : "Alterar perfil");
+            profileToggleButton.setText(profileExpanded ? "Fechar opções" : "Alterar desempenho");
         }
         updateProfileHint(appliedProfile());
     }
 
     private void showPairingForm(boolean show, String message) {
-        if (pairingForm != null) {
-            pairingForm.setVisibility(show ? View.VISIBLE : View.GONE);
+        pairingRecoveryExpanded = show;
+        if (technicalDetailsContent != null && show) {
+            technicalExpanded = true;
+            technicalDetailsContent.setVisibility(View.VISIBLE);
+            if (technicalToggleButton != null) technicalToggleButton.setText("Fechar opções avançadas");
         }
-        if (rePairButton != null) {
-            rePairButton.setVisibility(show ? View.GONE : View.VISIBLE);
-        }
-        if (message != null && !message.trim().isEmpty()) {
-            refreshLocalStatus(message);
-        }
+        if (pairingForm != null) pairingForm.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (rePairButton != null) rePairButton.setText(show ? "Fechar recovery" : "Recovery de pareamento");
+        if (message != null && !message.trim().isEmpty()) refreshLocalStatus(message);
     }
 
     private void updatePairingUi() {
         runOnUiThread(() -> {
             boolean paired = hasPairing();
-            if (connectTitleText != null) {
-                connectTitleText.setText("Conexão");
-            }
             boolean autoEnrollment = !paired && CoreWorkerAutoEnrollment.supported();
+            // Depois do vínculo, a conexão já aparece no hero principal. Esconda
+            // o card duplicado; recovery continua acessível em Avançado.
+            if (connectCard != null) connectCard.setVisibility(paired ? View.GONE : View.VISIBLE);
+            if (connectTitleText != null) connectTitleText.setText("Conexão");
             if (connectHintText != null) {
                 connectHintText.setText(paired
-                        ? "Vínculo ativo. Nenhum código necessário."
-                        : (autoEnrollment ? "Pareamento automático com o Termux deste aparelho." : "Recovery manual por código disponível."));
+                        ? "Vínculo automático ativo. Nenhum código necessário."
+                        : (autoEnrollment ? "Conectando automaticamente ao worker deste aparelho." : "Auto-pair indisponível. Recovery existe em Avançado."));
             }
             if (pairingStatusText != null) {
-                String profile = appliedProfile();
                 pairingStatusText.setText(paired
-                        ? "VPS principal conectada · perfil " + profileLabel(profile)
-                        : (autoEnrollment ? "Vinculando automaticamente ao worker físico…" : "Ainda não conectado. Use recovery manual se necessário."));
+                        ? "🟢 VPS principal conectada · " + profileLabel(appliedProfile())
+                        : (autoEnrollment ? "⏳ Vinculando automaticamente…" : "⚠️ Sem vínculo automático"));
             }
-            if (rePairButton != null) {
-                rePairButton.setVisibility(paired ? View.VISIBLE : View.GONE);
-            }
-            if (pairingForm != null) {
-                pairingForm.setVisibility(paired || autoEnrollment ? View.GONE : View.VISIBLE);
-            }
+            if (rePairButton != null) rePairButton.setVisibility(View.VISIBLE);
+            if (pairingForm != null) pairingForm.setVisibility(pairingRecoveryExpanded ? View.VISIBLE : View.GONE);
         });
     }
 
@@ -6360,20 +6370,17 @@ public class MainActivity extends Activity {
     }
 
     private String localAgentLine() {
-        String profile = appliedProfile();
-        String internal = internalRuntimeOnline ? "Runtime APK online" : "Runtime APK aguardando";
         if (hasPairing()) {
-            return "✅ APK pronto para trabalhar\n"
-                    + profileLabel(profile) + " · Push " + fcmCompactLabel()
-                    + " · " + internal + " · " + emptyFallback(nativeWorkerState, "worker direto");
+            String online = (nativeWorkerOnline || internalRuntimeOnline) ? "Online" : "Conectando";
+            return "🟢 " + online + " · VPS conectada · " + profileLabel(appliedProfile())
+                    + "\nTrabalhando automaticamente em segundo plano";
         }
         if (CoreWorkerAutoEnrollment.supported()) {
-            return (internalRuntimeOnline ? "✅ Runtime APK preparado" : "⏳ Vinculando automaticamente")
-                    + "\n" + internal + " · Termux autenticado fará o vínculo sem código.";
+            return "⏳ Vinculando automaticamente\nNenhum código ou configuração manual é necessário";
         }
         String autoEnrollIssue = CoreWorkerAutoEnrollment.unsupportedReason();
-        return (internalRuntimeOnline ? "✅ Runtime APK preparado" : "⚠️ Auto-pair indisponível")
-                + "\n" + internal + " · " + (autoEnrollIssue.isEmpty() ? "recovery manual disponível" : autoEnrollIssue + " · recovery manual disponível");
+        return "⚠️ Vínculo automático indisponível\n"
+                + (autoEnrollIssue.isEmpty() ? "Abra Avançado somente se precisar de recovery" : autoEnrollIssue);
     }
 
 
@@ -6557,25 +6564,31 @@ public class MainActivity extends Activity {
             String text;
             int background;
             if (ready) {
-                String detail = apkBuilderRuntimeDetail(state);
-                text = "✅ Autobuild pronto · próximos APKs serão compilados neste celular"
-                        + (detail.isEmpty() ? "" : "\n" + detail);
+                text = "✅ Autobuild pronto\nAtualizações podem ser compiladas neste celular";
                 background = Color.rgb(24, 67, 55);
+                if (coreHeroHeadlineText != null) coreHeroHeadlineText.setText(hasPairing() ? "Pronto para ajudar" : "Autobuild pronto");
             } else if (refreshing) {
-                text = "⏳ Autobuild verificando JDK, Gradle, SDK e aapt2";
+                text = "⏳ Preparando autobuild\nConfigurando ferramentas em segundo plano";
                 background = Color.rgb(65, 54, 31);
+                if (coreHeroHeadlineText != null) coreHeroHeadlineText.setText(hasPairing() ? "Preparando ferramentas" : "Conectando…");
             } else if (publishReady) {
-                text = "📦 Autobuild bloqueado · último APK ainda pode ser republicado";
+                text = "📦 Autobuild temporariamente indisponível\nO último APK ainda pode ser republicado";
                 background = Color.rgb(65, 54, 31);
+                if (coreHeroHeadlineText != null) coreHeroHeadlineText.setText("Atenção necessária");
             } else {
-                text = "⚠️ " + compactUiMessage(emptyFallback(summary, "Autobuild aguardando toolchain do bootstrap"), 190);
+                text = "⚠️ Autobuild aguardando preparação\nAbra Avançado somente se precisar do diagnóstico";
                 background = Color.rgb(67, 42, 47);
+                if (coreHeroHeadlineText != null) coreHeroHeadlineText.setText(hasPairing() ? "Preparando" : "Conectando…");
+                if (technicalDependenciesText != null && summary != null && !summary.trim().isEmpty()) {
+                    technicalDependenciesText.setText(compactUiMessage(summary, 800));
+                }
             }
             builderHeroText.setText(text);
             builderHeroText.setBackground(cardBackground(background));
         } catch (Throwable error) {
-            builderHeroText.setText("⚠️ Autobuild indisponível: " + shortThrowable(error));
+            builderHeroText.setText("⚠️ Autobuild indisponível\nAbra Avançado para diagnóstico");
             builderHeroText.setBackground(cardBackground(Color.rgb(67, 42, 47)));
+            if (coreHeroHeadlineText != null) coreHeroHeadlineText.setText("Atenção necessária");
         }
     }
 
@@ -6859,7 +6872,7 @@ public class MainActivity extends Activity {
 
     private void updateProfileRadioSelection(String profile) {
         if (profileGroup == null) return;
-        String normalized = normalizeProfile(profile);
+        String normalized = publicProfileChoice(profile);
         runOnUiThread(() -> {
             for (int i = 0; i < profileGroup.getChildCount(); i++) {
                 View child = profileGroup.getChildAt(i);
@@ -6920,6 +6933,13 @@ public class MainActivity extends Activity {
         return "Normal";
     }
 
+    private String publicProfileChoice(String profile) {
+        String normalized = normalizeProfile(profile);
+        if ("completo".equals(normalized) || "builder".equals(normalized)) return "turbo";
+        if ("bedrock".equals(normalized)) return "midia";
+        return normalized;
+    }
+
     private String profileDescription(String profile) {
         String normalized = normalizeProfile(profile);
         if ("leve".equals(normalized)) {
@@ -6941,7 +6961,7 @@ public class MainActivity extends Activity {
     }
 
     private void updateProfileHint(String profile) {
-        String normalized = normalizeProfile(profile);
+        String normalized = publicProfileChoice(profile);
         String summary = profileLabel(normalized) + "\n" + profileDescription(normalized);
         runOnUiThread(() -> {
             if (profileSummaryText != null) {
@@ -6954,7 +6974,7 @@ public class MainActivity extends Activity {
     }
 
     private void updateProfileSelectionHint(String profile) {
-        String normalized = normalizeProfile(profile);
+        String normalized = publicProfileChoice(profile);
         runOnUiThread(() -> {
             if (profileHintText != null) {
                 profileHintText.setText("Selecionado: " + profileLabel(normalized) + "\n" + profileDescription(normalized));
@@ -6966,7 +6986,7 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             profileExpanded = false;
             if (profileDetailsContent != null) profileDetailsContent.setVisibility(View.GONE);
-            if (profileToggleButton != null) profileToggleButton.setText("Alterar perfil");
+            if (profileToggleButton != null) profileToggleButton.setText("Alterar desempenho");
         });
     }
 

@@ -206,7 +206,7 @@ def test_automation_routes_apk_trigger_to_termux_bootstrap() -> None:
     assert "def _bootstrap_worker_id_for_runtime" in automation
     assert "runtime APK não recebe worker_update" in automation
     assert "worker_update continua reservado ao Termux bootstrap" in automation
-    assert 'PHONE_WORKER_VERSION = "1.11.3"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.11.4"' in phone_worker
     assert '"runtime_kind": "termux"' in phone_worker
     assert '"platform": "android-termux"' in phone_worker
     assert "def _core_worker_automation_transition_is_urgent" in webserver
@@ -675,4 +675,4 @@ def test_turbo_profile_contract_cannot_lose_apk_builder_to_stale_env() -> None:
     assert "def _merge_profile_contract" in phone_worker
     assert "valores do env continuam aceitos como extensões" in phone_worker
     assert "roles, capabilities = _current_core_worker_roles_and_capabilities()" in phone_worker
-    assert 'PHONE_WORKER_VERSION = "1.11.3"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.11.4"' in phone_worker

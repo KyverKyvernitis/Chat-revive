@@ -101,12 +101,16 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.3"
+PHONE_WORKER_VERSION = "1.11.4"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
+DEFAULT_APK_BUILD_KEEP_ARTIFACTS = 3
+DEFAULT_APK_BUILD_KEEP_LOGS = 12
+DEFAULT_APK_BUILD_KEEP_WORKDIRS = 1
+DEFAULT_APK_BUILD_MIN_BATTERY_PERCENT = 25
 TERMUX_PRIMARY_HTTP_PORT = 8766
 TERMUX_RECOVERY_HTTP_PORT = 8768
 _DIRECT_HTTP_STATE = "starting"
@@ -9147,8 +9151,9 @@ def _prepare_termux_android_build(project_dir: Path, env: dict[str, str]) -> dic
         "plugged": battery.get("plugged") if isinstance(battery, dict) else None,
         "temperature_c": battery_temperature,
     }
-    if battery_level is not None and int(battery_level) < 25 and charging is not True:
-        raise RuntimeError(f"preflight_blocked: bateria baixa ({int(battery_level)}%) e aparelho não está carregando")
+    min_battery = max(0, min(100, _env_int("PHONE_WORKER_APK_BUILD_MIN_BATTERY_PERCENT", DEFAULT_APK_BUILD_MIN_BATTERY_PERCENT)))
+    if battery_level is not None and int(battery_level) < min_battery and charging is not True:
+        raise RuntimeError(f"preflight_blocked: bateria baixa ({int(battery_level)}% < {min_battery}%) e aparelho não está carregando")
     if battery_temperature is not None and float(battery_temperature) >= 45.0:
         raise RuntimeError(f"preflight_blocked: temperatura alta ({float(battery_temperature):.1f} °C)")
     return info
@@ -9226,14 +9231,14 @@ def _release_apk_build_file_lock(handle: Any | None) -> None:
 
 
 def _cleanup_old_apk_build_logs(build_root: Path, *, keep_logs: int | None = None) -> None:
-    keep = max(3, int(keep_logs if keep_logs is not None else _env_int("PHONE_WORKER_APK_BUILD_KEEP_LOGS", 20)))
+    keep = max(3, int(keep_logs if keep_logs is not None else _env_int("PHONE_WORKER_APK_BUILD_KEEP_LOGS", DEFAULT_APK_BUILD_KEEP_LOGS)))
     log_dir = build_root / "logs"
     if log_dir.is_dir():
         logs = sorted(log_dir.glob("*.log"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
         for path in logs[keep:]:
             with contextlib.suppress(Exception):
                 path.unlink()
-    max_dirs = max(0, _env_int("PHONE_WORKER_APK_BUILD_KEEP_WORKDIRS", 2))
+    max_dirs = max(0, _env_int("PHONE_WORKER_APK_BUILD_KEEP_WORKDIRS", DEFAULT_APK_BUILD_KEEP_WORKDIRS))
     dirs = sorted([p for p in build_root.glob("build-*") if p.is_dir()], key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
     for path in dirs[max_dirs:]:
         marker = path / ".build-active"
@@ -9253,7 +9258,7 @@ def _cleanup_old_apk_build_artifacts(build_root: Path, *, keep_apks: int | None 
     unlink são ignoradas para nunca quebrar um build publicado.
     """
     artifact_dir = build_root / "artifacts"
-    keep = max(3, int(keep_apks if keep_apks is not None else _env_int("PHONE_WORKER_APK_BUILD_KEEP_ARTIFACTS", 12)))
+    keep = max(3, int(keep_apks if keep_apks is not None else _env_int("PHONE_WORKER_APK_BUILD_KEEP_ARTIFACTS", DEFAULT_APK_BUILD_KEEP_ARTIFACTS)))
     result: dict[str, Any] = {"enabled": True, "keep": keep, "removed": 0, "removedBytes": 0}
     if not artifact_dir.is_dir():
         result["enabled"] = False
@@ -9261,7 +9266,19 @@ def _cleanup_old_apk_build_artifacts(build_root: Path, *, keep_apks: int | None 
     apks = sorted(artifact_dir.glob("*.apk"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
     keep_set = {p.resolve() for p in apks[:keep] if p.exists()}
     latest_meta = artifact_dir / "latest-artifact.json"
-    for apk in apks[keep:]:
+
+    # `latest-artifact.json` é a referência autoritativa de republicação. Mesmo
+    # que clocks/mtimes estejam estranhos, nunca remova o APK apontado por ele.
+    latest_payload = _read_json_file(latest_meta) if latest_meta.is_file() else {}
+    latest_path_raw = str(latest_payload.get("artifact_path") or "").strip() if isinstance(latest_payload, dict) else ""
+    if latest_path_raw:
+        with contextlib.suppress(Exception):
+            latest_path = Path(latest_path_raw).expanduser().resolve()
+            latest_path.relative_to(artifact_dir.resolve())
+            if latest_path.is_file():
+                keep_set.add(latest_path)
+
+    for apk in apks:
         if not apk.exists() or apk.resolve() in keep_set:
             continue
         candidates = [apk, apk.with_suffix(apk.suffix + ".json")]
@@ -9275,6 +9292,21 @@ def _cleanup_old_apk_build_artifacts(build_root: Path, *, keep_apks: int | None 
                 result["removedBytes"] += size
             except Exception:
                 pass
+
+    # Sidecars órfãos também acumulam em builds interrompidos. Remova somente
+    # `<nome>.apk.json` sem o APK correspondente; `latest-artifact.json` fica fora.
+    for sidecar in artifact_dir.glob("*.apk.json"):
+        apk = Path(str(sidecar)[:-5])
+        if apk.exists():
+            continue
+        try:
+            size = sidecar.stat().st_size
+            sidecar.unlink()
+            result["removed"] += 1
+            result["removedBytes"] += size
+        except Exception:
+            pass
+    result["keptApks"] = sum(1 for path in artifact_dir.glob("*.apk") if path.is_file())
     return result
 
 
@@ -11311,6 +11343,20 @@ def main() -> int:
             timeout=8.0,
         )
         return 0 if ok else 1
+
+    # Limpeza de housekeeping é feita antes de receber novos jobs. Mantemos
+    # apenas os APKs recentes e nunca removemos o artifact atual durante build.
+    try:
+        build_root = Path(os.getenv("PHONE_WORKER_APK_BUILD_DIR") or (Path.home() / "core-worker-apk-builds")).expanduser()
+        artifact_cleanup = _cleanup_old_apk_build_artifacts(build_root)
+        _cleanup_old_apk_build_logs(build_root)
+        if int(artifact_cleanup.get("removed") or 0) > 0:
+            print(
+                f"[core-worker-storage] limpeza segura removeu={artifact_cleanup.get('removed')} bytes={artifact_cleanup.get('removedBytes')}",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[core-worker-storage] limpeza ignorada: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
 
     # O control plane é exclusivamente de saída e precisa sobreviver mesmo sem
     # nenhuma porta HTTP local disponível. Inicie-o antes de tentar bind.

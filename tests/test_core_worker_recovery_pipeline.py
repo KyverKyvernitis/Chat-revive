@@ -146,9 +146,9 @@ def test_01_apk_health_on_8766_is_not_accepted_as_termux(tmp_path: Path):
     (worker_dir / "phone_worker.py").write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
     try:
         proc = subprocess.run(["bash", str(PHONE / "start-phone-worker.sh")], env=_start_script_env(tmp_path), text=True, capture_output=True, timeout=8)
-        assert proc.returncode == 0
+        assert proc.returncode == 1
         assert "iniciado e validado" not in proc.stdout
-        assert "identidade/control-plane ainda não foram confirmados" in proc.stdout
+        assert "identidade/control-plane não foram confirmados" in proc.stdout
     finally:
         pid_file = worker_dir / "phone-worker.pid"
         if pid_file.exists():
@@ -168,7 +168,7 @@ def test_02_dead_child_with_other_http_200_is_failure(tmp_path: Path):
         env["PHONE_WORKER_START_WAIT_SECONDS"] = "1.2"
         proc = subprocess.run(["bash", str(PHONE / "start-phone-worker.sh")], env=env, text=True, capture_output=True, timeout=8)
         assert proc.returncode == 1
-        assert "recém-iniciado morreu" in proc.stdout
+        assert ("recém-iniciado morreu" in proc.stdout or "identidade/control-plane não foram confirmados" in proc.stdout)
         assert "iniciado e validado" not in proc.stdout
     finally:
         server.shutdown(); server.server_close()
@@ -230,7 +230,7 @@ def test_05_offline_device_target_is_published_persistently(tmp_path: Path, monk
     result = module.queue_agent_updates()
     latest = json.loads((tmp_path / "agent/latest.json").read_text(encoding="utf-8"))
     assert result["pending"] is True
-    assert latest["version"] == "1.11.3"
+    assert latest["version"] == "1.11.4"
     assert (tmp_path / "agent/releases" / f"{latest['source_hash']}.zip").is_file()
 
 

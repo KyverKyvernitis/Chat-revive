@@ -65,6 +65,7 @@ PENDING_PATH = ROOT / "data" / "core_worker_automation_pending.json"
 STATUS_PATH = ROOT / "data" / "core_worker_automation_status.json"
 STATE_PATH = ROOT / "data" / "core_worker_automation_state.json"
 LOCK_DIR = ROOT / "data" / "locks"
+APK_BUILD_MIN_BATTERY_PERCENT = 25
 
 
 def _lock_key(value: str) -> str:
@@ -990,6 +991,36 @@ def _worker_supports(worker: dict[str, Any], task: str, required_capability: str
     return not tasks or task in tasks
 
 
+def _worker_power_blocked(worker: dict[str, Any] | None, *, minimum_percent: int = APK_BUILD_MIN_BATTERY_PERCENT) -> bool:
+    if not isinstance(worker, dict):
+        return False
+    battery = worker.get("battery") if isinstance(worker.get("battery"), dict) else {}
+    if not battery:
+        return False
+    level = battery.get("level")
+    if level is None:
+        level = battery.get("percent")
+    if level is None:
+        level = battery.get("percentage")
+    try:
+        percent = float(level)
+    except (TypeError, ValueError):
+        return False
+    charging = battery.get("charging")
+    if not isinstance(charging, bool):
+        status = str(battery.get("status") or "").strip().lower()
+        plugged = str(battery.get("plugged") or "").strip().lower()
+        if status in {"charging", "full"}:
+            charging = True
+        elif plugged and plugged not in {"unplugged", "none", "unknown"}:
+            charging = True
+        elif status or plugged:
+            charging = False
+        else:
+            return False
+    return percent < float(minimum_percent) and charging is not True
+
+
 def _worker_apk_builder_status(worker: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(worker, dict):
         return {}
@@ -1008,6 +1039,7 @@ def _worker_toolchain_fingerprint(worker: dict[str, Any] | None) -> str:
         preflight.get("toolchainReleaseFingerprint"),
         preflight.get("toolchainFingerprint"),
         (preflight.get("toolchain") or {}).get("releaseFingerprint") if isinstance(preflight.get("toolchain"), dict) else "",
+        (preflight.get("smoke") or {}).get("fingerprint") if isinstance(preflight.get("smoke"), dict) else "",
     ):
         clean = str(value or "").strip().lower()
         if re.fullmatch(r"[0-9a-f]{64}", clean):
@@ -1029,6 +1061,8 @@ def _select_apk_builder(
             continue
         worker_id = str(worker.get("worker_id") or "").strip()
         if not worker_id:
+            continue
+        if _worker_power_blocked(worker):
             continue
         runtime_kind = str(worker.get("runtime_kind") or "").strip().lower()
         source = str(worker.get("source") or "").strip().lower()
@@ -2110,8 +2144,12 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
             snapshot, target_agent_version, target_agent_source_hash
         )
         waiting_toolchain = False
+        waiting_power = False
         for worker in workers:
             if worker.get("enabled") is False or not worker.get("online"):
+                continue
+            if _worker_supports(worker, "apk_build_debug", "apk-builder") and _worker_power_blocked(worker):
+                waiting_power = True
                 continue
             runtime_kind = str(worker.get("runtime_kind") or "").strip().lower()
             source_kind = str(worker.get("source") or "").strip().lower()
@@ -2130,9 +2168,10 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
                     waiting_toolchain = True
                     break
         item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
-        phase = "waiting_agent" if waiting_agent else ("waiting_toolchain" if waiting_toolchain else "waiting_builder")
+        phase = "waiting_agent" if waiting_agent else ("waiting_power" if waiting_power else ("waiting_toolchain" if waiting_toolchain else "waiting_builder"))
         messages = {
             "waiting_agent": "build do APK aguardando o Termux executar exatamente o agent requerido",
+            "waiting_power": "build do APK aguardando carga suficiente ou carregador conectado",
             "waiting_toolchain": "build do APK aguardando toolchain validado e smoke do builder",
             "waiting_builder": "build do APK aguardando um builder compatível ficar online",
         }

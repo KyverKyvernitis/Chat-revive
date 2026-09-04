@@ -21,6 +21,11 @@ DEFAULT_JOB_LEASE_SECONDS = 120
 DEFAULT_JOB_HISTORY_LIMIT = 8
 DEFAULT_JOB_PAYLOAD_MAX_STRING = 256 * 1024
 DEFAULT_JOB_PAYLOAD_MAX_OPAQUE_STRING = 2 * 1024 * 1024
+WORKER_CAPABILITY_LIMIT = 64
+WORKER_SHORT_FIELD_LIMIT = 64
+WORKER_SUPPORTED_TASK_LIMIT = 96
+WORKER_STATUS_ITEM_LIMIT = 48
+WORKER_STATUS_STRING_LIMIT = 1024
 
 # Campos binários autenticados precisam ultrapassar o limite de texto comum.
 # O limite maior é aplicado somente ao payload de jobs, nunca a heartbeat,
@@ -273,7 +278,7 @@ def _merge_unique(base: list[str], extra: list[str], *, limit: int) -> list[str]
 
 
 def _job_type_set(value: object) -> set[str]:
-    return set(normalize_job_types(value, limit=96))
+    return set(normalize_job_types(value, limit=WORKER_SUPPORTED_TASK_LIMIT))
 
 
 def _normalize_job_type(value: object) -> str:
@@ -299,14 +304,14 @@ def _merge_worker_status(worker: dict[str, Any], incoming: object) -> None:
         return
     current = worker.get("status") if isinstance(worker.get("status"), dict) else {}
     merged = dict(current)
-    for key, value in _safe_dict(incoming, max_items=32, max_string=1024).items():
+    for key, value in _safe_dict(incoming, max_items=WORKER_STATUS_ITEM_LIMIT, max_string=WORKER_STATUS_STRING_LIMIT).items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             nested = dict(merged.get(key) or {})
             nested.update(value)
-            merged[key] = _safe_dict(nested, max_items=32, max_string=1024)
+            merged[key] = _safe_dict(nested, max_items=WORKER_STATUS_ITEM_LIMIT, max_string=WORKER_STATUS_STRING_LIMIT)
         else:
             merged[key] = value
-    worker["status"] = _safe_dict(merged, max_items=32, max_string=1024)
+    worker["status"] = _safe_dict(merged, max_items=WORKER_STATUS_ITEM_LIMIT, max_string=WORKER_STATUS_STRING_LIMIT)
 
 
 def _safe_dict(
@@ -383,9 +388,9 @@ def _compact_job_public(record: Mapping[str, Any], *, include_result: bool = Fal
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
         "age_seconds": round(max(0.0, ts - created_at), 3) if created_at else None,
-        "worker_id": _short_text(record.get("worker_id"), limit=64),
-        "target_worker_id": _short_text(record.get("target_worker_id"), limit=64),
-        "preferred_worker_id": _short_text(record.get("preferred_worker_id"), limit=64),
+        "worker_id": _short_text(record.get("worker_id"), limit=WORKER_SHORT_FIELD_LIMIT),
+        "target_worker_id": _short_text(record.get("target_worker_id"), limit=WORKER_SHORT_FIELD_LIMIT),
+        "preferred_worker_id": _short_text(record.get("preferred_worker_id"), limit=WORKER_SHORT_FIELD_LIMIT),
         "preferred_until": record.get("preferred_until"),
         "attempts": int(record.get("attempts") or 0),
         "max_attempts": int(record.get("max_attempts") or 1),
@@ -406,10 +411,10 @@ def _compact_job_public(record: Mapping[str, Any], *, include_result: bool = Fal
         public.update({
             "versionName": _short_text(payload.get("versionName") or result.get("versionName"), limit=48),
             "versionCode": int(payload.get("versionCode") or result.get("versionCode") or 0),
-            "sourceFingerprint": _short_text(payload.get("sourceFingerprint") or result.get("sourceFingerprint"), limit=64),
-            "requiredAgentSourceHash": _short_text(payload.get("requiredAgentSourceHash") or result.get("phoneWorkerSourceHash"), limit=64),
-            "toolchainFingerprint": _short_text(payload.get("toolchainFingerprint") or result.get("toolchainFingerprint") or self_builder.get("toolchainFingerprint"), limit=64),
-            "selectedBuilderWorkerId": _short_text(payload.get("selectedBuilderWorkerId") or record.get("target_worker_id") or record.get("worker_id"), limit=64),
+            "sourceFingerprint": _short_text(payload.get("sourceFingerprint") or result.get("sourceFingerprint"), limit=WORKER_SHORT_FIELD_LIMIT),
+            "requiredAgentSourceHash": _short_text(payload.get("requiredAgentSourceHash") or result.get("phoneWorkerSourceHash"), limit=WORKER_SHORT_FIELD_LIMIT),
+            "toolchainFingerprint": _short_text(payload.get("toolchainFingerprint") or result.get("toolchainFingerprint") or self_builder.get("toolchainFingerprint"), limit=WORKER_SHORT_FIELD_LIMIT),
+            "selectedBuilderWorkerId": _short_text(payload.get("selectedBuilderWorkerId") or record.get("target_worker_id") or record.get("worker_id"), limit=WORKER_SHORT_FIELD_LIMIT),
             "selectedBuilderRuntimeKind": _short_text(payload.get("selectedBuilderRuntimeKind"), limit=24),
             "failure_category": _short_text(result.get("failure_category") or result.get("failureCategory"), limit=24),
         })
@@ -419,14 +424,18 @@ def _compact_job_public(record: Mapping[str, Any], *, include_result: bool = Fal
 
 def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = None) -> dict[str, Any]:
     ts = _now() if now is None else float(now)
+    try:
+        version_code = max(0, int(record.get("versionCode") or 0))
+    except (TypeError, ValueError):
+        version_code = 0
     offline_after = max(15, _env_int("CORE_WORKER_OFFLINE_AFTER_SECONDS", DEFAULT_OFFLINE_AFTER_SECONDS))
     last_seen = float(record.get("last_heartbeat_at") or record.get("updated_at") or 0.0)
     age = max(0.0, ts - last_seen) if last_seen else None
     enabled = bool(record.get("enabled", True))
     online = enabled and age is not None and age <= offline_after
     roles = _merge_unique(normalize_roles(record.get("roles"), limit=16), normalize_roles(record.get("manual_roles"), limit=16), limit=16)
-    capabilities = _merge_unique(normalize_roles(record.get("capabilities"), limit=64), normalize_roles(record.get("manual_capabilities"), limit=64), limit=64)
-    supported_tasks = _merge_unique(normalize_job_types(record.get("supported_tasks"), limit=96), normalize_job_types(record.get("manual_supported_tasks"), limit=96), limit=96)
+    capabilities = _merge_unique(normalize_roles(record.get("capabilities"), limit=WORKER_CAPABILITY_LIMIT), normalize_roles(record.get("manual_capabilities"), limit=WORKER_CAPABILITY_LIMIT), limit=WORKER_CAPABILITY_LIMIT)
+    supported_tasks = _merge_unique(normalize_job_types(record.get("supported_tasks"), limit=WORKER_SUPPORTED_TASK_LIMIT), normalize_job_types(record.get("manual_supported_tasks"), limit=WORKER_SUPPORTED_TASK_LIMIT), limit=WORKER_SUPPORTED_TASK_LIMIT)
     status = record.get("status") if isinstance(record.get("status"), Mapping) else {}
     runtime = status.get("runtime") if isinstance(status.get("runtime"), Mapping) else {}
     runtime_mode = _short_text(record.get("runtime_mode") or status.get("runtime_mode") or runtime.get("mode") or "", limit=32)
@@ -445,11 +454,12 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "capabilities": capabilities,
         "supported_tasks": supported_tasks,
         "version": _short_text(record.get("version"), limit=48),
-        "source_hash": _short_text(record.get("source_hash"), limit=64),
+        "versionCode": version_code,
+        "source_hash": _short_text(record.get("source_hash"), limit=WORKER_SHORT_FIELD_LIMIT),
         "source": _short_text(record.get("source"), limit=32, default="apk"),
         "runtime_kind": _short_text(record.get("runtime_kind"), limit=24),
-        "parent_worker_id": _short_text(record.get("parent_worker_id"), limit=64),
-        "physical_worker_id": _short_text(record.get("physical_worker_id") or record.get("parent_worker_id") or record.get("worker_id"), limit=64),
+        "parent_worker_id": _short_text(record.get("parent_worker_id"), limit=WORKER_SHORT_FIELD_LIMIT),
+        "physical_worker_id": _short_text(record.get("physical_worker_id") or record.get("parent_worker_id") or record.get("worker_id"), limit=WORKER_SHORT_FIELD_LIMIT),
         "auto_enrollment": bool(record.get("auto_enrollment")),
         "auto_enrollment_protocol": _short_text(record.get("auto_enrollment_protocol"), limit=32),
         "runtime_mode": runtime_mode,
@@ -458,8 +468,8 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "battery": _safe_dict(record.get("battery"), max_items=12, max_string=512),
         "network": _safe_dict(record.get("network"), max_items=12, max_string=512),
         "health": _safe_dict(record.get("health"), max_items=16, max_string=1024),
-        "status": _safe_dict(record.get("status"), max_items=32, max_string=1024),
-        "remote_addr": _short_text(record.get("remote_addr"), limit=64),
+        "status": _safe_dict(record.get("status"), max_items=WORKER_STATUS_ITEM_LIMIT, max_string=WORKER_STATUS_STRING_LIMIT),
+        "remote_addr": _short_text(record.get("remote_addr"), limit=WORKER_SHORT_FIELD_LIMIT),
     }
     return public
 
@@ -680,7 +690,7 @@ class CoreWorkersRegistry:
             base_name = _short_text(parent.get("name"), limit=54, default="Core Worker")
             record = {
                 "worker_id": child_id,
-                "name": _short_text(f"{base_name} · APK", limit=64),
+                "name": _short_text(f"{base_name} · APK", limit=WORKER_SHORT_FIELD_LIMIT),
                 "enabled": True,
                 "token_hash": token_hash,
                 "registered_at": ts,
@@ -705,7 +715,7 @@ class CoreWorkersRegistry:
         if isinstance(payload, Mapping):
             requested_name = _short_text(payload.get("name") or payload.get("device_name"), limit=54)
             if requested_name:
-                record["name"] = _short_text(f"{requested_name} · APK", limit=64)
+                record["name"] = _short_text(f"{requested_name} · APK", limit=WORKER_SHORT_FIELD_LIMIT)
         workers[child_id] = record
         data["workers"] = workers
         return child_id, record
@@ -749,7 +759,7 @@ class CoreWorkersRegistry:
             "source": _short_text(payload.get("source") or child.get("source") or "core-worker-apk-bootstrap-child", limit=32),
         })
         requested_name = _short_text(payload.get("name") or payload.get("device_name") or current.get("name"), limit=54, default="Core Worker")
-        child["name"] = _short_text(f"{requested_name} · APK", limit=64)
+        child["name"] = _short_text(f"{requested_name} · APK", limit=WORKER_SHORT_FIELD_LIMIT)
         workers[child_id] = child
 
         # Não finja que o Termux está online: o heartbeat real dele deve restaurar
@@ -773,7 +783,7 @@ class CoreWorkersRegistry:
             "runtime_kind": "termux",
             "physical_worker_id": parent_id,
             "bootstrap_recovered_from_apk_collision": True,
-            "remote_addr": _short_text(current.get("remote_addr"), limit=64),
+            "remote_addr": _short_text(current.get("remote_addr"), limit=WORKER_SHORT_FIELD_LIMIT),
             "endpoint": _short_text(current.get("endpoint"), limit=160),
             "status": {
                 "bootstrap": {
@@ -843,7 +853,7 @@ class CoreWorkersRegistry:
         parent_id = _safe_worker_id(payload.get("parent_worker_id") or payload.get("worker_id"))
         challenge = _short_text(payload.get("challenge"), limit=160)
         install_id = _short_text(payload.get("install_id"), limit=160)
-        source_fingerprint = _short_text(payload.get("sourceFingerprint") or payload.get("source_fingerprint"), limit=64).lower()
+        source_fingerprint = _short_text(payload.get("sourceFingerprint") or payload.get("source_fingerprint"), limit=WORKER_SHORT_FIELD_LIMIT).lower()
         version_name = _short_text(payload.get("versionName") or payload.get("version_name"), limit=32)
         try:
             version_code = int(payload.get("versionCode") or payload.get("version_code") or 0)
@@ -874,7 +884,7 @@ class CoreWorkersRegistry:
             base_name = _short_text(parent.get("name"), limit=54, default="Core Worker")
             record.update({
                 "worker_id": child_id,
-                "name": _short_text(f"{base_name} · APK", limit=64),
+                "name": _short_text(f"{base_name} · APK", limit=WORKER_SHORT_FIELD_LIMIT),
                 "enabled": True,
                 "token_hash": _hash_secret(child_token),
                 "updated_at": ts,
@@ -896,7 +906,7 @@ class CoreWorkersRegistry:
                 "auto_enrollment_version_code": version_code,
                 "auto_enrollment_source_fingerprint": source_fingerprint,
                 "auto_enrollment_at": ts,
-                "remote_addr": _short_text(remote_addr, limit=64),
+                "remote_addr": _short_text(remote_addr, limit=WORKER_SHORT_FIELD_LIMIT),
             })
             workers[child_id] = record
             data["workers"] = workers
@@ -980,7 +990,7 @@ class CoreWorkersRegistry:
             token = "cw_" + secrets.token_urlsafe(32)
             name = _short_text(payload.get("name") or payload.get("device_name"), limit=64, default="Core Worker")
             roles = normalize_roles(payload.get("roles"), default=["worker", "diagnostics"], limit=16)
-            capabilities = normalize_roles(payload.get("capabilities"), default=roles, limit=64)
+            capabilities = normalize_roles(payload.get("capabilities"), default=roles, limit=WORKER_CAPABILITY_LIMIT)
             endpoint = _short_text(payload.get("endpoint") or payload.get("base_url") or payload.get("url"), limit=160)
             version = _short_text(payload.get("version"), limit=48)
             source = _short_text(payload.get("source"), limit=32, default="apk")
@@ -997,16 +1007,16 @@ class CoreWorkersRegistry:
                 "paired_by_name": _short_text(match.get("created_by_name"), limit=80),
                 "roles": roles,
                 "capabilities": capabilities,
-                "supported_tasks": normalize_job_types(payload.get("supported_tasks"), limit=96),
+                "supported_tasks": normalize_job_types(payload.get("supported_tasks"), limit=WORKER_SUPPORTED_TASK_LIMIT),
                 "endpoint": endpoint,
                 "version": version,
-                "source_hash": _short_text(payload.get("source_hash"), limit=64),
+                "source_hash": _short_text(payload.get("source_hash"), limit=WORKER_SHORT_FIELD_LIMIT),
                 "source": source,
                 "platform": _short_text(payload.get("platform"), limit=32),
                 "runtime_kind": _short_text(payload.get("runtime_kind"), limit=24),
-                "parent_worker_id": _short_text(payload.get("parent_worker_id"), limit=64),
-                "physical_worker_id": _short_text(payload.get("physical_worker_id") or payload.get("parent_worker_id") or worker_id, limit=64),
-                "remote_addr": _short_text(remote_addr, limit=64),
+                "parent_worker_id": _short_text(payload.get("parent_worker_id"), limit=WORKER_SHORT_FIELD_LIMIT),
+                "physical_worker_id": _short_text(payload.get("physical_worker_id") or payload.get("parent_worker_id") or worker_id, limit=WORKER_SHORT_FIELD_LIMIT),
+                "remote_addr": _short_text(remote_addr, limit=WORKER_SHORT_FIELD_LIMIT),
                 "battery": _safe_dict(payload.get("battery"), max_items=16),
                 "network": _safe_dict(payload.get("network"), max_items=16),
                 "health": _safe_dict(payload.get("health"), max_items=24),
@@ -1066,26 +1076,31 @@ class CoreWorkersRegistry:
                 "token_hash": _hash_secret(token),
                 "updated_at": ts,
                 "last_heartbeat_at": ts,
-                "remote_addr": _short_text(remote_addr, limit=64),
+                "remote_addr": _short_text(remote_addr, limit=WORKER_SHORT_FIELD_LIMIT),
                 "direct": True,
                 "source": _short_text(payload.get("source") or "core-worker-apk-direct", limit=32),
                 "platform": _short_text(payload.get("platform") or record.get("platform"), limit=32),
                 "runtime_kind": _short_text(payload.get("runtime_kind") or record.get("runtime_kind"), limit=24),
-                "parent_worker_id": _short_text(payload.get("parent_worker_id") or record.get("parent_worker_id"), limit=64),
-                "physical_worker_id": _short_text(payload.get("physical_worker_id") or payload.get("parent_worker_id") or record.get("physical_worker_id") or worker_id, limit=64),
-                "name": _short_text(payload.get("name") or record.get("name") or "Core Phone Worker", limit=64),
+                "parent_worker_id": _short_text(payload.get("parent_worker_id") or record.get("parent_worker_id"), limit=WORKER_SHORT_FIELD_LIMIT),
+                "physical_worker_id": _short_text(payload.get("physical_worker_id") or payload.get("parent_worker_id") or record.get("physical_worker_id") or worker_id, limit=WORKER_SHORT_FIELD_LIMIT),
+                "name": _short_text(payload.get("name") or record.get("name") or "Core Phone Worker", limit=WORKER_SHORT_FIELD_LIMIT),
             })
             if payload.get("endpoint") or payload.get("base_url") or payload.get("url"):
                 record["endpoint"] = _short_text(payload.get("endpoint") or payload.get("base_url") or payload.get("url"), limit=160)
             if payload.get("version"):
                 record["version"] = _short_text(payload.get("version"), limit=48)
+            if payload.get("versionCode") is not None:
+                try:
+                    record["versionCode"] = max(0, int(payload.get("versionCode") or 0))
+                except (TypeError, ValueError):
+                    pass
             if payload.get("source_hash"):
-                record["source_hash"] = _short_text(payload.get("source_hash"), limit=64)
+                record["source_hash"] = _short_text(payload.get("source_hash"), limit=WORKER_SHORT_FIELD_LIMIT)
             roles = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles"), default=["apk-worker", "diagnostics"]), limit=16)
-            capabilities = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), default=roles, limit=64), limit=64)
-            tasks = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=96)
+            capabilities = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), default=roles, limit=WORKER_CAPABILITY_LIMIT), limit=WORKER_CAPABILITY_LIMIT)
+            tasks = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=WORKER_SUPPORTED_TASK_LIMIT)
             record["roles"] = _merge_unique(roles, normalize_roles(record.get("manual_roles"), limit=16), limit=16)
-            record["capabilities"] = _merge_unique(capabilities, normalize_roles(record.get("manual_capabilities"), limit=64), limit=64)
+            record["capabilities"] = _merge_unique(capabilities, normalize_roles(record.get("manual_capabilities"), limit=WORKER_CAPABILITY_LIMIT), limit=WORKER_CAPABILITY_LIMIT)
             if tasks:
                 record["supported_tasks"] = tasks
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
@@ -1114,19 +1129,24 @@ class CoreWorkersRegistry:
             worker_id, record = self._authenticate_worker_unlocked(data, worker_id=worker_id, token=token)
             record["updated_at"] = ts
             record["last_heartbeat_at"] = ts
-            record["remote_addr"] = _short_text(remote_addr, limit=64)
+            record["remote_addr"] = _short_text(remote_addr, limit=WORKER_SHORT_FIELD_LIMIT)
             for key in ("name", "endpoint", "version", "source_hash", "source", "platform", "runtime_kind", "parent_worker_id", "physical_worker_id"):
                 if key in payload:
                     record[key] = _short_text(payload.get(key), limit=160 if key == "endpoint" else 64)
+            if payload.get("versionCode") is not None:
+                try:
+                    record["versionCode"] = max(0, int(payload.get("versionCode") or 0))
+                except (TypeError, ValueError):
+                    pass
             if _is_apk_runtime_payload(payload) and record.get("parent_worker_id"):
                 record["runtime_kind"] = "apk"
                 record["physical_worker_id"] = str(record.get("parent_worker_id") or "")
             if "roles" in payload:
                 record["roles"] = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles")), limit=16)
             if "capabilities" in payload:
-                record["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), limit=64), limit=64)
+                record["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), limit=WORKER_CAPABILITY_LIMIT), limit=WORKER_CAPABILITY_LIMIT)
             if "supported_tasks" in payload:
-                record["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=96)
+                record["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=WORKER_SUPPORTED_TASK_LIMIT)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
                 if key not in payload:
                     continue
@@ -1154,7 +1174,7 @@ class CoreWorkersRegistry:
             queue = status.get("core_worker_jobs") if isinstance(status.get("core_worker_jobs"), Mapping) else {}
             if not queue:
                 continue
-            job_id = _short_text(queue.get("last_result_job_id") or queue.get("last_completed_job_id"), limit=64)
+            job_id = _short_text(queue.get("last_result_job_id") or queue.get("last_completed_job_id"), limit=WORKER_SHORT_FIELD_LIMIT)
             final_status = str(queue.get("last_result_status") or queue.get("last_completed_status") or "").strip().lower()
             if not job_id or final_status not in {"succeeded", "failed"}:
                 continue
@@ -1406,7 +1426,7 @@ class CoreWorkersRegistry:
         if target and target != worker_id:
             return False
         roles = set(normalize_roles(worker.get("roles"), limit=32)) | set(normalize_roles(worker.get("manual_roles"), limit=32))
-        capabilities = (set(normalize_roles(worker.get("capabilities"), limit=48)) | set(normalize_roles(worker.get("manual_capabilities"), limit=48)) | roles)
+        capabilities = (set(normalize_roles(worker.get("capabilities"), limit=WORKER_CAPABILITY_LIMIT)) | set(normalize_roles(worker.get("manual_capabilities"), limit=WORKER_CAPABILITY_LIMIT)) | roles)
         required_roles = set(normalize_roles(job.get("required_roles"), limit=16))
         required_capabilities = set(normalize_roles(job.get("required_capabilities"), limit=16))
         if required_roles and not required_roles.issubset(roles | capabilities):
@@ -1443,15 +1463,15 @@ class CoreWorkersRegistry:
             # Poll também conta como sinal de vida, para o painel não depender só do heartbeat separado.
             worker["updated_at"] = ts
             worker["last_heartbeat_at"] = ts
-            worker["remote_addr"] = _short_text(remote_addr, limit=64)
+            worker["remote_addr"] = _short_text(remote_addr, limit=WORKER_SHORT_FIELD_LIMIT)
             if "roles" in payload:
                 worker["roles"] = normalize_roles(payload.get("roles"), default=normalize_roles(worker.get("roles")), limit=16)
             if "capabilities" in payload:
-                worker["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(worker.get("capabilities"), limit=64), limit=64)
+                worker["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(worker.get("capabilities"), limit=WORKER_CAPABILITY_LIMIT), limit=WORKER_CAPABILITY_LIMIT)
             if "supported_tasks" in payload:
-                worker["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(worker.get("supported_tasks")), limit=96)
+                worker["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(worker.get("supported_tasks")), limit=WORKER_SUPPORTED_TASK_LIMIT)
             if "source_hash" in payload:
-                worker["source_hash"] = _short_text(payload.get("source_hash"), limit=64)
+                worker["source_hash"] = _short_text(payload.get("source_hash"), limit=WORKER_SHORT_FIELD_LIMIT)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
                 if key not in payload:
                     continue
@@ -1550,7 +1570,7 @@ class CoreWorkersRegistry:
         }
 
     def renew_job_lease(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
-        job_id = _short_text(payload.get("job_id"), limit=64)
+        job_id = _short_text(payload.get("job_id"), limit=WORKER_SHORT_FIELD_LIMIT)
         if not job_id:
             raise CoreWorkerRegistryError("job_id ausente", status=400)
         ts = _now()
@@ -1567,7 +1587,7 @@ class CoreWorkersRegistry:
             lease = max(10, min(7200, int(job.get("lease_seconds") or DEFAULT_JOB_LEASE_SECONDS)))
             job["lease_until"] = ts + lease
             job["updated_at"] = ts
-            stage = _short_text(payload.get("stage"), limit=64)
+            stage = _short_text(payload.get("stage"), limit=WORKER_SHORT_FIELD_LIMIT)
             progress = payload.get("progress")
             if stage:
                 job["progress_stage"] = stage
@@ -1578,7 +1598,7 @@ class CoreWorkersRegistry:
                 job["progress_summary"] = summary
             worker["updated_at"] = ts
             worker["last_heartbeat_at"] = ts
-            worker["remote_addr"] = _short_text(remote_addr, limit=64)
+            worker["remote_addr"] = _short_text(remote_addr, limit=WORKER_SHORT_FIELD_LIMIT)
             data["workers"][worker_id] = worker
             jobs[job_id] = job
             data["jobs"] = jobs
@@ -1588,7 +1608,7 @@ class CoreWorkersRegistry:
 
     def submit_job_result(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
         worker_id_from_payload = payload.get("worker_id") or payload.get("id")
-        job_id = _short_text(payload.get("job_id"), limit=64)
+        job_id = _short_text(payload.get("job_id"), limit=WORKER_SHORT_FIELD_LIMIT)
         if not job_id:
             raise CoreWorkerRegistryError("job_id ausente", status=400)
         status = str(payload.get("status") or "succeeded").strip().lower()
@@ -1639,7 +1659,7 @@ class CoreWorkersRegistry:
                 status_dict["core_worker_jobs"] = queue_status
                 worker["updated_at"] = ts
                 worker["last_heartbeat_at"] = ts
-                worker["remote_addr"] = _short_text(remote_addr, limit=64)
+                worker["remote_addr"] = _short_text(remote_addr, limit=WORKER_SHORT_FIELD_LIMIT)
                 data["workers"][worker_id] = worker
                 self._save_unlocked(data)
                 return {
@@ -1676,7 +1696,7 @@ class CoreWorkersRegistry:
                 job["summary"] = _short_text(payload.get("summary"), limit=160)
             worker["updated_at"] = ts
             worker["last_heartbeat_at"] = ts
-            worker["remote_addr"] = _short_text(remote_addr, limit=64)
+            worker["remote_addr"] = _short_text(remote_addr, limit=WORKER_SHORT_FIELD_LIMIT)
             if (
                 _normalize_job_type(job.get("type")) == "worker_update"
                 and status == "succeeded"
@@ -1688,7 +1708,7 @@ class CoreWorkersRegistry:
                 # parcial ou rollback.
                 worker["updater_last_delivery_at"] = ts
                 worker["updater_last_delivery_target_version"] = _short_text(original_job_payload.get("version"), limit=48)
-                worker["updater_last_delivery_target_hash"] = _short_text(original_job_payload.get("source_hash") or original_job_payload.get("target_source_hash"), limit=64)
+                worker["updater_last_delivery_target_hash"] = _short_text(original_job_payload.get("source_hash") or original_job_payload.get("target_source_hash"), limit=WORKER_SHORT_FIELD_LIMIT)
             status_dict = _worker_status_dict(worker)
             queue_status = status_dict.get("core_worker_jobs") if isinstance(status_dict.get("core_worker_jobs"), dict) else {}
             queue_status.update({
@@ -1708,7 +1728,7 @@ class CoreWorkersRegistry:
         return {"ok": True, "worker_id": worker_id, "job": public}
 
     def get_job(self, job_id: str) -> dict[str, Any]:
-        safe_id = _short_text(job_id, limit=64)
+        safe_id = _short_text(job_id, limit=WORKER_SHORT_FIELD_LIMIT)
         if not safe_id:
             raise CoreWorkerRegistryError("job_id ausente", status=400)
         ts = _now()
@@ -1867,7 +1887,7 @@ class CoreWorkersRegistry:
 
     def rename_worker(self, worker_id: str, name: str) -> dict[str, Any]:
         safe_worker_id = _safe_worker_id(worker_id)
-        clean_name = _short_text(name, limit=64)
+        clean_name = _short_text(name, limit=WORKER_SHORT_FIELD_LIMIT)
         if not clean_name:
             raise CoreWorkerRegistryError("nome ausente", status=400)
         if len(clean_name) < 2:
@@ -1892,8 +1912,8 @@ class CoreWorkersRegistry:
         new_roles = normalize_roles(roles, limit=16)
         if not new_roles:
             raise CoreWorkerRegistryError("roles ausentes", status=400)
-        new_capabilities = normalize_roles(capabilities if capabilities is not None else new_roles, default=new_roles, limit=64)
-        manual_tasks = normalize_job_types(supported_tasks, limit=96) if supported_tasks is not None else []
+        new_capabilities = normalize_roles(capabilities if capabilities is not None else new_roles, default=new_roles, limit=WORKER_CAPABILITY_LIMIT)
+        manual_tasks = normalize_job_types(supported_tasks, limit=WORKER_SUPPORTED_TASK_LIMIT) if supported_tasks is not None else []
         ts = _now()
         with self._lock:
             data = self._load_unlocked()
@@ -1909,9 +1929,9 @@ class CoreWorkersRegistry:
             if manual_tasks:
                 worker["manual_supported_tasks"] = manual_tasks
             worker["roles"] = _merge_unique(normalize_roles(worker.get("roles"), limit=16), new_roles, limit=16)
-            worker["capabilities"] = _merge_unique(normalize_roles(worker.get("capabilities"), limit=64), new_capabilities, limit=64)
+            worker["capabilities"] = _merge_unique(normalize_roles(worker.get("capabilities"), limit=WORKER_CAPABILITY_LIMIT), new_capabilities, limit=WORKER_CAPABILITY_LIMIT)
             if manual_tasks:
-                worker["supported_tasks"] = _merge_unique(normalize_job_types(worker.get("supported_tasks"), limit=96), manual_tasks, limit=96)
+                worker["supported_tasks"] = _merge_unique(normalize_job_types(worker.get("supported_tasks"), limit=WORKER_SUPPORTED_TASK_LIMIT), manual_tasks, limit=WORKER_SUPPORTED_TASK_LIMIT)
             worker["updated_at"] = ts
             workers[safe_worker_id] = worker
             data["workers"] = workers

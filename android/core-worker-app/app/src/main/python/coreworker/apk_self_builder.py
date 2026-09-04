@@ -34,6 +34,9 @@ MAX_SOURCE_ENTRIES = 16000
 MAX_SOURCE_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
 MAX_APK_BYTES = 1024 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 3 * 60 * 60
+PRIVATE_ARTIFACT_KEEP = 3
+PRIVATE_LOG_KEEP = 8
+MIN_BUILD_BATTERY_PERCENT = 25
 
 
 def _now_ms() -> int:
@@ -695,7 +698,7 @@ def _resource_preflight(
         blockers.append("memory_low")
     if free < required_temp:
         blockers.append("storage_low")
-    if battery_percent >= 0 and battery_percent < 25 and not charging:
+    if battery_percent >= 0 and battery_percent < MIN_BUILD_BATTERY_PERCENT and not charging:
         blockers.append("battery_low")
     if temperature_c >= 45.0:
         blockers.append("temperature_high")
@@ -1056,6 +1059,59 @@ def _publish_latest(files: Path, payload: dict[str, Any], server_url: str, worke
     }
 
 
+def _cleanup_private_builder_storage(builder: Path, current_apk: Path | None = None) -> dict[str, Any]:
+    """Mantém o sandbox do self-builder pequeno sem tocar no toolchain ativo."""
+    result: dict[str, Any] = {"removed": 0, "removedBytes": 0, "keptApks": 0, "keptLogs": 0}
+    try:
+        artifacts = builder / "artifacts"
+        apks = sorted(
+            [path for path in artifacts.glob("*.apk") if path.is_file()],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        ) if artifacts.is_dir() else []
+        keep: set[Path] = set()
+        for path in apks[:PRIVATE_ARTIFACT_KEEP]:
+            try: keep.add(path.resolve())
+            except Exception: keep.add(path)
+        if current_apk is not None and current_apk.is_file():
+            try: keep.add(current_apk.resolve())
+            except Exception: keep.add(current_apk)
+        for apk in apks:
+            try: canonical = apk.resolve()
+            except Exception: canonical = apk
+            if canonical in keep:
+                continue
+            for item in (apk, apk.with_suffix(apk.suffix + ".json")):
+                try:
+                    if item.is_file():
+                        size = item.stat().st_size
+                        item.unlink()
+                        result["removed"] += 1
+                        result["removedBytes"] += size
+                except Exception:
+                    pass
+        result["keptApks"] = len([path for path in apks if path.exists()])
+
+        logs = builder / "logs"
+        log_files = sorted(
+            [path for path in logs.glob("*.log") if path.is_file()],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        ) if logs.is_dir() else []
+        for path in log_files[PRIVATE_LOG_KEEP:]:
+            try:
+                size = path.stat().st_size
+                path.unlink()
+                result["removed"] += 1
+                result["removedBytes"] += size
+            except Exception:
+                pass
+        result["keptLogs"] = len([path for path in log_files if path.exists()])
+    except Exception as exc:
+        result["warning"] = _short(exc, 180)
+    return result
+
+
 def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, server_url: str, worker_id: str, token: str, worker_version: str) -> dict[str, Any]:
     # O manager Java já executou um smoke forçado antes de despachar o job.
     # Aqui reutilizamos o fingerprint persistido para não rodar Java/Gradle duas vezes.
@@ -1183,6 +1239,7 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
         }
         _atomic_json(artifact_path.with_suffix(artifact_path.suffix + ".json"), meta)
         _atomic_json(artifacts / "latest-artifact.json", meta)
+        storage_cleanup = _cleanup_private_builder_storage(builder, artifact_path)
         result: dict[str, Any] = {
             "ok": True,
             "summary": f"APK {actual_version_name} compilado pelo próprio APK",
@@ -1194,6 +1251,7 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
             "artifact_meta": meta,
             "source": {**download, **extracted},
             "builder_environment": {"preflight": pre, "hydrated": hydrated},
+            "storage_cleanup": storage_cleanup,
             "duration_seconds": round(time.time() - started, 3),
         }
         if bool(payload.get("publish", True)):

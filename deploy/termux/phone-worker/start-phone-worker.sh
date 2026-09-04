@@ -166,7 +166,13 @@ pid_is_official_worker() {
   [[ "$cmdline" == *"python"* && "$cmdline" == *"phone_worker.py"* ]] || return 1
   cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
   release="$(active_release_dir)"
-  [[ "$cwd" == "$WORKER_DIR" || "$cwd" == "$release" ]]
+  # Processos de releases anteriores continuam sendo nossos. Antes, o
+  # supervisor aceitava apenas o `current`, então agents antigos podiam ficar
+  # vivos segurando 8766/8768 depois de uma promoção transacional.
+  [[ "$cwd" == "$WORKER_DIR" \
+    || "$cwd" == "$release" \
+    || "$cwd" == "$RUNTIME_ROOT"/releases/* \
+    || "$cwd" == "$WORKER_DIR"/.releases/* ]]
 }
 
 pid_from_file() {
@@ -811,9 +817,10 @@ if worker_healthy_for_pid "$child_pid"; then
   exit 0
 fi
 
-# O filho ainda está vivo. Não invente sucesso a partir de HTTP 200 de outro
-# runtime; deixe explícito que a confirmação do control plane está pendente.
-log "processo Termux vivo, mas identidade/control-plane ainda não foram confirmados; pid=$child_pid"
-write_status "starting_verification_pending pid=$child_pid $(now_iso)"
-exit 0
+# O filho ainda está vivo, mas o supervisor não conseguiu provar identidade +
+# control plane dentro da janela de start. Nunca devolva sucesso só porque o PID
+# existe: isso permitiria outro processo/HTTP mascarar um agent quebrado.
+log "processo Termux vivo, mas identidade/control-plane não foram confirmados dentro da janela; pid=$child_pid"
+write_status "failed verification_timeout pid=$child_pid $(now_iso)"
+exit 1
 

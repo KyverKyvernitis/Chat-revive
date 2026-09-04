@@ -163,18 +163,19 @@ def test_vps_enrollment_is_bound_to_current_selected_builder_and_source():
 
 def test_normal_ui_prefers_automatic_enrollment_over_core_code():
     activity = (JAVA / "MainActivity.java").read_text(encoding="utf-8")
-    assert 'Pareamento automático com o Termux deste aparelho.' in activity
-    assert 'Vinculando automaticamente ao worker físico' in activity
-    assert 'pairingForm.setVisibility(paired || autoEnrollment ? View.GONE : View.VISIBLE)' in activity
-    assert 'Recovery manual por código disponível.' in activity
+    assert 'Vínculo automático ativo. Nenhum código necessário.' in activity
+    assert 'Vinculando automaticamente' in activity
+    assert 'technicalDetailsContent.addView(pairingForm)' in activity
+    assert 'connectCard.addView(pairingForm)' not in activity
+    assert 'Recovery de pareamento' in activity
 
 
 def test_versions_advance_for_auto_enrollment_protocol():
     gradle = GRADLE.read_text(encoding="utf-8")
     phone = PHONE_WORKER_PATH.read_text(encoding="utf-8")
-    assert 'versionCode 129' in gradle
-    assert 'versionName "0.8.2"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.3"' in phone
+    assert 'versionCode 130' in gradle
+    assert 'versionName "0.8.3"' in gradle
+    assert 'PHONE_WORKER_VERSION = "1.11.4"' in phone
 
 
 def test_discord_panel_uses_manual_pairing_only_as_recovery():
@@ -182,7 +183,7 @@ def test_discord_panel_uses_manual_pairing_only_as_recovery():
     assert 'label="Parear celular"' not in workers
     assert 'Recovery de pareamento' in workers
     assert 'Código manual excepcional' in workers
-    assert 'O fluxo normal do APK 0.8.2+ é automático e não usa código.' in workers
+    assert 'O fluxo normal do APK 0.8.3+ é automático e não usa código.' in workers
 
 
 def test_auto_enrollment_does_not_require_vps_url_embedded_in_apk():

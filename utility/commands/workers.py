@@ -2852,8 +2852,94 @@ class WorkersPanelView(discord.ui.LayoutView):
         workers = registry.get("workers") if isinstance(registry.get("workers"), list) else []
         return [worker for worker in workers if isinstance(worker, dict)]
 
+    @staticmethod
+    def _physical_worker_id(worker: dict[str, Any]) -> str:
+        return str(
+            worker.get("physical_worker_id")
+            or worker.get("parent_worker_id")
+            or worker.get("worker_id")
+            or ""
+        ).strip()
+
+    def _physical_groups(self) -> list[list[dict[str, Any]]]:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for worker in self._registry_workers():
+            physical_id = self._physical_worker_id(worker)
+            if not physical_id:
+                continue
+            groups.setdefault(physical_id, []).append(worker)
+        return list(groups.values())
+
+    @staticmethod
+    def _preferred_runtime(members: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not members:
+            return None
+
+        def score(worker: dict[str, Any]) -> tuple[Any, ...]:
+            runtime_kind = str(worker.get("runtime_kind") or "").lower()
+            source = str(worker.get("source") or "").lower()
+            is_apk = runtime_kind == "apk" or source.startswith("core-worker-apk")
+            status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+            builder = status.get("apk_self_builder") if isinstance(status.get("apk_self_builder"), dict) else {}
+            caps = {str(item) for item in worker.get("capabilities") or []}
+            builder_ready = bool(builder.get("ready")) or "apk-builder" in caps
+            return (
+                1 if worker.get("online") else 0,
+                1 if worker.get("enabled") is not False else 0,
+                1 if (is_apk and builder_ready) else 0,
+                1 if is_apk else 0,
+                float(worker.get("last_seen") or 0),
+            )
+
+        return max(members, key=score)
+
+    def _visible_registry_workers(self) -> list[dict[str, Any]]:
+        visible: list[dict[str, Any]] = []
+        for members in self._physical_groups():
+            preferred = self._preferred_runtime(members)
+            if preferred is not None:
+                visible.append(preferred)
+        visible.sort(key=_worker_score_key)
+        return visible
+
+    def _physical_group_for_worker_id(self, worker_id: str) -> list[dict[str, Any]]:
+        wanted = str(worker_id or "").strip()
+        if not wanted:
+            return []
+        for members in self._physical_groups():
+            if any(str(item.get("worker_id") or "") == wanted for item in members):
+                return members
+        return []
+
+    @staticmethod
+    def _group_parent(members: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not members:
+            return None
+        physical_id = str(members[0].get("physical_worker_id") or members[0].get("parent_worker_id") or members[0].get("worker_id") or "").strip()
+        return next((item for item in members if str(item.get("worker_id") or "") == physical_id), None)
+
+    @staticmethod
+    def _group_apk(members: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for item in members:
+            runtime_kind = str(item.get("runtime_kind") or "").lower()
+            source = str(item.get("source") or "").lower()
+            if runtime_kind == "apk" or source.startswith("core-worker-apk"):
+                return item
+        return None
+
+    def _group_display_name(self, members: list[dict[str, Any]]) -> str:
+        parent = self._group_parent(members)
+        preferred = self._preferred_runtime(members) or {}
+        physical_id = self._physical_worker_id(preferred)
+        return str(
+            (parent or {}).get("name")
+            or preferred.get("name")
+            or physical_id
+            or "Core Worker"
+        ).strip()
+
     def _online_registry_workers(self) -> list[dict[str, Any]]:
-        workers = [worker for worker in self._registry_workers() if worker.get("online")]
+        workers = [worker for worker in self._visible_registry_workers() if worker.get("online")]
         workers.sort(key=_worker_score_key)
         return workers
 
@@ -2863,16 +2949,22 @@ class WorkersPanelView(discord.ui.LayoutView):
         return bool(self.snapshot.configured and self.snapshot.online and not _has_online_registry_worker(self.snapshot))
 
     def _worker_choices_exist(self) -> bool:
-        return bool(self._registry_workers() or self._has_legacy_worker())
+        return bool(self._visible_registry_workers() or self._has_legacy_worker())
 
     def _ensure_selected_worker(self) -> None:
-        workers = self._registry_workers()
+        workers = self._visible_registry_workers()
         online_workers = self._online_registry_workers()
         worker_ids = [str(worker.get("worker_id") or "") for worker in workers if worker.get("worker_id")]
         if self.selected_worker_id == AUTO_WORKER_ID and len(online_workers) >= 2:
             return
-        if self.selected_worker_id and (self.selected_worker_id in worker_ids or (self.selected_worker_id == LEGACY_WORKER_ID and self._has_legacy_worker())):
-            return
+        if self.selected_worker_id:
+            if self.selected_worker_id in worker_ids or (self.selected_worker_id == LEGACY_WORKER_ID and self._has_legacy_worker()):
+                return
+            members = self._physical_group_for_worker_id(self.selected_worker_id)
+            preferred = self._preferred_runtime(members)
+            if preferred and preferred.get("worker_id"):
+                self.selected_worker_id = str(preferred.get("worker_id"))
+                return
         if len(online_workers) >= 2:
             self.selected_worker_id = AUTO_WORKER_ID
             return
@@ -2912,26 +3004,40 @@ class WorkersPanelView(discord.ui.LayoutView):
         online_workers = self._online_registry_workers()
         if len(online_workers) >= 2:
             best = online_workers[0]
-            best_name = _shorten(best.get("name") or best.get("worker_id") or "worker", limit=28)
+            best_group = self._physical_group_for_worker_id(str(best.get("worker_id") or ""))
+            best_name = _shorten(self._group_display_name(best_group), limit=28)
             options.append(discord.SelectOption(
-                label="Melhor worker disponível",
+                label="Melhor celular disponível",
                 value=AUTO_WORKER_ID,
-                description=_shorten(f"failover ativo · melhor agora: {best_name}", limit=100),
+                description=_shorten(f"failover automático · melhor agora: {best_name}", limit=100),
                 emoji="⚙️",
                 default=(self.selected_worker_id == AUTO_WORKER_ID),
             ))
-        for worker in self._registry_workers()[:24]:
+        for members in self._physical_groups()[:24]:
+            worker = self._preferred_runtime(members)
+            if not worker:
+                continue
             worker_id = str(worker.get("worker_id") or "").strip()
             if not worker_id:
                 continue
-            name = _shorten(worker.get("name") or worker_id, limit=80)
-            seen = _format_age(worker.get("last_seen_age_seconds"))
-            roles = ", ".join(str(role) for role in (worker.get("roles") or [])[:3]) or "sem roles"
+            name = _shorten(self._group_display_name(members), limit=80)
+            apk = self._group_apk(members)
+            parent = self._group_parent(members)
+            details: list[str] = []
+            if apk is not None:
+                apk_caps = {str(item) for item in apk.get("capabilities") or []}
+                details.append("APK pronto" if apk.get("online") and "apk-builder" in apk_caps else ("APK online" if apk.get("online") else "APK offline"))
+            if parent is not None:
+                details.append("Termux fallback" if parent.get("online") else "Termux offline")
+            model = str((apk or {}).get("name") or "").strip()
+            if model and model.lower() != name.lower():
+                details.insert(0, model)
+            online = any(bool(item.get("online")) for item in members)
             options.append(discord.SelectOption(
                 label=name[:100],
                 value=worker_id[:100],
-                description=_shorten(f"{('online' if worker.get('online') else 'offline')} · {seen} · {roles}", limit=100),
-                emoji="🟢" if worker.get("online") else "🔴",
+                description=_shorten(" · ".join(details) or ("online" if online else "offline"), limit=100),
+                emoji="🟢" if online else "🔴",
                 default=(worker_id == self.selected_worker_id),
             ))
         if self._has_legacy_worker():
@@ -3242,7 +3348,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             online_workers = self._online_registry_workers()
             best = online_workers[0] if online_workers else {}
             best_name = _shorten(best.get("name") or best.get("worker_id") or "worker", limit=36) if isinstance(best, dict) else "worker"
-            lines.append("⚙️ **Melhor worker disponível** · `failover`")
+            lines.append("⚙️ **Melhor celular disponível** · `failover`")
             lines.append(f"-# {len(online_workers)} online · melhor agora: {best_name} · jobs sem alvo podem migrar se um worker cair")
             roles_union: list[str] = []
             for item in online_workers:
@@ -3253,25 +3359,40 @@ class WorkersPanelView(discord.ui.LayoutView):
             if roles_union:
                 lines.append(f"-# {len(roles_union)} função(ões) técnicas disponíveis nos celulares online")
         elif worker:
-            icon = "🟢" if worker.get("online") else "🔴"
-            name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=36)
-            seen = _format_age(worker.get("last_seen_age_seconds"))
-            version = _agent_version_label(worker.get("version"))
-            ready = "online" if worker.get("online") and not _worker_stale_note(worker) else ("sem resposta recente" if worker.get("online") else "offline")
+            members = self._physical_group_for_worker_id(str(worker.get("worker_id") or "")) or [worker]
+            preferred = self._preferred_runtime(members) or worker
+            parent = self._group_parent(members)
+            apk = self._group_apk(members)
+            online = any(bool(item.get("online")) for item in members)
+            icon = "🟢" if online else "🔴"
+            name = _shorten(self._group_display_name(members), limit=36)
             lines[0] = f"## {icon} {name}"
-            stale_note = _worker_stale_note(worker)
-            if stale_note:
-                lines.append(f"-# {stale_note}")
-            lines.append(f"**Status:** {ready} · visto {seen}")
-            lines.append(f"**Runtime:** `{version}` · {_worker_profile_label(worker)}")
-            lines.append(f"**Aparelho:** {_battery_text(worker)} · {_simple_network_text(worker)}")
-            queue_text = _queue_status_text(worker)
+
+            seen_values = [float(item.get("last_seen_age_seconds") or 10**9) for item in members if item.get("last_seen_age_seconds") is not None]
+            seen = _format_age(min(seen_values)) if seen_values else "n/a"
+            lines.append(f"**Status:** {('online' if online else 'offline')} · visto {seen}")
+
+            runtime_parts: list[str] = []
+            if apk is not None:
+                apk_caps = {str(item) for item in apk.get("capabilities") or []}
+                apk_version = _agent_version_label(apk.get("version"))
+                apk_state = "principal" if apk.get("online") and "apk-builder" in apk_caps else ("online" if apk.get("online") else "offline")
+                runtime_parts.append(f"APK `{apk_version}` · {apk_state}")
+            if parent is not None:
+                parent_version = _agent_version_label(parent.get("version"))
+                parent_state = "fallback" if parent.get("online") else "offline"
+                runtime_parts.append(f"Termux `{parent_version}` · {parent_state}")
+            if runtime_parts:
+                lines.append("**Runtimes:** " + " · ".join(runtime_parts))
+
+            lines.append(f"**Aparelho:** {_battery_text(preferred)} · {_simple_network_text(preferred)}")
+            queue_text = _queue_status_text(preferred)
             if queue_text:
                 lines.append(f"**Fila:** {queue_text}")
-            push = _core_worker_push_status_text(str(worker.get("worker_id") or ""))
-            if push and not push.lower().startswith("apk:"):
-                lines.append(f"-# {push}")
-            lines.append("-# Diagnóstico completo em **Detalhes do celular**.")
+            model = str((apk or {}).get("name") or "").strip()
+            if model and model.lower() != name.lower():
+                lines.append(f"-# Modelo: {model}")
+            lines.append("-# APK e Termux são tratados como um único celular; o runtime é escolhido automaticamente.")
         elif self._selected_is_legacy():
             version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
             lines[0] = f"## 🟢 {_shorten(snapshot.name or 'phone-worker direto', limit=36)}"
@@ -3560,7 +3681,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 "## 🔐 Recovery manual de pareamento\n"
                 f"**Código:** `{code}` · expira em `{expires}`\n"
                 f"**Nome:** `{default_name}` · **perfil:** `{default_profile}`\n\n"
-                "O fluxo normal do APK 0.8.2+ é automático e não usa código. Use este recovery apenas se o enrollment parent → child não conseguir concluir.\n\n"
+                "O fluxo normal do APK 0.8.3+ é automático e não usa código. Use este recovery apenas se o enrollment parent → child não conseguir concluir.\n\n"
                 "**No APK Core Worker:** abra a área de recovery manual, informe o código e confirme a VPS.\n\n"
                 f"Funções desse perfil: `{_shorten(profile_roles, limit=220)}`\n"
                 "-# O token do Termux não é compartilhado com o APK no fluxo automático."

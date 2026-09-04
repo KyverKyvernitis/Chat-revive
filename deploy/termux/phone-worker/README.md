@@ -1,8 +1,13 @@
 # Phone Worker Termux
 
-## Pareamento automático do APK filho (1.11.3+)
+## Limpeza e lifecycle 1.11.4
 
-A partir do Phone Worker `1.11.3`, o Termux pareado vira a raiz de confiança do runtime APK do mesmo aparelho. Não é necessário gerar `CORE-XXXX` para o fluxo normal. O APK 0.8.2+ expõe um challenge efêmero **somente em `127.0.0.1:8767`**; o Termux autentica na VPS com a própria credencial, solicita uma credencial nova e exclusiva para `<worker-id>-apk` e entrega essa credencial ao APK pelo loopback. O token do Termux não é gravado no APK.
+O supervisor reconhece processos `phone_worker.py` de releases históricos dentro de `.core-worker-runtime/releases/` como pertencentes ao Core Worker. Isso permite encerrar somente agents antigos confirmados antes de iniciar o `current`, evitando listeners órfãos em 8766/8768 sem usar `pkill` amplo. O builder Termux também mantém por padrão apenas 4 APKs recentes, 12 logs e 1 workdir.
+
+
+## Pareamento automático do APK filho (1.11.4+)
+
+A partir do Phone Worker `1.11.4`, o Termux pareado vira a raiz de confiança do runtime APK do mesmo aparelho. Não é necessário gerar `CORE-XXXX` para o fluxo normal. O APK 0.8.3+ expõe um challenge efêmero **somente em `127.0.0.1:8767`**; o Termux autentica na VPS com a própria credencial, solicita uma credencial nova e exclusiva para `<worker-id>-apk` e entrega essa credencial ao APK pelo loopback. O token do Termux não é gravado no APK.
 
 O enrollment é idempotente por identidade lógica: reinstalar o APK mantém `<worker-id>-apk` e rotaciona a credencial. Se o APK ainda não estiver aberto, o Termux apenas continua verificando em background; não há job, shell remoto ou código manual necessário. `CORE-XXXX` permanece documentado abaixo apenas como recovery para instalações antigas/excepcionais.
 

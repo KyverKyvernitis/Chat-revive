@@ -113,7 +113,7 @@ def test_bootstrap_core_starts_before_optional_runtime_files_arrive(tmp_path: Pa
 
     monkeypatch.setattr(module.importlib, "import_module", import_without_preloaded_identity)
 
-    assert module.PHONE_WORKER_VERSION == "1.11.3"
+    assert module.PHONE_WORKER_VERSION == "1.11.4"
     assert module._APK_IDENTITY_MODULE is None
     assert bootstrap_core.stat().st_size > 512 * 1024
     assert (ROOT / "deploy/termux/phone-worker/phone_worker_bootstrap.py").stat().st_size < 256 * 1024
@@ -504,11 +504,11 @@ def test_ui_and_versions_expose_builder_state_without_vps_gradle() -> None:
     gradle = (ANDROID / "app/build.gradle").read_text(encoding="utf-8")
     workers = WORKERS_PATH.read_text(encoding="utf-8")
 
-    assert 'versionCode 129' in gradle
-    assert 'versionName "0.8.2"' in gradle
-    assert 'builderHeroText = smallText("Autobuild: verificando toolchain local")' in activity
+    assert 'versionCode 130' in gradle
+    assert 'versionName "0.8.3"' in gradle
+    assert 'prepareCard.addView(sectionTitle("Neste celular"))' in activity
     assert '"✅ Autobuild pronto' in activity
-    assert 'sectionTitle("Diagnóstico e manutenção")' in activity
+    assert 'technicalCard.addView(sectionTitle("Avançado"))' in activity
     assert 'bottomNavButton("⚙  Core")' in activity
     assert 'runtime_libraries.get("strategy") == "dt-needed-transitive-v1"' in builder
     assert '"manifestVersion": (legacy_v1 and manifest_version >= 7) or (external_v2 and manifest_version >= 2)' in builder

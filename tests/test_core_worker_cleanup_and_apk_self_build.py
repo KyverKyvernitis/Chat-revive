@@ -35,9 +35,9 @@ def read(path: Path) -> str:
 def test_cleanup_release_versions_are_monotonic() -> None:
     gradle = read(ANDROID / "app/build.gradle")
     phone = read(PHONE)
-    assert 'versionCode 130' in gradle
-    assert 'versionName "0.8.3"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.4"' in phone
+    assert 'versionCode 131' in gradle
+    assert 'versionName "0.8.4"' in gradle
+    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
 
 
 def test_core_screen_hides_internal_runtime_noise_and_manual_recovery() -> None:

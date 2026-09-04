@@ -470,6 +470,9 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "health": _safe_dict(record.get("health"), max_items=16, max_string=1024),
         "status": _safe_dict(record.get("status"), max_items=WORKER_STATUS_ITEM_LIMIT, max_string=WORKER_STATUS_STRING_LIMIT),
         "remote_addr": _short_text(record.get("remote_addr"), limit=WORKER_SHORT_FIELD_LIMIT),
+        "updater_last_delivery_at": record.get("updater_last_delivery_at"),
+        "updater_last_delivery_target_version": _short_text(record.get("updater_last_delivery_target_version"), limit=48),
+        "updater_last_delivery_target_hash": _short_text(record.get("updater_last_delivery_target_hash"), limit=WORKER_SHORT_FIELD_LIMIT),
     }
     return public
 

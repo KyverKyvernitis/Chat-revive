@@ -66,6 +66,7 @@ STATUS_PATH = ROOT / "data" / "core_worker_automation_status.json"
 STATE_PATH = ROOT / "data" / "core_worker_automation_state.json"
 LOCK_DIR = ROOT / "data" / "locks"
 APK_BUILD_MIN_BATTERY_PERCENT = 25
+APK_BUILDER_RECONNECT_GRACE_SECONDS = 120
 
 
 def _lock_key(value: str) -> str:
@@ -980,15 +981,19 @@ def _active_job_exists(*, job_type: str, target_worker_id: str = "", summary_con
     return False
 
 
-def _worker_supports(worker: dict[str, Any], task: str, required_capability: str = "phone-worker") -> bool:
-    if not worker.get("online"):
-        return False
+def _worker_declares_support(worker: dict[str, Any], task: str, required_capability: str = "phone-worker") -> bool:
     roles = {str(item) for item in worker.get("roles") or []}
     caps = {str(item) for item in worker.get("capabilities") or []} | roles
     tasks = {str(item).replace("-", "_") for item in worker.get("supported_tasks") or []}
     if required_capability and required_capability not in caps:
         return False
     return not tasks or task in tasks
+
+
+def _worker_supports(worker: dict[str, Any], task: str, required_capability: str = "phone-worker") -> bool:
+    if not worker.get("online"):
+        return False
+    return _worker_declares_support(worker, task, required_capability)
 
 
 def _worker_power_blocked(worker: dict[str, Any] | None, *, minimum_percent: int = APK_BUILD_MIN_BATTERY_PERCENT) -> bool:
@@ -1033,6 +1038,21 @@ def _worker_apk_builder_status(worker: dict[str, Any] | None) -> dict[str, Any]:
     return {}
 
 
+def _worker_recent_update_delivery_matches(
+    worker: dict[str, Any], target_version: str, target_source_hash: str, *, cooldown_seconds: float = 300.0
+) -> bool:
+    try:
+        delivered_at = float(worker.get("updater_last_delivery_at") or 0.0)
+    except (TypeError, ValueError):
+        delivered_at = 0.0
+    if delivered_at <= 0 or (time.time() - delivered_at) > max(30.0, float(cooldown_seconds)):
+        return False
+    delivered_version = str(worker.get("updater_last_delivery_target_version") or "").strip()
+    delivered_hash = str(worker.get("updater_last_delivery_target_hash") or "").strip().lower()
+    wanted_hash = str(target_source_hash or "").strip().lower()
+    return delivered_version == str(target_version or "").strip() and (not wanted_hash or delivered_hash == wanted_hash)
+
+
 def _worker_toolchain_fingerprint(worker: dict[str, Any] | None) -> str:
     preflight = _worker_apk_builder_status(worker)
     for value in (
@@ -1050,38 +1070,65 @@ def _worker_toolchain_fingerprint(worker: dict[str, Any] | None) -> str:
 def _select_apk_builder(
     snapshot: dict[str, Any], *, target_agent_version: str, target_agent_source_hash: str
 ) -> dict[str, Any]:
-    """Escolhe um builder concreto; runtime errado nunca recebe o build por acaso."""
+    """Escolhe um builder concreto e dá grace ao APK após restart da VPS/app."""
     workers = [item for item in snapshot.get("workers") or [] if isinstance(item, dict)]
     apk_candidates: list[dict[str, Any]] = []
+    apk_grace_candidates: list[dict[str, Any]] = []
     termux_candidates: list[dict[str, Any]] = []
+    try:
+        grace_seconds = max(15.0, min(300.0, float(os.getenv("CORE_WORKER_APK_BUILDER_RECONNECT_GRACE_SECONDS", APK_BUILDER_RECONNECT_GRACE_SECONDS) or APK_BUILDER_RECONNECT_GRACE_SECONDS)))
+    except Exception:
+        grace_seconds = float(APK_BUILDER_RECONNECT_GRACE_SECONDS)
+
     for worker in workers:
-        if worker.get("enabled") is False or not worker.get("online"):
-            continue
-        if not _worker_supports(worker, "apk_build_debug", "apk-builder"):
+        if worker.get("enabled") is False:
             continue
         worker_id = str(worker.get("worker_id") or "").strip()
         if not worker_id:
             continue
-        if _worker_power_blocked(worker):
-            continue
         runtime_kind = str(worker.get("runtime_kind") or "").strip().lower()
         source = str(worker.get("source") or "").strip().lower()
         is_apk = runtime_kind == "apk" or source.startswith("core-worker-apk")
+        is_online = bool(worker.get("online"))
+
         if is_apk:
+            if not _worker_declares_support(worker, "apk_build_debug", "apk-builder"):
+                continue
             preflight = _worker_apk_builder_status(worker)
             app_code = int(preflight.get("appVersionCode") or worker.get("appVersionCode") or worker.get("versionCode") or 0)
             fingerprint = _worker_toolchain_fingerprint(worker)
             if not preflight.get("ready") or app_code < 127 or not fingerprint:
                 continue
-            apk_candidates.append({
+            if _worker_power_blocked(worker):
+                continue
+            candidate = {
                 "worker": worker,
                 "worker_id": worker_id,
                 "runtime_kind": "apk",
                 "physical_worker_id": str(worker.get("physical_worker_id") or worker.get("parent_worker_id") or worker_id),
                 "toolchain_fingerprint": fingerprint,
                 "app_version_code": app_code,
-                "rank": (float(worker.get("last_seen") or 0), worker_id),
-            })
+                "rank": (float(worker.get("last_seen") or worker.get("last_heartbeat_at") or 0), worker_id),
+            }
+            if is_online:
+                apk_candidates.append(candidate)
+            else:
+                try:
+                    age = float(worker.get("last_seen_age_seconds"))
+                except (TypeError, ValueError):
+                    age = grace_seconds + 1.0
+                if age <= grace_seconds:
+                    candidate["wait_for_online"] = True
+                    candidate["reconnect_grace_seconds"] = grace_seconds
+                    candidate["last_seen_age_seconds"] = age
+                    apk_grace_candidates.append(candidate)
+            continue
+
+        if not is_online:
+            continue
+        if not _worker_supports(worker, "apk_build_debug", "apk-builder"):
+            continue
+        if _worker_power_blocked(worker):
             continue
         if not _is_termux_bootstrap_worker(worker):
             continue
@@ -1097,13 +1144,13 @@ def _select_apk_builder(
             "physical_worker_id": worker_id,
             "toolchain_fingerprint": _worker_toolchain_fingerprint(worker),
             "agent_source_hash": _worker_source_hash(worker),
-            "rank": (float(worker.get("last_seen") or 0), worker_id),
+            "rank": (float(worker.get("last_seen") or worker.get("last_heartbeat_at") or 0), worker_id),
         })
 
-    # Quando o APK já possui toolchain validado, ele recebe a oportunidade de
-    # homologar o self-build. O Termux não é removido: continua como fallback.
     if apk_candidates:
         return sorted(apk_candidates, key=lambda item: item["rank"], reverse=True)[0]
+    if apk_grace_candidates:
+        return sorted(apk_grace_candidates, key=lambda item: item["rank"], reverse=True)[0]
     if termux_candidates:
         return sorted(termux_candidates, key=lambda item: item["rank"], reverse=True)[0]
     return {}
@@ -1394,6 +1441,9 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
         current_version = str(worker.get("version") or "")
         if not _worker_needs_agent_update(worker, target_version, target_source_hash, force=force):
             skipped.append(f"{name}: já em {current_version} com a fonte esperada")
+            continue
+        if not force and _worker_recent_update_delivery_matches(worker, target_version, target_source_hash):
+            skipped.append(f"{name}: update entregue; aguardando heartbeat confirmar runtime")
             continue
         direct_worker_id = str(direct_update.get("worker_id") or "").strip()
         if (
@@ -2138,6 +2188,24 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         target_agent_version=target_agent_version,
         target_agent_source_hash=target_agent_source_hash,
     )
+    if builder and builder.get("wait_for_online"):
+        item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
+        item.update({
+            "ok": True,
+            "pending": True,
+            "transient": True,
+            "error": "",
+            "phase": "waiting_apk_builder",
+            "preferredBuilderWorkerId": str(builder.get("worker_id") or ""),
+            "preferredBuilderRuntimeKind": "apk",
+            "reconnectGraceSeconds": int(float(builder.get("reconnect_grace_seconds") or APK_BUILDER_RECONNECT_GRACE_SECONDS)),
+            "updated_at": time.time(),
+            "message": "APK builder pronto acabou de desconectar; aguardando heartbeat antes de usar o Termux fallback",
+        })
+        pending["apk_build"] = item
+        _save_pending(pending)
+        return item
+
     if not builder:
         workers = [item for item in snapshot.get("workers") or [] if isinstance(item, dict)]
         waiting_agent = _registered_workers_need_agent_version(

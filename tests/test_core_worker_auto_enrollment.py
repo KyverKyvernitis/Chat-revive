@@ -173,9 +173,9 @@ def test_normal_ui_prefers_automatic_enrollment_over_core_code():
 def test_versions_advance_for_auto_enrollment_protocol():
     gradle = GRADLE.read_text(encoding="utf-8")
     phone = PHONE_WORKER_PATH.read_text(encoding="utf-8")
-    assert 'versionCode 130' in gradle
-    assert 'versionName "0.8.3"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.4"' in phone
+    assert 'versionCode 131' in gradle
+    assert 'versionName "0.8.4"' in gradle
+    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
 
 
 def test_discord_panel_uses_manual_pairing_only_as_recovery():
@@ -183,7 +183,7 @@ def test_discord_panel_uses_manual_pairing_only_as_recovery():
     assert 'label="Parear celular"' not in workers
     assert 'Recovery de pareamento' in workers
     assert 'Código manual excepcional' in workers
-    assert 'O fluxo normal do APK 0.8.3+ é automático e não usa código.' in workers
+    assert 'O fluxo normal do APK 0.8.4+ é automático e não usa código.' in workers
 
 
 def test_auto_enrollment_does_not_require_vps_url_embedded_in_apk():

@@ -3375,7 +3375,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             runtime_parts: list[str] = []
             if apk is not None:
                 apk_caps = {str(item) for item in apk.get("capabilities") or []}
-                apk_version = _agent_version_label(apk.get("version"))
+                apk_version = _shorten(apk.get("version") or "sem versão", limit=24)
                 apk_state = "principal" if apk.get("online") and "apk-builder" in apk_caps else ("online" if apk.get("online") else "offline")
                 runtime_parts.append(f"APK `{apk_version}` · {apk_state}")
             if parent is not None:
@@ -3386,13 +3386,13 @@ class WorkersPanelView(discord.ui.LayoutView):
                 lines.append("**Runtimes:** " + " · ".join(runtime_parts))
 
             lines.append(f"**Aparelho:** {_battery_text(preferred)} · {_simple_network_text(preferred)}")
-            queue_text = _queue_status_text(preferred)
-            if queue_text:
-                lines.append(f"**Fila:** {queue_text}")
+            if len(members) <= 1:
+                queue_text = _queue_status_text(preferred)
+                if queue_text:
+                    lines.append(f"**Fila:** {queue_text}")
             model = str((apk or {}).get("name") or "").strip()
             if model and model.lower() != name.lower():
                 lines.append(f"-# Modelo: {model}")
-            lines.append("-# APK e Termux são tratados como um único celular; o runtime é escolhido automaticamente.")
         elif self._selected_is_legacy():
             version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
             lines[0] = f"## 🟢 {_shorten(snapshot.name or 'phone-worker direto', limit=36)}"
@@ -3681,7 +3681,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 "## 🔐 Recovery manual de pareamento\n"
                 f"**Código:** `{code}` · expira em `{expires}`\n"
                 f"**Nome:** `{default_name}` · **perfil:** `{default_profile}`\n\n"
-                "O fluxo normal do APK 0.8.3+ é automático e não usa código. Use este recovery apenas se o enrollment parent → child não conseguir concluir.\n\n"
+                "O fluxo normal do APK 0.8.4+ é automático e não usa código. Use este recovery apenas se o enrollment parent → child não conseguir concluir.\n\n"
                 "**No APK Core Worker:** abra a área de recovery manual, informe o código e confirme a VPS.\n\n"
                 f"Funções desse perfil: `{_shorten(profile_roles, limit=220)}`\n"
                 "-# O token do Termux não é compartilhado com o APK no fluxo automático."

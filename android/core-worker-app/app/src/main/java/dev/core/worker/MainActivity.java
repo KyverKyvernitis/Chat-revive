@@ -178,6 +178,8 @@ public class MainActivity extends Activity {
     private LinearLayout bedrockTerminalCard;
     private Dialog bedrockFullTerminalDialog;
     private TextView bedrockFullTerminalText;
+    private volatile boolean fullStartupDone = false;
+    private volatile boolean activityDestroyed = false;
     private final Runnable bedrockFullTerminalRefreshRunnable = new Runnable() {
         @Override
         public void run() {
@@ -249,7 +251,6 @@ public class MainActivity extends Activity {
     private Button profileToggleButton;
     private boolean profileExpanded = false;
     private boolean pairingRecoveryExpanded = false;
-    private volatile boolean fullStartupDone = false;
     private volatile boolean startupFallbackVisible = false;
     private final AtomicBoolean completingStartup = new AtomicBoolean(false);
     private final AtomicBoolean backgroundStartupStarted = new AtomicBoolean(false);
@@ -258,7 +259,6 @@ public class MainActivity extends Activity {
     private final AtomicBoolean internalLightJobsFetchRunning = new AtomicBoolean(false);
     private static final long ACTIVITY_RESUME_SYNC_DEBOUNCE_MS = 60_000L;
     private volatile long activityResumeSyncLastAt = 0L;
-    private volatile boolean activityDestroyed = false;
 
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";

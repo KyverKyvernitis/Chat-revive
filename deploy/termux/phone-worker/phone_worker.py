@@ -101,7 +101,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.4"
+PHONE_WORKER_VERSION = "1.11.5"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1612,6 +1612,12 @@ def _post_core_worker_job_result_payload_status(payload: dict[str, Any], *, time
 def _post_core_worker_job_result_payload(payload: dict[str, Any], *, timeout: float = 8.0) -> bool:
     ok, _code, _data = _post_core_worker_job_result_payload_status(payload, timeout=timeout)
     return ok
+
+
+def _pending_core_job_result_count() -> int:
+    _load_persisted_pending_core_job_results()
+    with _CORE_JOB_LOCK:
+        return len(_PENDING_CORE_JOB_RESULTS)
 
 
 def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
@@ -11232,6 +11238,11 @@ def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max
     if not worker_id:
         return False
     _flush_pending_core_worker_job_results(timeout=timeout)
+    # Não aceite outro job enquanto o resultado final do anterior ainda não foi
+    # confirmado pela VPS. Isso impede que um build terminado/falhado continue
+    # `running` no registry enquanto worker_update/restart toma o processo.
+    if _pending_core_job_result_count():
+        return False
     payload = _core_worker_payload(host=host, port=port)
     code, data = _post_core_worker_json("/core-worker/jobs/poll", payload, timeout=timeout)
     if not (200 <= code < 300):

@@ -35,8 +35,8 @@ def read(path: Path) -> str:
 def test_cleanup_release_versions_are_monotonic() -> None:
     gradle = read(ANDROID / "app/build.gradle")
     phone = read(PHONE)
-    assert 'versionCode 131' in gradle
-    assert 'versionName "0.8.4"' in gradle
+    assert 'versionCode 132' in gradle
+    assert 'versionName "0.8.5"' in gradle
     assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
 
 

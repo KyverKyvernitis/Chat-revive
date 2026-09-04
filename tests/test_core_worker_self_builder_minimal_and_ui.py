@@ -504,8 +504,8 @@ def test_ui_and_versions_expose_builder_state_without_vps_gradle() -> None:
     gradle = (ANDROID / "app/build.gradle").read_text(encoding="utf-8")
     workers = WORKERS_PATH.read_text(encoding="utf-8")
 
-    assert 'versionCode 131' in gradle
-    assert 'versionName "0.8.4"' in gradle
+    assert 'versionCode 132' in gradle
+    assert 'versionName "0.8.5"' in gradle
     assert 'prepareCard.addView(sectionTitle("Neste celular"))' in activity
     assert '"✅ Autobuild pronto' in activity
     assert 'technicalCard.addView(sectionTitle("Avançado"))' in activity

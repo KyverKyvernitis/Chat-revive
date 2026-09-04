@@ -64,8 +64,8 @@ def termux_worker() -> dict:
 def test_release_versions_advance_after_failed_083_source() -> None:
     gradle = GRADLE.read_text(encoding="utf-8")
     phone = PHONE.read_text(encoding="utf-8")
-    assert 'versionCode 131' in gradle
-    assert 'versionName "0.8.4"' in gradle
+    assert 'versionCode 132' in gradle
+    assert 'versionName "0.8.5"' in gradle
     assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
 
 

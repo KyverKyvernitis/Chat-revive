@@ -1,4 +1,4 @@
-# Core Worker 0.8.4 — hotfix de compilação + self-build preferencial
+# Core Worker 0.8.5 — executor durável + self-build confiável
 
 ## Interface Core simplificada
 
@@ -7,7 +7,7 @@ A página Core agora mostra apenas o que afeta o uso diário: conexão, disponib
 O estado do autobuild acompanha as mudanças persistidas em segundo plano; não é mais necessário tocar em **Sincronizar** para a faixa mudar de preparando para pronto.
 
 
-A versão `0.8.4` (`versionCode 131`) remove o código `CORE-XXXX` do fluxo normal do APK. O APK privado recebe no build apenas `parent_worker_id` e `sourceFingerprint` não secretos. No primeiro boot ele abre um challenge efêmero somente em loopback na porta 8767; o Termux 1.11.5 já autenticado valida esse challenge, pede à VPS uma credencial exclusiva para `<parent>-apk` e a entrega de volta pelo loopback. O token do Termux nunca é copiado para o APK. Reinstalações rotacionam a credencial do mesmo `<parent>-apk` em vez de criar IDs novos. O pareamento manual permanece somente como recovery legado.
+A versão `0.8.5` (`versionCode 132`) mantém o fluxo normal sem `CORE-XXXX` e endurece a execução autônoma do builder. O APK privado recebe no build apenas `parent_worker_id` e `sourceFingerprint` não secretos. No primeiro boot ele abre um challenge efêmero somente em loopback na porta 8767; o Termux 1.11.5 já autenticado valida esse challenge, pede à VPS uma credencial exclusiva para `<parent>-apk` e a entrega de volta pelo loopback. O token do Termux nunca é copiado para o APK. Reinstalações rotacionam a credencial do mesmo `<parent>-apk` em vez de criar IDs novos. O pareamento manual permanece somente como recovery legado.
 
 Depois do enrollment, o APK inicia automaticamente o download/validação do toolchain externo e só anuncia `apk-builder` após os smokes existentes. Rootfs/Bedrock continuam subsistemas separados e não são requisito para o autobuilder.
 
@@ -808,3 +808,7 @@ A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o 
 - O catálogo de 44 jobs seguros foi centralizado em `CoreWorkerJobCatalog`, evitando divergência entre Activity, serviço e heartbeat periódico.
 - Um stop explícito grava `agent_enabled=false` e não é revertido automaticamente por boot, FCM ou reabertura do app. A reativação acontece pelo controle do runtime ou por novo pareamento.
 - Esta etapa não libera shell arbitrário, Bedrock, Box64 real ou os jobs pesados ainda dependentes de binários/serviços externos.
+
+## Executor durável de jobs no APK
+
+A partir do 0.8.5, `apk_build_debug` é persistido localmente antes da execução, renova lease/progresso durante builds longos e publica `active_job_id` no heartbeat. Se o serviço Android reiniciar no meio do build, o APK solicita requeue autenticado em vez de deixar um lease fantasma. A VPS também impede um segundo job no mesmo runtime e reconcilia automaticamente um `running` que o APK vivo deixou de reconhecer. Estados transitórios de `toolchainSmoke` aguardam revalidação antes de virar falha final.

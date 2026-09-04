@@ -2357,7 +2357,7 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
             required_capabilities=["apk-builder"],
             ttl_seconds=7200,
             lease_seconds=7200,
-            max_attempts=1,
+            max_attempts=2,
             summary=f"build automático APK {version_name} {source_fingerprint[:12]}",
         )
         pending = _load_pending()

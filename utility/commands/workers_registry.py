@@ -26,6 +26,9 @@ WORKER_SHORT_FIELD_LIMIT = 64
 WORKER_SUPPORTED_TASK_LIMIT = 96
 WORKER_STATUS_ITEM_LIMIT = 48
 WORKER_STATUS_STRING_LIMIT = 1024
+DEFAULT_APK_EXECUTOR_STALE_GRACE_SECONDS = 90
+DEFAULT_APK_EXECUTOR_MISMATCH_CONFIRM_SECONDS = 45
+DEFAULT_APK_EXECUTOR_RECOVERY_LIMIT = 1
 
 # Campos binários autenticados precisam ultrapassar o limite de texto comum.
 # O limite maior é aplicado somente ao payload de jobs, nunca a heartbeat,
@@ -396,6 +399,10 @@ def _compact_job_public(record: Mapping[str, Any], *, include_result: bool = Fal
         "max_attempts": int(record.get("max_attempts") or 1),
         "expires_at": record.get("expires_at"),
         "lease_until": record.get("lease_until"),
+        "progress_stage": _short_text(record.get("progress_stage"), limit=WORKER_SHORT_FIELD_LIMIT),
+        "progress": record.get("progress"),
+        "progress_summary": _short_text(record.get("progress_summary"), limit=160),
+        "executor_recoveries": int(record.get("executor_recoveries") or 0),
         "summary": _short_text(record.get("summary"), limit=160),
         "error": _short_text(record.get("error"), limit=180),
     }
@@ -1165,11 +1172,21 @@ class CoreWorkersRegistry:
         return {"ok": True, "worker_id": worker_id, "worker": public}
 
     def _reconcile_jobs_from_worker_status_unlocked(self, data: dict[str, Any], *, now: float | None = None) -> int:
-        """Fecha jobs ativos quando o worker informa último resultado no status."""
+        """Reconcilia resultados finais e leases APK perdidos a partir do heartbeat.
+
+        O APK publica `core_worker_jobs.active_job_id` de forma durável. Se a VPS
+        ainda considera um build `running`, mas o APK vivo deixa de reconhecer
+        esse job por uma janela confirmada, o lease é reencaminhado uma vez em
+        vez de permanecer fantasma por até duas horas.
+        """
         ts = _now() if now is None else float(now)
         jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
         workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+        grace = max(30, min(600, _env_int("CORE_WORKER_APK_EXECUTOR_STALE_GRACE_SECONDS", DEFAULT_APK_EXECUTOR_STALE_GRACE_SECONDS)))
+        confirm = max(15, min(300, _env_int("CORE_WORKER_APK_EXECUTOR_MISMATCH_CONFIRM_SECONDS", DEFAULT_APK_EXECUTOR_MISMATCH_CONFIRM_SECONDS)))
+        recovery_limit = max(0, min(3, _env_int("CORE_WORKER_APK_EXECUTOR_RECOVERY_LIMIT", DEFAULT_APK_EXECUTOR_RECOVERY_LIMIT)))
         changed = 0
+
         for worker_id, worker in workers.items():
             if not isinstance(worker, dict):
                 continue
@@ -1177,34 +1194,135 @@ class CoreWorkersRegistry:
             queue = status.get("core_worker_jobs") if isinstance(status.get("core_worker_jobs"), Mapping) else {}
             if not queue:
                 continue
-            job_id = _short_text(queue.get("last_result_job_id") or queue.get("last_completed_job_id"), limit=WORKER_SHORT_FIELD_LIMIT)
+
+            # 1) Resultado final informado pelo worker fecha o job mesmo se o POST
+            # direto de resultado se perdeu durante uma troca de processo/rede.
+            result_job_id = _short_text(queue.get("last_result_job_id") or queue.get("last_completed_job_id"), limit=WORKER_SHORT_FIELD_LIMIT)
             final_status = str(queue.get("last_result_status") or queue.get("last_completed_status") or "").strip().lower()
-            if not job_id or final_status not in {"succeeded", "failed"}:
+            if result_job_id and final_status in {"succeeded", "failed"}:
+                job = jobs.get(result_job_id)
+                if isinstance(job, dict):
+                    current = str(job.get("status") or "queued").strip().lower()
+                    assigned = str(job.get("worker_id") or job.get("target_worker_id") or "")
+                    if current in {"queued", "running"} and (not assigned or assigned == str(worker_id)):
+                        summary = _short_text(queue.get("last_result_summary") or job.get("summary") or final_status, limit=160)
+                        finished_at = queue.get("last_result_at") or queue.get("last_completed_at") or ts
+                        job["status"] = final_status
+                        job["worker_id"] = str(worker_id)
+                        job["lease_until"] = 0
+                        job["finished_at"] = finished_at
+                        job["updated_at"] = ts
+                        job.pop("executor_missing_since", None)
+                        if summary:
+                            job["summary"] = summary
+                        if final_status == "failed" and not job.get("error"):
+                            job["error"] = summary or "worker informou falha"
+                        if not isinstance(job.get("result"), Mapping) or not job.get("result"):
+                            job["result"] = {"ok": final_status == "succeeded", "summary": summary, "recovered_from_worker_status": True}
+                        jobs[result_job_id] = job
+                        changed += 1
+
+            # 2) Somente runtimes APK usam active_job persistido para detectar
+            # executor perdido. Termux possui outro protocolo de supervisor.
+            runtime_kind = str(worker.get("runtime_kind") or "").strip().lower()
+            source = str(worker.get("source") or "").strip().lower()
+            if runtime_kind != "apk" and not source.startswith("core-worker-apk"):
                 continue
-            job = jobs.get(job_id)
-            if not isinstance(job, dict):
-                continue
-            current = str(job.get("status") or "queued").strip().lower()
-            if current not in {"queued", "running"}:
-                continue
-            assigned = str(job.get("worker_id") or job.get("target_worker_id") or "")
-            if assigned and assigned != str(worker_id):
-                continue
-            summary = _short_text(queue.get("last_result_summary") or job.get("summary") or final_status, limit=160)
-            finished_at = queue.get("last_result_at") or queue.get("last_completed_at") or ts
-            job["status"] = final_status
-            job["worker_id"] = str(worker_id)
-            job["lease_until"] = 0
-            job["finished_at"] = finished_at
-            job["updated_at"] = ts
-            if summary:
-                job["summary"] = summary
-            if final_status == "failed" and not job.get("error"):
-                job["error"] = summary or "worker informou falha"
-            if not isinstance(job.get("result"), Mapping) or not job.get("result"):
-                job["result"] = {"ok": final_status == "succeeded", "summary": summary, "recovered_from_worker_status": True}
-            jobs[job_id] = job
-            changed += 1
+
+            active_job_id = _short_text(queue.get("active_job_id"), limit=WORKER_SHORT_FIELD_LIMIT)
+            active_stage = _short_text(queue.get("active_job_stage"), limit=WORKER_SHORT_FIELD_LIMIT)
+            capabilities = set(normalize_roles(worker.get("capabilities"), limit=WORKER_CAPABILITY_LIMIT))
+            durable_executor = "apk-durable-jobs-v1" in capabilities
+            legacy_last_job_id = _short_text(queue.get("last_job_id"), limit=WORKER_SHORT_FIELD_LIMIT)
+            try:
+                legacy_last_poll_at = float(queue.get("last_poll_at") or 0.0)
+            except (TypeError, ValueError):
+                legacy_last_poll_at = 0.0
+            try:
+                pending_results = max(0, int(queue.get("pending_result_count") or 0))
+            except (TypeError, ValueError):
+                pending_results = 0
+
+            for jid, job in list(jobs.items()):
+                if not isinstance(job, dict):
+                    continue
+                if str(job.get("status") or "") != "running" or str(job.get("worker_id") or "") != str(worker_id):
+                    continue
+                if _normalize_job_type(job.get("type")) not in {"apk_build_debug", "apk_publish_last"}:
+                    continue
+                if durable_executor and jid == active_job_id:
+                    if job.pop("executor_missing_since", None) is not None:
+                        changed += 1
+                    if active_stage:
+                        job["progress_stage"] = active_stage
+                    continue
+                if jid == result_job_id and final_status in {"succeeded", "failed"}:
+                    continue
+                if pending_results > 0:
+                    # Resultado já está persistido no APK; dê tempo para o outbox.
+                    continue
+                job_updated_at = float(job.get("updated_at") or job.get("started_at") or ts)
+                age = max(0.0, ts - job_updated_at)
+                if durable_executor:
+                    if age < grace:
+                        continue
+                else:
+                    # APKs anteriores ao protocolo durable não publicam active_job.
+                    # Só declare o lease fantasma se o próprio registry comprovar
+                    # que esse runtime já buscou/terminou outro job depois dele.
+                    moved_on = bool(
+                        legacy_last_job_id
+                        and legacy_last_job_id != jid
+                        and legacy_last_poll_at > job_updated_at + confirm
+                    ) or bool(
+                        result_job_id
+                        and result_job_id != jid
+                        and float(queue.get("last_result_at") or 0.0) > job_updated_at + confirm
+                    )
+                    if not moved_on:
+                        continue
+                missing_since = float(job.get("executor_missing_since") or 0.0)
+                if missing_since <= 0.0:
+                    job["executor_missing_since"] = ts
+                    job["progress_stage"] = "executor_missing"
+                    job["progress_summary"] = "APK online não reconhece mais este job; aguardando confirmação"
+                    jobs[jid] = job
+                    changed += 1
+                    continue
+                if ts - missing_since < confirm:
+                    continue
+
+                recoveries = int(job.get("executor_recoveries") or 0)
+                attempts = int(job.get("attempts") or 0)
+                max_attempts = int(job.get("max_attempts") or 1)
+                expires_at = float(job.get("expires_at") or 0.0)
+                can_requeue = recoveries < recovery_limit and attempts < max_attempts and (not expires_at or expires_at > ts)
+                if can_requeue:
+                    job["status"] = "queued"
+                    job["worker_id"] = ""
+                    job["lease_until"] = 0
+                    job["updated_at"] = ts
+                    job["executor_recoveries"] = recoveries + 1
+                    job["last_executor_error"] = "executor_lost_job"
+                    job["progress_stage"] = "requeued_after_executor_loss"
+                    job["progress_summary"] = "job reencaminhado porque o APK perdeu o executor ativo"
+                    job["preferred_worker_id"] = str(worker_id)
+                    job["preferred_until"] = ts + 120.0
+                    job.pop("executor_missing_since", None)
+                    job["error"] = ""
+                else:
+                    job["status"] = "failed"
+                    job["lease_until"] = 0
+                    job["finished_at"] = ts
+                    job["updated_at"] = ts
+                    job["error"] = "executor_lost_job: APK online perdeu o job ativo"
+                    job["failure_category"] = "transient"
+                    job["retryable"] = True
+                    job["progress_stage"] = "executor_lost"
+                    job.pop("executor_missing_since", None)
+                jobs[jid] = job
+                changed += 1
+
         data["jobs"] = jobs
         return changed
 
@@ -1486,6 +1604,31 @@ class CoreWorkersRegistry:
             self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
             workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+
+            # Um runtime não pode receber um segundo job enquanto a VPS ainda
+            # possui um lease `running` para ele. Isso evita divergência entre
+            # registry e executor local após restart/crash.
+            running_assigned = [
+                job for job in jobs.values()
+                if isinstance(job, dict)
+                and str(job.get("status") or "") == "running"
+                and str(job.get("worker_id") or "") == worker_id
+            ]
+            if running_assigned:
+                status_dict = _worker_status_dict(worker)
+                queue_status = status_dict.get("core_worker_jobs") if isinstance(status_dict.get("core_worker_jobs"), dict) else {}
+                active = sorted(running_assigned, key=lambda item: float(item.get("started_at") or item.get("created_at") or 0.0))[0]
+                queue_status.update({
+                    "last_poll_at": ts,
+                    "last_poll_worker_id": worker_id,
+                    "last_poll_state": "busy_running_job",
+                    "last_poll_reason": f"aguardando conclusão de {active.get('job_id')}",
+                })
+                status_dict["core_worker_jobs"] = queue_status
+                data["workers"][worker_id] = worker
+                self._save_unlocked(data)
+                return {"ok": True, "worker_id": worker_id, "job": None, "busy_job_id": str(active.get("job_id") or "")}
+
             candidates = sorted(
                 [job for job in jobs.values() if isinstance(job, dict) and str(job.get("status") or "queued") == "queued"],
                 key=lambda job: float(job.get("created_at") or 0.0),
@@ -1535,6 +1678,7 @@ class CoreWorkersRegistry:
                 selected["lease_until"] = ts + lease
                 selected["started_at"] = selected.get("started_at") or ts
                 selected["updated_at"] = ts
+                selected.pop("executor_missing_since", None)
                 jobs[str(selected.get("job_id"))] = selected
                 queue_status.update({
                     "last_poll_state": "delivered",
@@ -1587,9 +1731,47 @@ class CoreWorkersRegistry:
             worker_id, worker = self._authenticate_worker_unlocked(data, worker_id=worker_id_from_payload, token=token)
             if str(job.get("worker_id") or "") != worker_id or str(job.get("status") or "") != "running":
                 raise CoreWorkerRegistryError("job não está leased para este worker", status=409)
+            action = str(payload.get("action") or "").strip().lower()
+            if action in {"abandon", "requeue", "executor_lost"}:
+                recoveries = int(job.get("executor_recoveries") or 0)
+                attempts = int(job.get("attempts") or 0)
+                max_attempts = int(job.get("max_attempts") or 1)
+                expires_at = float(job.get("expires_at") or 0.0)
+                limit = max(0, min(3, _env_int("CORE_WORKER_APK_EXECUTOR_RECOVERY_LIMIT", DEFAULT_APK_EXECUTOR_RECOVERY_LIMIT)))
+                can_requeue = recoveries < limit and attempts < max_attempts and (not expires_at or expires_at > ts)
+                summary = _short_text(payload.get("summary") or "executor APK abandonou o job", limit=160)
+                if can_requeue:
+                    job["status"] = "queued"
+                    job["worker_id"] = ""
+                    job["lease_until"] = 0
+                    job["updated_at"] = ts
+                    job["executor_recoveries"] = recoveries + 1
+                    job["last_executor_error"] = "executor_restarted"
+                    job["progress_stage"] = "requeued_after_executor_restart"
+                    job["progress_summary"] = summary
+                    job["preferred_worker_id"] = worker_id
+                    job["preferred_until"] = ts + 120.0
+                    job.pop("executor_missing_since", None)
+                    job["error"] = ""
+                else:
+                    job["status"] = "failed"
+                    job["lease_until"] = 0
+                    job["finished_at"] = ts
+                    job["updated_at"] = ts
+                    job["error"] = "executor_lost_job: " + (summary or "APK reiniciou durante o job")
+                    job["failure_category"] = "transient"
+                    job["retryable"] = True
+                worker["updated_at"] = ts
+                worker["last_heartbeat_at"] = ts
+                data["workers"][worker_id] = worker
+                jobs[job_id] = job
+                data["jobs"] = jobs
+                self._save_unlocked(data)
+                return {"ok": True, "worker_id": worker_id, "requeued": can_requeue, "job": _compact_job_public(job, include_result=False, now=ts)}
             lease = max(10, min(7200, int(job.get("lease_seconds") or DEFAULT_JOB_LEASE_SECONDS)))
             job["lease_until"] = ts + lease
             job["updated_at"] = ts
+            job.pop("executor_missing_since", None)
             stage = _short_text(payload.get("stage"), limit=WORKER_SHORT_FIELD_LIMIT)
             progress = payload.get("progress")
             if stage:

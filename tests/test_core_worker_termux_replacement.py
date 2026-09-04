@@ -69,12 +69,12 @@ def _worker_record(*, worker_id: str, token: str, apk: bool, ready: bool) -> dic
 
 def test_version_marks_bootstrap_to_self_builder_release() -> None:
     gradle = read(ANDROID / "app/build.gradle")
-    assert "versionCode 131" in gradle
-    assert 'versionName "0.8.4"' in gradle
+    assert "versionCode 132" in gradle
+    assert 'versionName "0.8.5"' in gradle
     assert "def coreWorkerSelfBuilderTargetSdk = 28" in gradle
     assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
     assert "verifyCoreWorkerSelfBuilderTargetSdk" in gradle
-    assert read(ANDROID / "README.md").startswith("# Core Worker 0.8.4")
+    assert read(ANDROID / "README.md").startswith("# Core Worker 0.8.5")
 
 
 def test_android_runtime_has_no_legacy_termux_protocol_or_package_dependency() -> None:

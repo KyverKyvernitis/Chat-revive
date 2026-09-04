@@ -59,6 +59,8 @@ final class CoreWorkerApkBuildManager {
     private static final long PERSISTED_READY_MAX_MS = TimeUnit.MINUTES.toMillis(5);
     private static final long MAX_TOOLCHAIN_EXPANDED_BYTES = 4L * 1024L * 1024L * 1024L;
     private static final int MAX_TOOLCHAIN_ENTRIES = 50_000;
+    private static final long BUILD_PREFLIGHT_WAIT_MS = TimeUnit.MINUTES.toMillis(4);
+    private static final long BUILD_PREFLIGHT_RETRY_MS = 2500L;
 
     private static volatile JSONObject cachedPreflight;
     private static volatile long cachedPreflightAt;
@@ -81,8 +83,9 @@ final class CoreWorkerApkBuildManager {
     static JSONArray availableTasks(Context context) {
         JSONArray out = new JSONArray().put("apk_builder_status");
         JSONObject preflight = preflight(context, false);
-        if (preflight.optBoolean("ready", false)) out.put("apk_build_debug");
-        if (preflight.optBoolean("ready", false) || preflight.optBoolean("publishReady", false)) {
+        boolean dispatchReady = readyForJobDispatch(context, preflight);
+        if (dispatchReady) out.put("apk_build_debug");
+        if (dispatchReady || preflight.optBoolean("publishReady", false)) {
             out.put("apk_publish_last");
         }
         return out;
@@ -91,9 +94,11 @@ final class CoreWorkerApkBuildManager {
     static JSONArray dynamicCapabilities(Context context) {
         JSONArray out = new JSONArray();
         JSONObject preflight = preflight(context, false);
-        if (preflight.optBoolean("ready", false)) {
+        if (preflight.optBoolean("ready", false) && readyForJobDispatch(context, preflight)) {
             out.put("apk-builder");
             out.put("apk-self-builder");
+        } else if (preflight.optBoolean("ready", false)) {
+            out.put("apk-builder-installed");
         }
         if (preflight.optBoolean("publishReady", false)) out.put("apk-publisher");
         return out;
@@ -102,10 +107,24 @@ final class CoreWorkerApkBuildManager {
     static JSONArray dynamicRoles(Context context) {
         JSONArray out = new JSONArray();
         JSONObject preflight = preflight(context, false);
-        if (preflight.optBoolean("ready", false)) {
+        if (readyForJobDispatch(context, preflight)) {
             out.put("apk-builder");
         }
         return out;
+    }
+
+    static boolean readyForJobDispatch(Context context) {
+        return readyForJobDispatch(context, preflight(context, false));
+    }
+
+    private static boolean readyForJobDispatch(Context context, JSONObject preflight) {
+        if (context == null || preflight == null || !preflight.optBoolean("ready", false)) return false;
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        if (prefs.getInt("apk_self_builder_checked_version_code", 0) != BuildConfig.VERSION_CODE) return false;
+        String updateState = prefs.getString("apk_self_builder_toolchain_update_state", "").trim().toLowerCase(Locale.ROOT);
+        return !("toolchain_downloading".equals(updateState)
+                || "validating".equals(updateState)
+                || "verifying_runtime".equals(updateState));
     }
 
     static void refreshAsync(Context rawContext) {
@@ -174,12 +193,49 @@ final class CoreWorkerApkBuildManager {
         }
     }
 
+    private static JSONObject awaitBuildPreflight(Context context) {
+        long deadline = System.currentTimeMillis() + BUILD_PREFLIGHT_WAIT_MS;
+        JSONObject gate = preflight(context, true);
+        while (!gate.optBoolean("ready", false) && transientBuildGate(gate) && System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(BUILD_PREFLIGHT_RETRY_MS); }
+            catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            gate = preflight(context, true);
+        }
+        return gate;
+    }
+
+    private static boolean transientBuildGate(JSONObject gate) {
+        if (gate == null || gate.optBoolean("ready", false)) return false;
+        String state = gate.optString("state", "").toLowerCase(Locale.ROOT);
+        String update = gate.optString("toolchainUpdateState", "").toLowerCase(Locale.ROOT);
+        if (state.contains("refresh") || state.contains("waiting") || state.contains("preparing")
+                || update.contains("downloading") || update.contains("validating") || update.contains("verifying")) {
+            return true;
+        }
+        JSONArray missing = gate.optJSONArray("missing");
+        if (missing != null && missing.length() > 0) {
+            for (int i = 0; i < missing.length(); i++) {
+                String item = missing.optString(i, "");
+                if (!("toolchain".equals(item) || "toolchainSmoke".equals(item))) return false;
+            }
+            return true;
+        }
+        String summary = gate.optString("summary", "").toLowerCase(Locale.ROOT);
+        return summary.contains("toolchainsmoke") || summary.contains("toolchain smoke")
+                || summary.contains("aguardando toolchain");
+    }
+
     static JSONObject execute(Context rawContext, String type, JSONObject payload, String serverUrl) throws Exception {
         Context context = rawContext.getApplicationContext();
         if (!supports(type)) {
             return new JSONObject().put("ok", false).put("type", type).put("error", "task de autobuild não permitida");
         }
-        JSONObject gate = preflight(context, true);
+        JSONObject gate = "apk_build_debug".equals(type)
+                ? awaitBuildPreflight(context)
+                : preflight(context, true);
         if ("apk_build_debug".equals(type) && !gate.optBoolean("ready", false)) {
             return new JSONObject()
                     .put("ok", false)
@@ -187,7 +243,8 @@ final class CoreWorkerApkBuildManager {
                     .put("message", gate.optString("summary", "autobuilder não está pronto"))
                     .put("error", gate.optString("summary", "autobuilder não está pronto"))
                     .put("preflight", gate)
-                    .put("retryable", true);
+                    .put("retryable", transientBuildGate(gate))
+                    .put("preflightWaited", true);
         }
         if ("apk_publish_last".equals(type)
                 && !gate.optBoolean("ready", false)

@@ -10,16 +10,22 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
+import android.util.AtomicFile;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -29,6 +35,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -48,6 +55,13 @@ public class CoreWorkerRuntimeService extends Service {
     private static final long POLL_ERROR_BACKOFF_MIN_MS = 15L * 1000L;
     private static final long POLL_ERROR_BACKOFF_MAX_MS = 5L * 60L * 1000L;
     private static final long JOB_PROGRESS_INTERVAL_MS = 45L * 1000L;
+    private static final long AGENT_CYCLE_WAKELOCK_MS = 5L * 60L * 60L * 1000L;
+    // Maior que connectTimeout + readTimeout. Se não houver tempo para uma
+    // renovação completa, encerre o executor antes do lease remoto expirar.
+    private static final long LOCAL_LEASE_SAFETY_MS = 25L * 1000L;
+    private static final int PROGRESS_RETRY = 0;
+    private static final int PROGRESS_ACCEPTED = 1;
+    private static final int PROGRESS_OWNERSHIP_LOST = -1;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean running = false;
@@ -96,6 +110,7 @@ public class CoreWorkerRuntimeService extends Service {
         String action = intent == null ? ACTION_START : String.valueOf(intent.getAction());
         String reason = intent == null ? "foreground_start" : intent.getStringExtra("reason");
         if (ACTION_STOP.equals(action)) {
+            requestActiveBuildCancellation();
             running = false;
             handler.removeCallbacks(tickRunnable);
             stopDirectHttpServer();
@@ -169,6 +184,7 @@ public class CoreWorkerRuntimeService extends Service {
 
     @Override
     public void onDestroy() {
+        requestActiveBuildCancellation();
         running = false;
         handler.removeCallbacks(tickRunnable);
         stopDirectHttpServer();
@@ -181,6 +197,17 @@ public class CoreWorkerRuntimeService extends Service {
                 .putLong("foreground_runtime_last_tick_at", System.currentTimeMillis())
                 .apply();
         super.onDestroy();
+    }
+
+    private void requestActiveBuildCancellation() {
+        try {
+            JSONObject active = readActiveJob();
+            String jobId = active.optString("job_id", "").trim();
+            if (!jobId.isEmpty() && CoreWorkerApkBuildManager.supports(active.optString("type", ""))) {
+                CoreWorkerApkBuildManager.requestCancellation(
+                        getApplicationContext(), jobId, active.optInt("attempt", 1));
+            }
+        } catch (Throwable ignored) { }
     }
 
     @Override
@@ -316,7 +343,9 @@ public class CoreWorkerRuntimeService extends Service {
                 if (power != null) {
                     wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CoreWorker:AgentCycle");
                     wakeLock.setReferenceCounted(false);
-                    wakeLock.acquire(10L * 60L * 1000L);
+                    // Cobre preflight + Gradle + persistência/confirmação do
+                    // resultado. O lock interno do builder não deixa uma lacuna.
+                    wakeLock.acquire(AGENT_CYCLE_WAKELOCK_MS);
                 }
                 runAgentCycle(reason == null ? "background" : reason, force);
                 pollErrorBackoffMs = POLL_ERROR_BACKOFF_MIN_MS;
@@ -422,9 +451,29 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("job_id", jobId)
                 .put("type", jobType)
                 .put("attempt", remoteJob.optInt("attempts", 1))
+                .put("lease_token", remoteJob.optString("lease_token", ""))
+                .put("lease_until", remoteJob.optLong("lease_until", 0L))
+                .put("lease_local_deadline_ms", localLeaseDeadlineMillis(
+                        remoteJob.optDouble("lease_until", 0.0),
+                        body.optDouble("server_time", 0.0)))
                 .put("payload", remoteJob.optJSONObject("payload") == null ? new JSONObject() : remoteJob.optJSONObject("payload"));
-        persistActiveJob(job, "claimed", "job recebido da VPS");
-        postJobProgress(serverUrl, token, jobId, "claimed", 1.0, "job persistido localmente antes da execução", "");
+        if (!persistActiveJob(job, "claimed", "job recebido da VPS")) {
+            postJobProgress(serverUrl, token, jobId, "claim_persist_failed", 0.0,
+                    "active_job não pôde ser persistido; devolvendo lease sem executar", "abandon",
+                    remoteJob.optString("lease_token", ""));
+            throw new IllegalStateException("active_job não pôde ser persistido antes da execução");
+        }
+        int claimAcknowledged = postJobProgress(
+                serverUrl, token, jobId, "claimed", 1.0,
+                "job persistido localmente antes da execução", "");
+        if (claimAcknowledged == PROGRESS_OWNERSHIP_LOST) {
+            clearActiveJob(jobId);
+            state.putInt("internal_jobs_running_count", 0)
+                    .putString("internal_light_jobs_state", "claim revogado antes da execução")
+                    .putString("internal_jobs_queue_summary", "job não iniciado; ownership já não pertence ao APK")
+                    .apply();
+            return;
+        }
         state.putInt("internal_light_jobs_last_count", 1)
                 .putInt("internal_light_jobs_last_returned_count", 1)
                 .putInt("internal_jobs_running_count", 1)
@@ -434,7 +483,8 @@ public class CoreWorkerRuntimeService extends Service {
         if (existing != null && existing.isFile()) {
             persistActiveJob(job, "result_pending", "resultado local já existe; reenviando à VPS");
             JSONObject pending = normalizeStoredEnvelope(readJsonFile(existing));
-            if (postResultEnvelope(serverUrl, pending)) {
+            boolean resourcesReleased = finalizeEnvelopeBuildResources(pending);
+            if (postResultEnvelope(serverUrl, pending) && resourcesReleased) {
                 rememberCompletedJob(jobId);
                 existing.delete();
                 clearActiveJob(jobId);
@@ -462,7 +512,8 @@ public class CoreWorkerRuntimeService extends Service {
                                     : "executando job no APK", "");
                     if (CoreWorkerApkBuildManager.supports(jobType)) {
                         result = CoreWorkerApkBuildManager.execute(
-                                getApplicationContext(), jobType, job.optJSONObject("payload"), serverUrl);
+                                getApplicationContext(), jobType, job.optJSONObject("payload"), serverUrl,
+                                jobId, job.optInt("attempt", 1));
                     } else if (CoreWorkerJobCatalog.supports(jobType)) {
                         result = jobExecutor.execute(job, serverUrl);
                     } else if (CoreWorkerDirectTaskExecutor.supports(jobType)) {
@@ -478,31 +529,45 @@ public class CoreWorkerRuntimeService extends Service {
                             .put("error", shortThrowable(jobError)).put("message", "job falhou no agente do APK");
                 }
             }
+            // O lease permanece ativo também durante fsync/outbox/POST final.
+            result.put("durationMs", Math.max(0L, System.currentTimeMillis() - jobStartedAt));
+            result.put("attempt", remoteJob.optInt("attempts", 1));
+            JSONObject envelope = buildResultEnvelope(job, result);
+            File stored = persistOutbox(jobId, envelope);
+            if (stored == null || !stored.isFile()) {
+                throw new IllegalStateException("resultado final não pôde ser persistido na outbox");
+            }
+            if (!persistActiveJob(job, "result_pending", "resultado final persistido; aguardando confirmação da VPS")) {
+                throw new IllegalStateException("active_job não pôde registrar result_pending");
+            }
+            // A outbox já passou por fsync. Só agora o Python pode apagar o
+            // workdir com secrets e liberar o lock que protege esta tentativa.
+            boolean resourcesReleased = finalizeEnvelopeBuildResources(envelope);
+            postJobProgress(serverUrl, token, jobId, "result_pending", 99.0, "resultado final persistido localmente", "");
+            boolean sent = postResultEnvelope(serverUrl, envelope);
+            if (sent && resourcesReleased) {
+                stored.delete();
+                rememberCompletedJob(jobId);
+                clearActiveJob(jobId);
+            }
+            boolean ok = result.optBoolean("ok", false);
+            String summary = compact(result.optString("message", result.optString("error", ok ? "concluído" : "falhou")));
+            recordJobHistory(jobType, ok, summary);
+            prefs().edit()
+                    .putString("internal_light_jobs_state", (ok ? "concluído" : "falhou")
+                            + (sent && resourcesReleased ? "" : " · finalização pendente"))
+                    .putString("internal_light_jobs_last_summary", jobType + " · " + summary)
+                    .putInt("internal_jobs_running_count", 0)
+                    .putString("internal_jobs_queue_summary", sent
+                            ? (resourcesReleased ? "resultado confirmado" : "resultado confirmado · cleanup pendente")
+                            : "resultado salvo na outbox")
+                    .putString("agent_last_error", !resourcesReleased
+                            ? "resultado durável; lock/workdir aguardando liberação segura"
+                            : (sent ? "" : "resultado aguardando confirmação")).apply();
         } finally {
             leaseKeeperRunning.set(false);
             if (leaseKeeper != null) leaseKeeper.interrupt();
         }
-        result.put("durationMs", Math.max(0L, System.currentTimeMillis() - jobStartedAt));
-        result.put("attempt", remoteJob.optInt("attempts", 1));
-        JSONObject envelope = buildResultEnvelope(job, result);
-        File stored = persistOutbox(jobId, envelope);
-        persistActiveJob(job, "result_pending", "resultado final persistido; aguardando confirmação da VPS");
-        postJobProgress(serverUrl, token, jobId, "result_pending", 99.0, "resultado final persistido localmente", "");
-        boolean sent = postResultEnvelope(serverUrl, envelope);
-        if (sent) {
-            if (stored != null) stored.delete();
-            rememberCompletedJob(jobId);
-            clearActiveJob(jobId);
-        }
-        boolean ok = result.optBoolean("ok", false);
-        String summary = compact(result.optString("message", result.optString("error", ok ? "concluído" : "falhou")));
-        recordJobHistory(jobType, ok, summary);
-        prefs().edit()
-                .putString("internal_light_jobs_state", (ok ? "concluído" : "falhou") + (sent ? "" : " · resultado pendente"))
-                .putString("internal_light_jobs_last_summary", jobType + " · " + summary)
-                .putInt("internal_jobs_running_count", 0)
-                .putString("internal_jobs_queue_summary", sent ? "resultado confirmado" : "resultado salvo na outbox")
-                .putString("agent_last_error", sent ? "" : "resultado aguardando confirmação").apply();
     }
 
     private File activeJobFile() {
@@ -516,19 +581,23 @@ public class CoreWorkerRuntimeService extends Service {
         catch (Throwable ignored) { return new JSONObject(); }
     }
 
-    private synchronized void persistActiveJob(JSONObject job, String stage, String summary) {
+    private synchronized boolean persistActiveJob(JSONObject job, String stage, String summary) {
         try {
             String jobId = job == null ? "" : firstNonEmpty(job.optString("job_id", ""), job.optString("id", ""));
-            if (jobId.isEmpty()) return;
+            if (jobId.isEmpty()) return false;
             JSONObject previous = readActiveJob();
             long now = System.currentTimeMillis();
             long startedAt = jobId.equals(previous.optString("job_id", ""))
                     ? previous.optLong("started_at", now) : now;
             JSONObject value = new JSONObject()
-                    .put("schema", "core-worker-apk-active-job-v1")
+                    .put("schema", "core-worker-apk-active-job-v2")
                     .put("job_id", jobId)
                     .put("type", job.optString("type", ""))
                     .put("attempt", job.optInt("attempt", 1))
+                    .put("lease_token", firstNonEmpty(job.optString("lease_token", ""), previous.optString("lease_token", "")))
+                    .put("lease_until", job.optLong("lease_until", previous.optLong("lease_until", 0L)))
+                    .put("lease_local_deadline_ms", job.optLong(
+                            "lease_local_deadline_ms", previous.optLong("lease_local_deadline_ms", 0L)))
                     .put("stage", stage == null ? "running" : stage)
                     .put("summary", summary == null ? "" : compact(summary))
                     .put("started_at", startedAt)
@@ -536,18 +605,7 @@ public class CoreWorkerRuntimeService extends Service {
                     .put("app_version", BuildConfig.VERSION_NAME)
                     .put("app_version_code", BuildConfig.VERSION_CODE);
             File target = activeJobFile();
-            File temp = new File(target.getParentFile(), target.getName() + ".tmp");
-            try (FileOutputStream output = new FileOutputStream(temp, false)) {
-                output.write(value.toString().getBytes(StandardCharsets.UTF_8));
-                output.flush();
-            }
-            if (!temp.renameTo(target)) {
-                try (FileOutputStream output = new FileOutputStream(target, false)) {
-                    output.write(value.toString().getBytes(StandardCharsets.UTF_8));
-                    output.flush();
-                }
-                temp.delete();
-            }
+            if (!writeJsonAtomically(target, value)) return false;
             prefs().edit()
                     .putString("active_job_id", jobId)
                     .putString("active_job_type", job.optString("type", ""))
@@ -555,9 +613,13 @@ public class CoreWorkerRuntimeService extends Service {
                     .putString("active_job_summary", summary == null ? "" : compact(summary))
                     .putLong("active_job_started_at", startedAt)
                     .putLong("active_job_updated_at", now)
+                    .putString("active_job_lease_owner", activeLeaseOwnerKey(value))
+                    .putLong("active_job_lease_local_deadline_ms", value.optLong("lease_local_deadline_ms", 0L))
                     .apply();
+            return target.isFile() && jobId.equals(readJsonFile(target).optString("job_id", ""));
         } catch (Throwable error) {
             prefs().edit().putString("agent_last_error", "active-job: " + shortThrowable(error)).apply();
+            return false;
         }
     }
 
@@ -567,7 +629,7 @@ public class CoreWorkerRuntimeService extends Service {
             String current = active.optString("job_id", "").trim();
             if (expectedJobId != null && !expectedJobId.trim().isEmpty() && !current.isEmpty()
                     && !expectedJobId.trim().equals(current)) return;
-            activeJobFile().delete();
+            new AtomicFile(activeJobFile()).delete();
             prefs().edit()
                     .remove("active_job_id")
                     .remove("active_job_type")
@@ -575,8 +637,53 @@ public class CoreWorkerRuntimeService extends Service {
                     .remove("active_job_summary")
                     .remove("active_job_started_at")
                     .remove("active_job_updated_at")
+                    .remove("active_job_lease_owner")
+                    .remove("active_job_lease_local_deadline_ms")
                     .apply();
         } catch (Throwable ignored) { }
+    }
+
+    private String activeLeaseOwnerKey(JSONObject active) {
+        if (active == null) return "";
+        String jobId = active.optString("job_id", "").trim();
+        return jobId.isEmpty() ? "" : jobId + "#" + Math.max(1, active.optInt("attempt", 1));
+    }
+
+    private long localLeaseDeadlineMillis(double leaseUntil, double serverTime) {
+        if (leaseUntil <= 0.0) return 0L;
+        long now = System.currentTimeMillis();
+        if (serverTime > 0.0) {
+            double remainingSeconds = Math.max(0.0, Math.min(7200.0, leaseUntil - serverTime));
+            return now + (long) (remainingSeconds * 1000.0);
+        }
+        // Compatibilidade com VPS anterior: usa epoch absoluto do servidor.
+        return Math.max(0L, (long) (leaseUntil * 1000.0));
+    }
+
+    private long activeLeaseDeadlineMillis(JSONObject active) {
+        if (active == null) return 0L;
+        long deadline = active.optLong("lease_local_deadline_ms", 0L);
+        String owner = activeLeaseOwnerKey(active);
+        if (!owner.isEmpty() && owner.equals(prefs().getString("active_job_lease_owner", ""))) {
+            deadline = Math.max(deadline, prefs().getLong("active_job_lease_local_deadline_ms", 0L));
+        }
+        return deadline;
+    }
+
+    private void rememberRenewedLease(JSONObject active, JSONObject responseBody) {
+        if (active == null || responseBody == null) return;
+        JSONObject remote = responseBody.optJSONObject("job");
+        if (remote == null) return;
+        long deadline = localLeaseDeadlineMillis(
+                remote.optDouble("lease_until", 0.0), responseBody.optDouble("server_time", 0.0));
+        String owner = activeLeaseOwnerKey(active);
+        if (deadline <= 0L || owner.isEmpty()) return;
+        // commit() torna a renovação durável sem disputar o active-job.json com
+        // as atualizações de estágio feitas pelo Python durante o Gradle.
+        prefs().edit()
+                .putString("active_job_lease_owner", owner)
+                .putLong("active_job_lease_local_deadline_ms", deadline)
+                .commit();
     }
 
     private int pendingResultOutboxCount() {
@@ -589,22 +696,51 @@ public class CoreWorkerRuntimeService extends Service {
         JSONObject active = readActiveJob();
         String jobId = active.optString("job_id", "").trim();
         if (jobId.isEmpty()) return false;
-        String stage = active.optString("stage", "").trim();
-        if ("result_pending".equals(stage)) {
-            File outbox = outboxFile(jobId);
-            if (outbox != null && outbox.isFile()) return true;
-            clearActiveJob(jobId);
-            return false;
+        File outbox = outboxFile(jobId);
+        if (outbox != null && outbox.isFile()) {
+            // A outbox é a prova durável do resultado. Mesmo se o último write
+            // de stage falhou, jamais abandone/reexecute um job cujo resultado
+            // final já está preservado localmente.
+            if (!"result_pending".equals(active.optString("stage", "").trim())) {
+                persistActiveJob(active, "result_pending", "resultado local preservado; aguardando confirmação da VPS");
+            }
+            postJobProgress(serverUrl, token, jobId, "result_pending", 99.0,
+                    "resultado final está durável na outbox; renovando até confirmação", "");
+            return true;
         }
-        boolean reconciled = postJobProgress(serverUrl, token, jobId, "executor_restarted", 0.0,
+        // Só devolva ownership quando o executor antigo foi comprovadamente
+        // encerrado. Se a identidade/PID não puder ser validada, mantenha o
+        // active_job e renove o lease enquanto a próxima rodada reconcilia.
+        String jobType = active.optString("type", "");
+        boolean executorStopped = !CoreWorkerApkBuildManager.supports(jobType)
+                || CoreWorkerApkBuildManager.reconcileInterruptedBuild(
+                        getApplicationContext(), jobId, active.optInt("attempt", 1));
+        // O executor antigo pode ter fsyncado a outbox enquanto a reconciliação
+        // aguardava seu handoff. Essa prova durável sempre vence o requeue.
+        outbox = outboxFile(jobId);
+        if (outbox != null && outbox.isFile()) {
+            persistActiveJob(active, "result_pending", "resultado recuperado durante reconciliação");
+            postJobProgress(serverUrl, token, jobId, "result_pending", 99.0,
+                    "resultado final recuperado da outbox; aguardando confirmação", "");
+            return true;
+        }
+        if (!executorStopped) {
+            postJobProgress(serverUrl, token, jobId, "recovery_verifying_executor", 0.0,
+                    "restart detectado; validando executor antigo antes de requeue", "");
+            return true;
+        }
+        int reconciled = postJobProgress(serverUrl, token, jobId, "executor_restarted", 0.0,
                 "serviço APK reiniciou durante o job; solicitando requeue seguro", "abandon");
-        if (reconciled) {
+        if (reconciled != PROGRESS_RETRY) {
             clearActiveJob(jobId);
             prefs().edit()
                     .putString("internal_light_jobs_state", "job interrompido reconciliado")
                     .putString("internal_light_jobs_last_summary", jobId + " reencaminhado após restart")
                     .apply();
-            return false;
+            // Não busque a nova tentativa nesta mesma rodada. Uma eventual
+            // thread Java antiga ganha tempo para observar o abandono e seu
+            // resultado tardio será reconciliado antes do próximo poll.
+            return true;
         }
         return true;
     }
@@ -613,14 +749,45 @@ public class CoreWorkerRuntimeService extends Service {
             String serverUrl, String token, String jobId, AtomicBoolean runningFlag) {
         Thread thread = new Thread(() -> {
             while (runningFlag.get()) {
-                try { Thread.sleep(JOB_PROGRESS_INTERVAL_MS); }
-                catch (InterruptedException interrupted) { break; }
-                if (!runningFlag.get()) break;
                 JSONObject active = readActiveJob();
                 if (!jobId.equals(active.optString("job_id", ""))) break;
+                long deadline = activeLeaseDeadlineMillis(active);
+                long remaining = deadline > 0L ? deadline - System.currentTimeMillis() : Long.MAX_VALUE;
+                if (deadline > 0L && remaining <= LOCAL_LEASE_SAFETY_MS) {
+                    CoreWorkerApkBuildManager.requestCancellation(
+                            getApplicationContext(), jobId, active.optInt("attempt", 1));
+                    persistActiveJob(active, "lease_expiring",
+                            "renovação indisponível; encerrando executor antes de perder ownership");
+                    runningFlag.set(false);
+                    break;
+                }
+                long sleepMs = JOB_PROGRESS_INTERVAL_MS;
+                if (deadline > 0L) {
+                    sleepMs = Math.min(sleepMs, Math.max(1000L, remaining - LOCAL_LEASE_SAFETY_MS));
+                }
+                try { Thread.sleep(sleepMs); }
+                catch (InterruptedException interrupted) { break; }
+                if (!runningFlag.get()) break;
+                active = readActiveJob();
+                if (!jobId.equals(active.optString("job_id", ""))) break;
+                deadline = activeLeaseDeadlineMillis(active);
+                if (deadline > 0L && deadline - System.currentTimeMillis() <= LOCAL_LEASE_SAFETY_MS) {
+                    CoreWorkerApkBuildManager.requestCancellation(
+                            getApplicationContext(), jobId, active.optInt("attempt", 1));
+                    persistActiveJob(active, "lease_expiring",
+                            "lease sem margem para renovar; executor cancelado com segurança");
+                    runningFlag.set(false);
+                    break;
+                }
                 String stage = active.optString("stage", "running");
                 String summary = active.optString("summary", "job em execução no APK");
-                postJobProgress(serverUrl, token, jobId, stage, -1.0, summary, "");
+                int acknowledged = postJobProgress(serverUrl, token, jobId, stage, -1.0, summary, "");
+                if (acknowledged == PROGRESS_OWNERSHIP_LOST) {
+                    CoreWorkerApkBuildManager.requestCancellation(
+                            getApplicationContext(), jobId, active.optInt("attempt", 1));
+                    runningFlag.set(false);
+                    break;
+                }
             }
         }, "core-worker-job-lease");
         thread.setDaemon(true);
@@ -628,24 +795,40 @@ public class CoreWorkerRuntimeService extends Service {
         return thread;
     }
 
-    private boolean postJobProgress(
+    private int postJobProgress(
             String serverUrl, String token, String jobId, String stage, double progress, String summary, String action) {
+        return postJobProgress(serverUrl, token, jobId, stage, progress, summary, action, "");
+    }
+
+    private int postJobProgress(
+            String serverUrl, String token, String jobId, String stage, double progress,
+            String summary, String action, String leaseTokenOverride) {
         try {
             if (serverUrl == null || serverUrl.trim().isEmpty() || token == null || token.trim().isEmpty()
-                    || jobId == null || jobId.trim().isEmpty()) return false;
+                    || jobId == null || jobId.trim().isEmpty()) return PROGRESS_RETRY;
+            JSONObject active = readActiveJob();
             JSONObject payload = new JSONObject()
                     .put("worker_id", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()))
                     .put("job_id", jobId.trim())
                     .put("stage", stage == null ? "running" : stage)
                     .put("summary", summary == null ? "" : compact(summary));
+            String leaseToken = firstNonEmpty(leaseTokenOverride, active.optString("lease_token", "")).trim();
+            if (!leaseToken.isEmpty()) payload.put("lease_token", leaseToken);
             if (progress >= 0.0) payload.put("progress", Math.max(0.0, Math.min(100.0, progress)));
             if (action != null && !action.trim().isEmpty()) payload.put("action", action.trim());
             HttpResult response = request("POST", serverUrl + "/core-worker/jobs/progress", payload, token);
-            if (!response.ok()) return false;
+            if (!response.ok()) return PROGRESS_RETRY;
             JSONObject body = new JSONObject(response.body);
-            return body.optBoolean("ok", false);
+            if (!body.optBoolean("ok", false)) return PROGRESS_RETRY;
+            if (body.optBoolean("ownership_lost", false)
+                    || body.optBoolean("stale", false)
+                    || (body.has("accepted") && !body.optBoolean("accepted", false))) {
+                return PROGRESS_OWNERSHIP_LOST;
+            }
+            rememberRenewedLease(active, body);
+            return PROGRESS_ACCEPTED;
         } catch (Throwable ignored) {
-            return false;
+            return PROGRESS_RETRY;
         }
     }
 
@@ -659,6 +842,8 @@ public class CoreWorkerRuntimeService extends Service {
         out.put("active_job_summary", active.optString("summary", ""));
         out.put("active_job_started_at", active.optLong("started_at", 0L));
         out.put("active_job_updated_at", active.optLong("updated_at", 0L));
+        String leaseToken = active.optString("lease_token", "");
+        out.put("active_job_lease_token_hash", leaseToken.isEmpty() ? "" : sha256Text(leaseToken));
         out.put("pending_result_count", pendingResultOutboxCount());
         out.put("executor_ready", prefs().getBoolean("job_executor_ready", false));
         return out;
@@ -676,6 +861,8 @@ public class CoreWorkerRuntimeService extends Service {
         JSONObject payload = new JSONObject();
         payload.put("worker_id", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
         payload.put("job_id", job == null ? "" : firstNonEmpty(job.optString("job_id", ""), job.optString("id", "")));
+        String leaseToken = job == null ? "" : job.optString("lease_token", "").trim();
+        if (!leaseToken.isEmpty()) payload.put("lease_token", leaseToken);
         payload.put("status", ok ? "succeeded" : "failed");
         payload.put("summary", summary);
         payload.put("error", ok || result == null ? "" : compact(result.optString("error", summary)));
@@ -713,22 +900,33 @@ public class CoreWorkerRuntimeService extends Service {
         try {
             File target = outboxFile(jobId);
             if (target == null) return null;
-            File temp = new File(target.getParentFile(), target.getName() + ".tmp");
-            FileOutputStream output = new FileOutputStream(temp, false);
-            output.write(envelope.toString().getBytes(StandardCharsets.UTF_8));
-            output.flush();
-            output.close();
-            if (!temp.renameTo(target)) {
-                FileOutputStream direct = new FileOutputStream(target, false);
-                direct.write(envelope.toString().getBytes(StandardCharsets.UTF_8));
-                direct.flush();
-                direct.close();
-                temp.delete();
-            }
-            return target;
+            return writeJsonAtomically(target, envelope) ? target : null;
         } catch (Throwable error) {
             prefs().edit().putString("agent_last_error", "outbox: " + shortThrowable(error)).apply();
             return null;
+        }
+    }
+
+    private boolean writeJsonAtomically(File target, JSONObject value) {
+        if (target == null || value == null) return false;
+        File parent = target.getParentFile();
+        if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) return false;
+        AtomicFile atomic = new AtomicFile(target);
+        FileOutputStream output = null;
+        try {
+            output = atomic.startWrite();
+            output.write(value.toString().getBytes(StandardCharsets.UTF_8));
+            output.flush();
+            output.getFD().sync();
+            atomic.finishWrite(output);
+            output = null;
+            return target.isFile();
+        } catch (Throwable error) {
+            if (output != null) {
+                try { atomic.failWrite(output); }
+                catch (Throwable ignored) { }
+            }
+            return false;
         }
     }
 
@@ -740,7 +938,8 @@ public class CoreWorkerRuntimeService extends Service {
             if (file == null || !file.isFile() || !file.getName().endsWith(".json")) continue;
             try {
                 JSONObject envelope = normalizeStoredEnvelope(readJsonFile(file));
-                if (postResultEnvelope(serverUrl, envelope)) {
+                boolean resourcesReleased = finalizeEnvelopeBuildResources(envelope);
+                if (postResultEnvelope(serverUrl, envelope) && resourcesReleased) {
                     String completedJobId = envelope.optString("job_id", "");
                     rememberCompletedJob(completedJobId);
                     file.delete();
@@ -751,6 +950,18 @@ public class CoreWorkerRuntimeService extends Service {
         }
     }
 
+    private boolean finalizeEnvelopeBuildResources(JSONObject envelope) {
+        if (envelope == null) return true;
+        JSONObject result = envelope.optJSONObject("result");
+        String type = result == null ? "" : firstNonEmpty(
+                result.optString("type", ""), result.optString("task", ""));
+        if (!CoreWorkerApkBuildManager.supports(type)) return true;
+        String jobId = envelope.optString("job_id", "").trim();
+        int attempt = result == null ? 1 : Math.max(1, result.optInt("attempt", 1));
+        return CoreWorkerApkBuildManager.finalizeBuildAttempt(
+                getApplicationContext(), jobId, attempt);
+    }
+
     private boolean postResultEnvelope(String serverUrl, JSONObject envelope) {
         try {
             String token = prefs().getString("worker_token", "").trim();
@@ -758,7 +969,11 @@ public class CoreWorkerRuntimeService extends Service {
             HttpResult response = request("POST", serverUrl + "/core-worker/jobs/result", envelope, token);
             if (!response.ok()) return false;
             JSONObject body = new JSONObject(response.body);
-            return body.optBoolean("ok", false);
+            return body.optBoolean("ok", false) && (
+                    !body.has("accepted")
+                    || body.optBoolean("accepted", false)
+                    || body.optBoolean("stale", false)
+                    || body.optBoolean("idempotent", false));
         } catch (Throwable error) {
             prefs().edit().putString("agent_last_error", "resultado: " + shortThrowable(error)).apply();
             return false;
@@ -773,12 +988,23 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private JSONObject readJsonFile(File file) throws Exception {
-        if (file == null || !file.isFile()) return new JSONObject();
-        FileInputStream input = new FileInputStream(file);
-        byte[] data = new byte[(int) Math.min(file.length(), 1024L * 1024L)];
-        int read = input.read(data);
-        input.close();
-        return read <= 0 ? new JSONObject() : new JSONObject(new String(data, 0, read, StandardCharsets.UTF_8));
+        if (file == null) return new JSONObject();
+        AtomicFile atomic = new AtomicFile(file);
+        try (FileInputStream input = atomic.openRead();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int total = 0;
+            while (true) {
+                int read = input.read(buffer);
+                if (read < 0) break;
+                total += read;
+                if (total > 1024 * 1024) throw new IllegalStateException("JSON local excede 1 MiB");
+                output.write(buffer, 0, read);
+            }
+            return total <= 0
+                    ? new JSONObject()
+                    : new JSONObject(new String(output.toByteArray(), StandardCharsets.UTF_8));
+        }
     }
 
     private boolean wasJobRecentlyCompleted(String jobId) {
@@ -841,6 +1067,20 @@ public class CoreWorkerRuntimeService extends Service {
     private String compact(String value) {
         String clean = value == null ? "" : value.replaceAll("\\s+", " ").trim();
         return clean.length() <= 600 ? clean : clean.substring(0, 600);
+    }
+
+    private String sha256Text(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(
+                    (value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(digest.length * 2);
+            for (byte item : digest) {
+                out.append(String.format(java.util.Locale.ROOT, "%02x", item & 0xff));
+            }
+            return out.toString();
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     private String shortThrowable(Throwable error) {
@@ -984,7 +1224,54 @@ public class CoreWorkerRuntimeService extends Service {
         payload.put("nativeRuntime", nativeRuntime);
         payload.put("runtime", runtime);
         payload.put("status", status);
+        payload.put("battery", buildBatteryTelemetry());
+        payload.put("network", buildNetworkTelemetry());
         return payload;
+    }
+
+    private JSONObject buildBatteryTelemetry() {
+        JSONObject out = new JSONObject();
+        try {
+            JSONObject resources = CoreWorkerApkBuildManager.buildResourceSnapshot(getApplicationContext());
+            long measuredAt = System.currentTimeMillis();
+            int level = resources.optInt("batteryPercent", -1);
+            if (level >= 0 && level <= 100) out.put("level", level);
+            if (resources.has("charging")) out.put("charging", resources.optBoolean("charging", false));
+            double temperature = resources.optDouble("temperatureC", -1.0);
+            if (temperature > 0.0 && temperature < 90.0) out.put("temperature_c", temperature);
+            out.put("measured_at", measuredAt);
+            out.put("level_observed_at", measuredAt);
+            out.put("temperature_observed_at", measuredAt);
+        } catch (Throwable ignored) { }
+        return out;
+    }
+
+    private JSONObject buildNetworkTelemetry() {
+        JSONObject out = new JSONObject();
+        long measuredAt = System.currentTimeMillis();
+        try {
+            ConnectivityManager manager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            Network active = manager == null ? null : manager.getActiveNetwork();
+            NetworkCapabilities caps = manager == null || active == null ? null : manager.getNetworkCapabilities(active);
+            String kind = "offline";
+            if (caps != null) {
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) kind = "wifi";
+                else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) kind = "celular";
+                else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) kind = "ethernet";
+                else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) kind = "vpn";
+                else kind = "connected";
+            }
+            out.put("type", kind);
+            out.put("measured_at", measuredAt);
+            out.put("network_observed_at", measuredAt);
+            long pingAt = prefs().getLong("control_plane_rtt_at", 0L);
+            float pingMs = prefs().getFloat("control_plane_rtt_ms", -1.0f);
+            if (pingMs >= 0.0f && pingAt > 0L && measuredAt - pingAt <= 10L * 60L * 1000L) {
+                out.put("vps_ping_ms", Math.round(pingMs));
+                out.put("ping_observed_at", pingAt);
+            }
+        } catch (Throwable ignored) { }
+        return out;
     }
 
     private JSONArray coreWorkerApkCapabilitiesArray() {
@@ -1181,6 +1468,7 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private HttpResult request(String method, String url, JSONObject payload, String token) throws Exception {
+        long requestStarted = SystemClock.elapsedRealtime();
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setRequestMethod(method);
         conn.setConnectTimeout(7000);
@@ -1201,6 +1489,11 @@ public class CoreWorkerRuntimeService extends Service {
         InputStream input = status >= 200 && status < 400 ? conn.getInputStream() : conn.getErrorStream();
         String body = readAll(input);
         conn.disconnect();
+        long elapsed = Math.max(0L, SystemClock.elapsedRealtime() - requestStarted);
+        prefs().edit()
+                .putFloat("control_plane_rtt_ms", (float) elapsed)
+                .putLong("control_plane_rtt_at", System.currentTimeMillis())
+                .apply();
         return new HttpResult(status, body == null ? "" : body);
     }
 

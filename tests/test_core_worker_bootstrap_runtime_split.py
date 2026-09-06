@@ -368,7 +368,7 @@ def test_failed_direct_update_keeps_bootstrap_pending(monkeypatch) -> None:
     assert result["direct_update"]["port_conflict"] is True
 
 
-def test_manual_jobs_selected_on_apk_child_route_to_termux_bootstrap(tmp_path: Path) -> None:
+def test_manual_worker_update_routes_but_apk_build_never_silently_falls_back(tmp_path: Path) -> None:
     token = "shared-bootstrap-token"
     parent_id = "phone-manual-route"
     child_id = f"{parent_id}-apk"
@@ -415,15 +415,19 @@ def test_manual_jobs_selected_on_apk_child_route_to_termux_bootstrap(tmp_path: P
     )
     assert update["job"]["target_worker_id"] == parent_id
 
-    build = registry.create_job(
-        job_type="apk_build_debug",
-        target_worker_id=child_id,
-        required_capabilities=["apk-builder"],
-        payload={"selfBuilderRequired": True},
-        ttl_seconds=300,
-        lease_seconds=300,
-    )
-    assert build["job"]["target_worker_id"] == parent_id
+    try:
+        registry.create_job(
+            job_type="apk_build_debug",
+            target_worker_id=child_id,
+            required_capabilities=["apk-builder"],
+            payload={"selfBuilderRequired": True},
+            ttl_seconds=300,
+            lease_seconds=300,
+        )
+    except CoreWorkerRegistryError as exc:
+        assert exc.status == 409
+    else:
+        raise AssertionError("build explícito no APK unready não pode ser roteado ao Termux")
 
 
 def test_shared_runtime_switches_future_builds_to_apk_after_real_preflight(tmp_path: Path) -> None:
@@ -455,10 +459,11 @@ def test_shared_runtime_switches_future_builds_to_apk_after_real_preflight(tmp_p
         "source": "core-worker-apk-agent-service-v2",
         "platform": "android",
         "runtime_kind": "apk",
+        "versionCode": 132,
         "roles": ["apk-worker", "apk-builder", "apk-self-builder"],
-        "capabilities": ["apk-worker", "apk-builder", "apk-self-builder", "apk-publisher"],
+        "capabilities": ["apk-worker", "apk-builder", "apk-self-builder", "apk-publisher", "apk-durable-jobs-v1"],
         "supported_tasks": ["apk_builder_status", "apk_build_debug", "apk_publish_last"],
-        "status": {"apk_self_builder": {"ready": True, "publishReady": True}},
+        "status": {"apk_self_builder": {"ready": True, "ok": True, "publishReady": True, "checkedAt": int(time.time() * 1000)}},
     }, token=token)
     assert heartbeat["worker_id"] == child_id
 

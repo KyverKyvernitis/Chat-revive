@@ -8,6 +8,7 @@ import android.content.res.AssetManager;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.PowerManager;
+import android.util.AtomicFile;
 
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
@@ -59,11 +60,12 @@ final class CoreWorkerApkBuildManager {
     private static final long PERSISTED_READY_MAX_MS = TimeUnit.MINUTES.toMillis(5);
     private static final long MAX_TOOLCHAIN_EXPANDED_BYTES = 4L * 1024L * 1024L * 1024L;
     private static final int MAX_TOOLCHAIN_ENTRIES = 50_000;
-    private static final long BUILD_PREFLIGHT_WAIT_MS = TimeUnit.MINUTES.toMillis(4);
-    private static final long BUILD_PREFLIGHT_RETRY_MS = 2500L;
+    private static final long BUILD_PREFLIGHT_WAIT_MS = TimeUnit.MINUTES.toMillis(8);
+    private static final long BUILD_PREFLIGHT_RETRY_MS = 10_000L;
 
     private static volatile JSONObject cachedPreflight;
     private static volatile long cachedPreflightAt;
+    private static final Object PREFLIGHT_LOCK = new Object();
     private static final AtomicBoolean preflightRefreshRunning = new AtomicBoolean(false);
     private static final ExecutorService preflightExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "core-worker-apk-builder-preflight");
@@ -151,45 +153,56 @@ final class CoreWorkerApkBuildManager {
             return cloneJson(persisted);
         }
 
-        PowerManager.WakeLock provisionWakeLock = null;
-        try {
-            PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
-            if (power != null) {
-                provisionWakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CoreWorker:ApkBuilderProvision");
-                provisionWakeLock.setReferenceCounted(false);
-                provisionWakeLock.acquire(TimeUnit.MINUTES.toMillis(30));
-            }
-            provisionPrivateAssets(context);
-            JSONObject value = callPythonPreflight(context, true);
-            value = finalizeToolchainPreflight(context, value);
-            SharedPreferences preflightPrefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-            value.put("toolchainReleaseFingerprint", preflightPrefs.getString("apk_self_builder_toolchain_fingerprint", ""));
-            value.put("toolchainUpdateState", preflightPrefs.getString("apk_self_builder_toolchain_update_state", value.optString("toolchainUpdateState", "")));
-            value.put("appVersionCode", BuildConfig.VERSION_CODE);
-            value.put("checkedAt", now);
-            cachedPreflight = value;
-            cachedPreflightAt = now;
-            persistPreflight(context, value);
-            return cloneJson(value);
-        } catch (Throwable error) {
-            JSONObject failed = new JSONObject();
+        // O refresh assíncrono e o gate do job compartilham provisionamento e
+        // smoke. Serializar aqui evita dois smokes/extrações concorrentes e faz
+        // o job aguardar o preflight já em curso enquanto o lease é renovado.
+        synchronized (PREFLIGHT_LOCK) {
+            PowerManager.WakeLock provisionWakeLock = null;
             try {
-                failed.put("ok", false);
-                failed.put("ready", false);
-                failed.put("publishReady", latestArtifactAvailable(context));
-                failed.put("state", "apk_self_builder_preflight_error");
-                failed.put("summary", "Autobuild do APK indisponível: " + shortThrowable(error));
-                failed.put("error", shortThrowable(error));
-                failed.put("appVersionCode", BuildConfig.VERSION_CODE);
-                failed.put("checkedAt", now);
-                failed.put("updatedAt", now);
-            } catch (Throwable ignored) { }
-            cachedPreflight = failed;
-            cachedPreflightAt = now;
-            persistPreflight(context, failed);
-            return cloneJson(failed);
-        } finally {
-            if (provisionWakeLock != null && provisionWakeLock.isHeld()) provisionWakeLock.release();
+                PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+                if (power != null) {
+                    provisionWakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CoreWorker:ApkBuilderProvision");
+                    provisionWakeLock.setReferenceCounted(false);
+                    provisionWakeLock.acquire(TimeUnit.MINUTES.toMillis(30));
+                }
+                provisionPrivateAssets(context);
+                JSONObject value = callPythonPreflight(context, true);
+                value = finalizeToolchainPreflight(context, value);
+                long completedAt = System.currentTimeMillis();
+                SharedPreferences preflightPrefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+                value.put("toolchainReleaseFingerprint", preflightPrefs.getString("apk_self_builder_toolchain_fingerprint", ""));
+                value.put("toolchainUpdateState", preflightPrefs.getString("apk_self_builder_toolchain_update_state", value.optString("toolchainUpdateState", "")));
+                value.put("appVersionCode", BuildConfig.VERSION_CODE);
+                // Freshness começa quando smoke/provisionamento terminou, não
+                // quando começou. Em aparelho lento a diferença pode ser de
+                // minutos e não deve invalidar um ready recém obtido.
+                value.put("checkedAt", completedAt);
+                value.put("updatedAt", completedAt);
+                cachedPreflight = value;
+                cachedPreflightAt = completedAt;
+                persistPreflight(context, value);
+                return cloneJson(value);
+            } catch (Throwable error) {
+                JSONObject failed = new JSONObject();
+                try {
+                    long failedAt = System.currentTimeMillis();
+                    failed.put("ok", false);
+                    failed.put("ready", false);
+                    failed.put("publishReady", latestArtifactAvailable(context));
+                    failed.put("state", "apk_self_builder_preflight_error");
+                    failed.put("summary", "Autobuild do APK indisponível: " + shortThrowable(error));
+                    failed.put("error", shortThrowable(error));
+                    failed.put("appVersionCode", BuildConfig.VERSION_CODE);
+                    failed.put("checkedAt", failedAt);
+                    failed.put("updatedAt", failedAt);
+                    cachedPreflightAt = failedAt;
+                } catch (Throwable ignored) { }
+                cachedPreflight = failed;
+                persistPreflight(context, failed);
+                return cloneJson(failed);
+            } finally {
+                if (provisionWakeLock != null && provisionWakeLock.isHeld()) provisionWakeLock.release();
+            }
         }
     }
 
@@ -212,7 +225,9 @@ final class CoreWorkerApkBuildManager {
         String state = gate.optString("state", "").toLowerCase(Locale.ROOT);
         String update = gate.optString("toolchainUpdateState", "").toLowerCase(Locale.ROOT);
         if (state.contains("refresh") || state.contains("waiting") || state.contains("preparing")
-                || update.contains("downloading") || update.contains("validating") || update.contains("verifying")) {
+                || state.contains("loading") || state.contains("smoke") || state.contains("preflight")
+                || update.contains("downloading") || update.contains("validating") || update.contains("verifying")
+                || update.contains("provision")) {
             return true;
         }
         JSONArray missing = gate.optJSONArray("missing");
@@ -228,7 +243,9 @@ final class CoreWorkerApkBuildManager {
                 || summary.contains("aguardando toolchain");
     }
 
-    static JSONObject execute(Context rawContext, String type, JSONObject payload, String serverUrl) throws Exception {
+    static JSONObject execute(
+            Context rawContext, String type, JSONObject payload, String serverUrl,
+            String jobId, int jobAttempt) throws Exception {
         Context context = rawContext.getApplicationContext();
         if (!supports(type)) {
             return new JSONObject().put("ok", false).put("type", type).put("error", "task de autobuild não permitida");
@@ -257,6 +274,17 @@ final class CoreWorkerApkBuildManager {
                     .put("preflight", gate);
         }
 
+        File cancellation = cancellationFile(context, jobId, jobAttempt);
+        if (cancellation.isFile()) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("type", type)
+                    .put("message", "ownership do job foi revogado durante o preflight")
+                    .put("error", "lease_ownership_lost: cancelamento persistido antes da execução")
+                    .put("failure_category", "transient")
+                    .put("retryable", true);
+        }
+
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String workerId = CoreWorkerRuntimeIdentity.runtimeWorkerId(context);
         String token = prefs.getString("worker_token", "").trim();
@@ -272,12 +300,15 @@ final class CoreWorkerApkBuildManager {
             if (power != null) {
                 wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CoreWorker:ApkSelfBuild");
                 wakeLock.setReferenceCounted(false);
-                wakeLock.acquire(TimeUnit.HOURS.toMillis(4));
+                wakeLock.acquire(TimeUnit.HOURS.toMillis(5));
             }
             provisionPrivateAssets(context);
             if (!Python.isStarted()) Python.start(new AndroidPlatform(context));
             PyObject module = Python.getInstance().getModule("coreworker.apk_self_builder");
             JSONObject effectivePayload = payload == null ? new JSONObject() : new JSONObject(payload.toString());
+            effectivePayload.put("registryJobId", jobId == null ? "" : jobId);
+            effectivePayload.put("registryAttempt", Math.max(1, jobAttempt));
+            effectivePayload.put("registryCancellationPath", cancellation.getAbsolutePath());
             effectivePayload.put("builderResources", buildResourceSnapshot(context));
             PyObject response = module.callAttr(
                     "run",
@@ -309,7 +340,7 @@ final class CoreWorkerApkBuildManager {
         }
     }
 
-    private static JSONObject buildResourceSnapshot(Context context) {
+    static JSONObject buildResourceSnapshot(Context context) {
         JSONObject out = new JSONObject();
         try {
             Intent battery = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
@@ -337,6 +368,106 @@ final class CoreWorkerApkBuildManager {
             out.put("storageTotalBytes", files.getTotalSpace());
         } catch (Throwable ignored) { }
         return out;
+    }
+
+    static boolean reconcileInterruptedBuild(Context rawContext, String jobId, int jobAttempt) {
+        if (rawContext == null || jobId == null || jobId.trim().isEmpty()) return false;
+        try {
+            Context context = rawContext.getApplicationContext();
+            File lock = new File(context.getFilesDir(), "apk-self-builder/.apk-build-active");
+            if (!lock.isDirectory()) return true;
+            if (!Python.isStarted()) Python.start(new AndroidPlatform(context));
+            PyObject module = Python.getInstance().getModule("coreworker.apk_self_builder");
+            PyObject response = module.callAttr(
+                    "reconcile_interrupted_build",
+                    context.getFilesDir().getAbsolutePath(),
+                    jobId.trim(),
+                    Math.max(1, jobAttempt)
+            );
+            JSONObject result = new JSONObject(response == null ? "{}" : response.toString());
+            return result.optBoolean("ok", false) && result.optBoolean("safeToRequeue", false);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    static boolean finalizeBuildAttempt(Context rawContext, String jobId, int jobAttempt) {
+        if (rawContext == null || jobId == null || jobId.trim().isEmpty()) return false;
+        try {
+            Context context = rawContext.getApplicationContext();
+            File lock = new File(context.getFilesDir(), "apk-self-builder/.apk-build-active");
+            if (!lock.isDirectory()) return true;
+            if (!Python.isStarted()) Python.start(new AndroidPlatform(context));
+            PyObject module = Python.getInstance().getModule("coreworker.apk_self_builder");
+            PyObject response = module.callAttr(
+                    "finalize_build_attempt",
+                    context.getFilesDir().getAbsolutePath(),
+                    jobId.trim(),
+                    Math.max(1, jobAttempt)
+            );
+            JSONObject result = new JSONObject(response == null ? "{}" : response.toString());
+            return result.optBoolean("ok", false) && result.optBoolean("released", false);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    static boolean requestCancellation(Context rawContext, String jobId, int jobAttempt) {
+        if (rawContext == null || jobId == null || jobId.trim().isEmpty()) return false;
+        try {
+            Context context = rawContext.getApplicationContext();
+            int attempt = Math.max(1, jobAttempt);
+            JSONObject value = new JSONObject()
+                    .put("jobId", jobId.trim())
+                    .put("attempt", attempt)
+                    .put("requestedAt", System.currentTimeMillis())
+                    .put("reason", "lease_ownership_lost");
+            // Este marker existe fora do lock do Gradle: cobre também a janela
+            // em que o job ainda aguarda toolchain smoke/preflight.
+            boolean persisted = writeCancellationMarker(cancellationFile(context, jobId, attempt), value);
+            File lock = new File(context.getFilesDir(), "apk-self-builder/.apk-build-active");
+            File ownerFile = new File(lock, "owner.json");
+            if (!ownerFile.isFile()) return persisted;
+            JSONObject owner = new JSONObject(new String(
+                    java.nio.file.Files.readAllBytes(ownerFile.toPath()), StandardCharsets.UTF_8));
+            if (!jobId.trim().equals(owner.optString("jobId", "").trim())
+                    || (owner.has("attempt") && attempt != owner.optInt("attempt", 0))) return persisted;
+            File target = new File(lock, "cancel.request");
+            return writeCancellationMarker(target, value) && persisted;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static File cancellationFile(Context context, String jobId, int jobAttempt) {
+        String safe = (jobId == null ? "job" : jobId.trim()).replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (safe.isEmpty()) safe = "job";
+        if (safe.length() > 96) safe = safe.substring(0, 96);
+        File dir = new File(context.getFilesDir(), "apk-self-builder/cancellations");
+        return new File(dir, safe + "-attempt-" + Math.max(1, jobAttempt) + ".request");
+    }
+
+    private static boolean writeCancellationMarker(File target, JSONObject value) {
+        File parent = target == null ? null : target.getParentFile();
+        if (target == null || parent == null || (!parent.isDirectory() && !parent.mkdirs())) return false;
+        if (target.isFile()) return true;
+        AtomicFile atomic = new AtomicFile(target);
+        FileOutputStream output = null;
+        try {
+            output = atomic.startWrite();
+            output.write(value.toString().getBytes(StandardCharsets.UTF_8));
+            output.flush();
+            output.getFD().sync();
+            atomic.finishWrite(output);
+            output = null;
+            return target.isFile();
+        } catch (Throwable ignored) {
+            if (output != null) {
+                try { atomic.failWrite(output); }
+                catch (Throwable nestedIgnored) { }
+            }
+            return false;
+        }
     }
 
     private static JSONObject callPythonPreflight(Context context, boolean runSmoke) throws Exception {

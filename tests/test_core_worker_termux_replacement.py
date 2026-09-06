@@ -46,9 +46,9 @@ def _worker_record(*, worker_id: str, token: str, apk: bool, ready: bool) -> dic
             "source": "core-worker-apk-agent-service",
             "platform": "android",
             "roles": ["apk-worker", "apk-builder"] if ready else ["apk-worker"],
-            "capabilities": ["apk-worker", "apk-builder"] if ready else ["apk-worker"],
+            "capabilities": ["apk-worker", "apk-builder", "apk-self-builder", "apk-durable-jobs-v1"] if ready else ["apk-worker", "apk-durable-jobs-v1"],
             "supported_tasks": ["apk_builder_status", "apk_build_debug", "apk_publish_last"] if ready else ["apk_builder_status"],
-            "status": {"apk_self_builder": {"ready": ready, "publishReady": ready}},
+            "status": {"apk_self_builder": {"ready": ready, "publishReady": ready, "ok": ready, "checkedAt": int(now * 1000)}},
         }
     return {
         "worker_id": worker_id,
@@ -69,12 +69,12 @@ def _worker_record(*, worker_id: str, token: str, apk: bool, ready: bool) -> dic
 
 def test_version_marks_bootstrap_to_self_builder_release() -> None:
     gradle = read(ANDROID / "app/build.gradle")
-    assert "versionCode 132" in gradle
-    assert 'versionName "0.8.5"' in gradle
+    assert "versionCode 133" in gradle
+    assert 'versionName "0.8.6"' in gradle
     assert "def coreWorkerSelfBuilderTargetSdk = 28" in gradle
     assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
     assert "verifyCoreWorkerSelfBuilderTargetSdk" in gradle
-    assert read(ANDROID / "README.md").startswith("# Core Worker 0.8.5")
+    assert read(ANDROID / "README.md").startswith("# Core Worker 0.8.6")
 
 
 def test_android_runtime_has_no_legacy_termux_protocol_or_package_dependency() -> None:
@@ -172,7 +172,7 @@ def test_self_builder_has_external_transactional_toolchain_and_no_arbitrary_comm
     assert "verifyCoreWorkerNoEmbeddedToolchain" in gradle
     assert "android-builder-toolchain.zip" in gradle
     assert '".cwpart"' in gradle
-    assert (ANDROID / "gradle/wrapper/gradle-wrapper.jar").is_file()
+    assert (ANDROID / "gradle/wrapper/gradle-wrapper.jar.sha256").is_file()
     assert "pip = false" in gradle
     assert "stdlib = false" in gradle
 
@@ -203,7 +203,8 @@ def test_vps_only_orchestrates_and_streams_published_apk() -> None:
     assert 'CORE_WORKER_APK_UPLOAD_MAX_BYTES", str(1024 * 1024 * 1024)' in webserver
     assert "final_raw = open(target, \"rb\").read()" not in webserver
     assert "final_digest = hashlib.sha256()" in webserver
-    assert "source_bytes = zip_path.stat().st_size" in automation
+    assert "source_bytes = temp.stat().st_size" in automation
+    assert "source-core-worker-app-{source_sha256}.zip" in automation
     assert "raw = zip_path.read_bytes()" not in automation
     assert '@app.post("/core-worker/app/publish")' in webserver
 

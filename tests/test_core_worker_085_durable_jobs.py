@@ -30,7 +30,7 @@ def _apk_record(worker_id: str, token: str) -> dict:
         "capabilities": ["apk-native", "apk-builder", "apk-self-builder", "apk-durable-jobs-v1"],
         "supported_tasks": ["apk_builder_status", "apk_build_debug", "apk_publish_last"],
         "status": {
-            "apk_self_builder": {"ready": True, "ok": True, "publishReady": False},
+            "apk_self_builder": {"ready": True, "ok": True, "publishReady": False, "checkedAt": int(now * 1000)},
             "core_worker_jobs": {"active_job_id": "", "pending_result_count": 0},
         },
     }
@@ -52,30 +52,30 @@ def _registry(tmp_path: Path) -> tuple[CoreWorkersRegistry, str]:
 def _create_build(registry: CoreWorkersRegistry) -> str:
     created = registry.create_job(
         job_type="apk_build_debug",
-        payload={"versionName": "0.8.5", "versionCode": 132},
+        payload={"versionName": "0.8.6", "versionCode": 133},
         target_worker_id="phone-test-apk",
         required_capabilities=["apk-builder"],
         ttl_seconds=7200,
-        lease_seconds=7200,
+        lease_seconds=240,
         max_attempts=2,
-        summary="build automático APK 0.8.5",
+        summary="build automático APK 0.8.6",
     )
     return created["job"]["job_id"]
 
 
-def test_release_is_085_without_unnecessary_phone_worker_bump() -> None:
+def test_release_is_086_without_unnecessary_phone_worker_bump() -> None:
     gradle = (ANDROID / "app/build.gradle").read_text(encoding="utf-8")
     phone = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
-    assert 'versionCode 132' in gradle
-    assert 'versionName "0.8.5"' in gradle
+    assert 'versionCode 133' in gradle
+    assert 'versionName "0.8.6"' in gradle
     assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
     automation = (ROOT / "scripts/core-worker-automation.py").read_text(encoding="utf-8")
-    assert "lease_seconds=7200,\n            max_attempts=2" in automation
+    assert "lease_seconds=240,\n            max_attempts=2" in automation
 
 
 def test_apk_persists_active_job_and_renews_progress() -> None:
     service = (JAVA / "CoreWorkerRuntimeService.java").read_text(encoding="utf-8")
-    assert 'core-worker-apk-active-job-v1' in service
+    assert 'core-worker-apk-active-job-v2' in service
     assert 'active-job.json' in service
     assert 'persistActiveJob(job, "claimed"' in service
     assert 'serverUrl + "/core-worker/jobs/progress"' in service
@@ -84,6 +84,7 @@ def test_apk_persists_active_job_and_renews_progress() -> None:
     assert '"abandon"' in service
     catalog = (JAVA / "CoreWorkerJobCatalog.java").read_text(encoding="utf-8")
     assert '"apk-durable-jobs-v1"' in catalog
+    assert '"apk-job-lease-token-v1"' in catalog
     assert 'status.put("core_worker_jobs", localCoreWorkerJobsSnapshot())' in service
 
 

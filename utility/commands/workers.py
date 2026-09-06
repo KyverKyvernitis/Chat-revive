@@ -1417,6 +1417,91 @@ def _battery_text(worker: dict[str, Any]) -> str:
     return " ".join(parts) if parts else "bat n/a"
 
 
+def _telemetry_epoch(value: object) -> float:
+    try:
+        result = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return result / 1000.0 if result > 10_000_000_000 else result
+
+
+def _physical_telemetry_snapshot(
+    members: list[dict[str, Any]], *, now: float | None = None, max_age_seconds: float | None = None
+) -> dict[str, Any]:
+    """Escolhe cada métrica física independentemente pela observação mais nova."""
+    ts = time.time() if now is None else float(now)
+    ttl = max_age_seconds
+    if ttl is None:
+        ttl = min(1800.0, max(30.0, _env_float("CORE_WORKER_TELEMETRY_MAX_AGE_SECONDS", 300.0)))
+    selected: dict[str, Any] = {"battery": None, "temperature": None, "network": None, "ping": None}
+
+    def consider(metric: str, value: Any, observed_raw: object, worker: dict[str, Any], extra: dict[str, Any] | None = None) -> None:
+        observed = _telemetry_epoch(observed_raw)
+        age = ts - observed if observed > 0.0 else float("inf")
+        if observed <= 0.0 or age < -300.0 or age > float(ttl):
+            return
+        current = selected.get(metric)
+        if isinstance(current, dict) and float(current.get("observed_at") or 0.0) >= observed:
+            return
+        selected[metric] = {
+            "value": value,
+            "observed_at": observed,
+            "age_seconds": max(0.0, age),
+            "source_worker_id": str(worker.get("worker_id") or ""),
+            "source_runtime_kind": str(worker.get("runtime_kind") or ""),
+            **(extra or {}),
+        }
+
+    for worker in members:
+        battery = worker.get("battery") if isinstance(worker.get("battery"), dict) else {}
+        level = next((battery.get(key) for key in ("level", "percent", "percentage") if battery.get(key) is not None), None)
+        try:
+            level_value = float(level) if level is not None else None
+        except (TypeError, ValueError):
+            level_value = None
+        if level_value is not None and 0.0 <= level_value <= 100.0:
+            consider("battery", level_value, battery.get("_level_observed_at"), worker, {"charging": battery.get("charging")})
+        temperature = next((battery.get(key) for key in ("temperature_c", "temperature", "temperatureC") if battery.get(key) is not None), None)
+        try:
+            temperature_value = float(temperature) if temperature is not None else None
+        except (TypeError, ValueError):
+            temperature_value = None
+        if temperature_value is not None and 0.0 < temperature_value < 90.0:
+            consider("temperature", temperature_value, battery.get("_temperature_observed_at"), worker)
+
+        network = worker.get("network") if isinstance(worker.get("network"), dict) else {}
+        kind = next((str(network.get(key) or "").strip() for key in ("type", "kind", "transport", "name") if str(network.get(key) or "").strip()), "")
+        if kind:
+            consider("network", kind, network.get("_network_observed_at"), worker)
+        ping = next((network.get(key) for key in ("vps_ping_ms", "ping_ms", "latency_ms", "vps_latency_ms") if network.get(key) is not None), None)
+        try:
+            ping_value = float(ping) if ping is not None else None
+        except (TypeError, ValueError):
+            ping_value = None
+        if ping_value is not None and 0.0 <= ping_value < 60_000.0:
+            consider("ping", ping_value, network.get("_ping_observed_at"), worker)
+    selected["max_age_seconds"] = float(ttl)
+    return selected
+
+
+def _physical_telemetry_text(members: list[dict[str, Any]], *, now: float | None = None) -> str:
+    metrics = _physical_telemetry_snapshot(members, now=now)
+    parts: list[str] = []
+    battery = metrics.get("battery")
+    if isinstance(battery, dict):
+        charging = battery.get("charging")
+        parts.append(f"{float(battery['value']):.0f}% {'⚡' if charging is True else '🔋'}")
+    else:
+        parts.append("bateria indisponível")
+    temperature = metrics.get("temperature")
+    parts.append(f"{float(temperature['value']):.0f}°C" if isinstance(temperature, dict) else "temperatura indisponível")
+    network = metrics.get("network")
+    parts.append(_shorten(network["value"], limit=14).lower() if isinstance(network, dict) else "rede indisponível")
+    ping = metrics.get("ping")
+    parts.append(f"{float(ping['value']):.0f}ms" if isinstance(ping, dict) else "ping indisponível")
+    return " · ".join(parts)
+
+
 
 def _ping_text(network: dict[str, Any]) -> str:
     for key in ("vps_ping_ms", "ping_ms", "latency_ms", "vps_latency_ms"):
@@ -2005,6 +2090,8 @@ def _automation_phase_label(kind: str, item: dict[str, Any], *, target: object =
     labels = {
         "waiting_agent": f"APK: aguardando agent ({version})",
         "waiting_toolchain": f"APK: aguardando toolchain ({version})",
+        "waiting_apk_readiness": f"APK: preparando ambiente ({version})",
+        "waiting_apk_builder": f"APK: aguardando retorno ({version})",
         "toolchain_downloading": f"APK: baixando toolchain ({version})",
         "preflight_blocked": f"APK: preflight bloqueado ({version})",
         "queued": f"APK: na fila ({version})",
@@ -3334,6 +3421,44 @@ class WorkersPanelView(discord.ui.LayoutView):
         container = discord.ui.Container(*components, accent_color=snapshot.accent)
         self.add_item(container)
 
+    def _physical_build_line(self, members: list[dict[str, Any]]) -> str:
+        registry = self.snapshot.registry_snapshot if isinstance(self.snapshot.registry_snapshot, dict) else {}
+        jobs = [item for item in (registry.get("jobs") or []) if isinstance(item, dict)]
+        member_ids = {str(item.get("worker_id") or "") for item in members}
+        physical_ids = {self._physical_worker_id(item) for item in members}
+        candidates: list[dict[str, Any]] = []
+        for job in jobs:
+            if str(job.get("type") or "").replace("-", "_") != "apk_build_debug":
+                continue
+            if str(job.get("status") or "") not in {"queued", "running"}:
+                continue
+            owner = str(job.get("worker_id") or job.get("target_worker_id") or job.get("preferred_worker_id") or "")
+            if owner not in member_ids and owner not in physical_ids:
+                continue
+            candidates.append(job)
+        if not candidates:
+            return ""
+        job = max(candidates, key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0))
+        version = _shorten(job.get("versionName") or "nova versão", limit=24)
+        status = str(job.get("status") or "queued")
+        owner = str(job.get("worker_id") or job.get("target_worker_id") or "")
+        owner_runtime = next((item for item in members if str(item.get("worker_id") or "") == owner), {})
+        owner_is_apk = str(owner_runtime.get("runtime_kind") or "").lower() == "apk" or str(owner_runtime.get("source") or "").lower().startswith("core-worker-apk")
+        stage = str(job.get("progress_stage") or "").lower()
+        if status == "running" and owner_is_apk:
+            if "publish" in stage:
+                activity = "publicando"
+            elif "result" in stage or "final" in stage:
+                activity = "finalizando"
+            elif any(word in stage for word in ("gradle", "compil", "assembl", "building")):
+                activity = "compilando"
+            else:
+                activity = "preparando ambiente"
+            return f"**Build:** APK `{version}` · {activity}"
+        if status == "running":
+            return f"**Build:** APK `{version}` · usando Termux fallback"
+        return f"**Build:** APK `{version}` · na fila"
+
     def _selected_worker_lines(self, snapshot: WorkerSnapshot) -> list[str]:
         if snapshot.registry_error:
             return [
@@ -3360,7 +3485,6 @@ class WorkersPanelView(discord.ui.LayoutView):
                 lines.append(f"-# {len(roles_union)} função(ões) técnicas disponíveis nos celulares online")
         elif worker:
             members = self._physical_group_for_worker_id(str(worker.get("worker_id") or "")) or [worker]
-            preferred = self._preferred_runtime(members) or worker
             parent = self._group_parent(members)
             apk = self._group_apk(members)
             online = any(bool(item.get("online")) for item in members)
@@ -3372,22 +3496,41 @@ class WorkersPanelView(discord.ui.LayoutView):
             seen = _format_age(min(seen_values)) if seen_values else "n/a"
             lines.append(f"**Status:** {('online' if online else 'offline')} · visto {seen}")
 
-            runtime_parts: list[str] = []
             if apk is not None:
                 apk_caps = {str(item) for item in apk.get("capabilities") or []}
+                apk_status = apk.get("status") if isinstance(apk.get("status"), dict) else {}
+                apk_builder = apk_status.get("apk_self_builder") if isinstance(apk_status.get("apk_self_builder"), dict) else {}
                 apk_version = _shorten(apk.get("version") or "sem versão", limit=24)
-                apk_state = "principal" if apk.get("online") and "apk-builder" in apk_caps else ("online" if apk.get("online") else "offline")
-                runtime_parts.append(f"APK `{apk_version}` · {apk_state}")
+                checked_at = _telemetry_epoch(apk_builder.get("checkedAt") or apk_builder.get("updatedAt"))
+                readiness_max_age = max(60.0, min(
+                    1800.0,
+                    _env_float("CORE_WORKER_APK_BUILDER_READINESS_MAX_AGE_SECONDS", 360.0),
+                ))
+                received_ready_at = _telemetry_epoch(apk.get("apk_builder_last_ready_at"))
+                readiness_fresh = (
+                    checked_at > 0.0 and 0.0 <= time.time() - checked_at <= readiness_max_age
+                ) or (
+                    received_ready_at > 0.0
+                    and 0.0 <= time.time() - received_ready_at <= readiness_max_age
+                )
+                if apk.get("online") and "apk-builder" in apk_caps and bool(apk_builder.get("ready")) and readiness_fresh:
+                    apk_state = "Principal · autobuild pronto"
+                elif apk.get("online"):
+                    apk_state = "Online · preparando ambiente"
+                else:
+                    apk_state = "Indisponível"
+                lines.append(f"**APK `{apk_version}`** · {apk_state}")
             if parent is not None:
                 parent_version = _agent_version_label(parent.get("version"))
-                parent_state = "fallback" if parent.get("online") else "offline"
-                runtime_parts.append(f"Termux `{parent_version}` · {parent_state}")
-            if runtime_parts:
-                lines.append("**Runtimes:** " + " · ".join(runtime_parts))
+                parent_state = "Fallback" if parent.get("online") else "Offline"
+                lines.append(f"**Termux `{parent_version}`** · {parent_state}")
 
-            lines.append(f"**Aparelho:** {_battery_text(preferred)} · {_simple_network_text(preferred)}")
+            lines.append(f"**Aparelho:** {_physical_telemetry_text(members)}")
+            build_line = self._physical_build_line(members)
+            if build_line:
+                lines.append(build_line)
             if len(members) <= 1:
-                queue_text = _queue_status_text(preferred)
+                queue_text = _queue_status_text(worker)
                 if queue_text:
                     lines.append(f"**Fila:** {queue_text}")
             model = str((apk or {}).get("name") or "").strip()
@@ -4415,7 +4558,6 @@ class WorkersCommandMixin:
             raise FileNotFoundError(str(project))
         release_dir = project / "releases"
         release_dir.mkdir(parents=True, exist_ok=True)
-        zip_path = release_dir / "source-core-worker-app.zip"
         excluded_dirs = {"build", ".gradle", "releases", ".idea"}
         excluded_names = {
             ".env",
@@ -4426,38 +4568,80 @@ class WorkersCommandMixin:
             "firebase-service-account.json",
         }
         excluded_suffixes = (".jks", ".keystore", ".p12", ".pem", ".key")
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for path in sorted(project.rglob("*")):
-                rel_project = path.relative_to(project)
-                if any(part in excluded_dirs for part in rel_project.parts):
-                    continue
-                if path.is_dir():
-                    continue
-                name = path.name.lower()
-                rel_text = rel_project.as_posix().lower()
-                if name in excluded_names or "service-account" in name or rel_text.endswith("/google-services.json"):
-                    continue
-                if any(name.endswith(suffix) for suffix in excluded_suffixes):
-                    continue
-                arcname = Path("android/core-worker-app") / rel_project
-                already_compressed = path.suffix.lower() in {".zip", ".jar", ".apk", ".so", ".gz", ".xz", ".zst", ".7z"}
-                zf.write(
-                    path,
-                    arcname.as_posix(),
-                    compress_type=zipfile.ZIP_STORED if already_compressed else zipfile.ZIP_DEFLATED,
-                    compresslevel=None if already_compressed else 6,
-                )
-        digest = hashlib.sha256()
-        source_bytes = 0
-        with zip_path.open("rb") as source_file:
-            for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
-                source_bytes += len(chunk)
-                digest.update(chunk)
+        source_files: list[tuple[Path, Path]] = []
+        for path in sorted(project.rglob("*")):
+            rel_project = path.relative_to(project)
+            if path.is_dir() or any(part in excluded_dirs for part in rel_project.parts):
+                continue
+            name = path.name.lower()
+            rel_text = rel_project.as_posix().lower()
+            if name in excluded_names or "service-account" in name or rel_text.endswith("/google-services.json"):
+                continue
+            if any(name.endswith(suffix) for suffix in excluded_suffixes):
+                continue
+            source_files.append((path, rel_project))
+
+        # O nome servido nunca é aberto para escrita. Primeiro conclua e
+        # sincronize um temporário privado; publique depois pelo hash exato.
+        temp = release_dir / f".source-core-worker-app.{os.getpid()}.{time.time_ns()}.tmp"
+        try:
+            with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as zf:
+                for path, rel_project in source_files:
+                    before = path.stat()
+                    info = zipfile.ZipInfo(
+                        (Path("android/core-worker-app") / rel_project).as_posix(),
+                        date_time=(1980, 1, 1, 0, 0, 0),
+                    )
+                    info.create_system = 3
+                    info.external_attr = ((before.st_mode & 0o777) | 0o100000) << 16
+                    info.compress_type = (
+                        zipfile.ZIP_STORED
+                        if path.suffix.lower() in {".zip", ".jar", ".apk", ".so", ".gz", ".xz", ".zst", ".7z"}
+                        else zipfile.ZIP_DEFLATED
+                    )
+                    with path.open("rb") as source_file, zf.open(info, "w", force_zip64=True) as target_file:
+                        for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                            target_file.write(chunk)
+                    after = path.stat()
+                    if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+                        raise RuntimeError(f"fonte mudou enquanto o ZIP era preparado: {rel_project.as_posix()}")
+            with temp.open("rb") as source_file:
+                os.fsync(source_file.fileno())
+            source_bytes = temp.stat().st_size
+            digest = hashlib.sha256()
+            with temp.open("rb") as source_file:
+                for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            source_sha256 = digest.hexdigest()
+            zip_path = release_dir / f"source-core-worker-app-{source_sha256}.zip"
+            existing_valid = False
+            if zip_path.is_file() and zip_path.stat().st_size == source_bytes:
+                existing_digest = hashlib.sha256()
+                with zip_path.open("rb") as source_file:
+                    for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                        existing_digest.update(chunk)
+                existing_valid = existing_digest.hexdigest() == source_sha256
+            if existing_valid:
+                temp.unlink()
+            else:
+                os.replace(temp, zip_path)
+                try:
+                    directory_fd = os.open(str(release_dir), os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                except OSError:
+                    pass
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temp.unlink()
         return {
             "path": str(zip_path),
             "filename": zip_path.name,
             "bytes": source_bytes,
-            "sha256": digest.hexdigest(),
+            "sha256": source_sha256,
+            "source_fingerprint": source_sha256,
             "url": f"{_public_base_url()}/core-worker/app/{zip_path.name}",
             "firebase_config_delivery": "job_payload",
         }
@@ -4472,6 +4656,7 @@ class WorkersCommandMixin:
             "source_zip_url": source["url"],
             "source_sha256": source["sha256"],
             "source_bytes": source["bytes"],
+            "sourceFingerprint": source["source_fingerprint"],
             "firebase_config_delivery": source.get("firebase_config_delivery") or "job_payload",
             **firebase_config,
             **signing_config,
@@ -4506,7 +4691,7 @@ class WorkersCommandMixin:
         # `vps-assist` escrito nas capabilities antigas.
         required_caps = ["apk-builder"] if is_apk_build else []
         ttl = 7200 if is_apk_build else (1200 if task in assist_tasks or task in {"log_summary", "maintenance_plan", "zip_validate"} else 900)
-        lease = 7200 if is_apk_build else (240 if task in assist_tasks or task in {"log_summary", "maintenance_plan", "zip_validate"} else 120)
+        lease = 240 if is_apk_build else (240 if task in assist_tasks or task in {"log_summary", "maintenance_plan", "zip_validate"} else 120)
         return await asyncio.to_thread(
             registry.create_job,
             job_type=job_type,

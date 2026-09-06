@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import re
@@ -25,10 +26,12 @@ WORKER_CAPABILITY_LIMIT = 64
 WORKER_SHORT_FIELD_LIMIT = 64
 WORKER_SUPPORTED_TASK_LIMIT = 96
 WORKER_STATUS_ITEM_LIMIT = 48
+WORKER_STATUS_NESTED_ITEM_LIMIT = 32
 WORKER_STATUS_STRING_LIMIT = 1024
 DEFAULT_APK_EXECUTOR_STALE_GRACE_SECONDS = 90
 DEFAULT_APK_EXECUTOR_MISMATCH_CONFIRM_SECONDS = 45
 DEFAULT_APK_EXECUTOR_RECOVERY_LIMIT = 1
+DEFAULT_APK_BUILDER_READINESS_MAX_AGE_SECONDS = 360
 
 # Campos binários autenticados precisam ultrapassar o limite de texto comum.
 # O limite maior é aplicado somente ao payload de jobs, nunca a heartbeat,
@@ -144,6 +147,86 @@ class CoreWorkerRegistryError(RuntimeError):
     def __init__(self, message: str, *, status: int = 400):
         super().__init__(message)
         self.status = int(status)
+
+
+class _RegistryTransactionLock:
+    """RLock local + flock para read/modify/write entre bot, web e automação."""
+
+    def __init__(self, registry_path: Path):
+        self._thread_lock = threading.RLock()
+        self._state = threading.local()
+        self._path = registry_path.with_suffix(registry_path.suffix + ".lock")
+
+    def acquire(self, blocking: bool = True, timeout: float = -1.0) -> bool:
+        if not blocking:
+            thread_acquired = self._thread_lock.acquire(False)
+        elif timeout is None or float(timeout) < 0.0:
+            thread_acquired = self._thread_lock.acquire(True)
+        else:
+            thread_acquired = self._thread_lock.acquire(True, max(0.0, float(timeout)))
+        if not thread_acquired:
+            return False
+
+        depth = int(getattr(self._state, "depth", 0) or 0)
+        if depth > 0:
+            self._state.depth = depth + 1
+            return True
+
+        fh = None
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fh = self._path.open("a+", encoding="utf-8")
+            try:
+                os.chmod(self._path, 0o600)
+            except OSError:
+                pass
+            if blocking and (timeout is None or float(timeout) < 0.0):
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            else:
+                deadline = time.monotonic() + (max(0.0, float(timeout)) if blocking else 0.0)
+                while True:
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if not blocking or time.monotonic() >= deadline:
+                            fh.close()
+                            self._thread_lock.release()
+                            return False
+                        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+            self._state.depth = 1
+            self._state.fh = fh
+            return True
+        except Exception:
+            if fh is not None and not fh.closed:
+                fh.close()
+            self._thread_lock.release()
+            raise
+
+    def release(self) -> None:
+        depth = int(getattr(self._state, "depth", 0) or 0)
+        if depth <= 0:
+            raise RuntimeError("registry lock não adquirido")
+        if depth == 1:
+            fh = getattr(self._state, "fh", None)
+            try:
+                if fh is not None:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                if fh is not None:
+                    fh.close()
+                self._state.depth = 0
+                self._state.fh = None
+        else:
+            self._state.depth = depth - 1
+        self._thread_lock.release()
+
+    def __enter__(self) -> "_RegistryTransactionLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        self.release()
 
 
 def _repo_root() -> Path:
@@ -307,14 +390,29 @@ def _merge_worker_status(worker: dict[str, Any], incoming: object) -> None:
         return
     current = worker.get("status") if isinstance(worker.get("status"), dict) else {}
     merged = dict(current)
-    for key, value in _safe_dict(incoming, max_items=WORKER_STATUS_ITEM_LIMIT, max_string=WORKER_STATUS_STRING_LIMIT).items():
+    for key, value in _safe_dict(
+        incoming,
+        max_items=WORKER_STATUS_ITEM_LIMIT,
+        max_string=WORKER_STATUS_STRING_LIMIT,
+        nested_max_items=WORKER_STATUS_NESTED_ITEM_LIMIT,
+    ).items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             nested = dict(merged.get(key) or {})
             nested.update(value)
-            merged[key] = _safe_dict(nested, max_items=WORKER_STATUS_ITEM_LIMIT, max_string=WORKER_STATUS_STRING_LIMIT)
+            merged[key] = _safe_dict(
+                nested,
+                max_items=WORKER_STATUS_ITEM_LIMIT,
+                max_string=WORKER_STATUS_STRING_LIMIT,
+                nested_max_items=WORKER_STATUS_NESTED_ITEM_LIMIT,
+            )
         else:
             merged[key] = value
-    worker["status"] = _safe_dict(merged, max_items=WORKER_STATUS_ITEM_LIMIT, max_string=WORKER_STATUS_STRING_LIMIT)
+    worker["status"] = _safe_dict(
+        merged,
+        max_items=WORKER_STATUS_ITEM_LIMIT,
+        max_string=WORKER_STATUS_STRING_LIMIT,
+        nested_max_items=WORKER_STATUS_NESTED_ITEM_LIMIT,
+    )
 
 
 def _safe_dict(
@@ -324,11 +422,13 @@ def _safe_dict(
     max_string: int = 8192,
     opaque_string_keys: frozenset[str] | None = None,
     max_opaque_string: int | None = None,
+    nested_max_items: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     opaque_keys = opaque_string_keys or frozenset()
     opaque_limit = max(max_string, int(max_opaque_string or max_string))
+    child_limit = max(1, int(nested_max_items if nested_max_items is not None else 12))
     clean: dict[str, Any] = {}
     for key, item in list(value.items())[:max_items]:
         k = _short_text(key, limit=48)
@@ -349,6 +449,7 @@ def _safe_dict(
                         max_string=max_string,
                         opaque_string_keys=opaque_keys,
                         max_opaque_string=opaque_limit,
+                        nested_max_items=nested_max_items,
                     ))
                 elif isinstance(x, (str, int, float, bool)) or x is None:
                     clean_list.append(x if not isinstance(x, str) or len(x) <= max_string else x[:max_string] + "…[truncated]")
@@ -356,14 +457,172 @@ def _safe_dict(
         elif isinstance(item, Mapping):
             clean[k] = _safe_dict(
                 item,
-                max_items=12,
+                max_items=child_limit,
                 max_string=max_string,
                 opaque_string_keys=opaque_keys,
                 max_opaque_string=opaque_limit,
+                nested_max_items=nested_max_items,
             )
         else:
             clean[k] = _short_text(item, limit=120)
     return clean
+
+
+def _normalized_observed_at(value: object, *, received_at: float) -> float:
+    """Normaliza timestamp do aparelho sem deixar relógio ruim fabricar freshness."""
+    try:
+        observed = float(value or 0.0)
+    except (TypeError, ValueError):
+        return received_at
+    if observed > 10_000_000_000:
+        observed /= 1000.0
+    # O horário de recebimento é autoritativo se o relógio do telefone estiver
+    # muito adiantado ou se o valor não for um epoch plausível.
+    if observed <= 0.0 or observed > received_at + 300.0:
+        return received_at
+    return observed
+
+
+def _epoch_seconds(value: object) -> float:
+    """Converte epoch s/ms sem fabricar um horário quando o valor é inválido."""
+    try:
+        epoch = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if epoch > 10_000_000_000:
+        epoch /= 1000.0
+    return epoch if epoch > 0.0 else 0.0
+
+
+def _stamp_telemetry(value: object, *, kind: str, received_at: float) -> dict[str, Any]:
+    clean = _safe_dict(value, max_items=16, max_string=512)
+    if not clean:
+        return {}
+    common = _normalized_observed_at(
+        clean.get("measured_at") or clean.get("observed_at") or clean.get("updated_at"),
+        received_at=received_at,
+    )
+    clean["_received_at"] = received_at
+    if kind == "battery":
+        raw_level = next((clean.get(key) for key in ("level", "percent", "percentage") if clean.get(key) is not None), None)
+        try:
+            valid_level = raw_level is not None and 0.0 <= float(raw_level) <= 100.0
+        except (TypeError, ValueError):
+            valid_level = False
+        if valid_level:
+            clean["_level_observed_at"] = _normalized_observed_at(
+                clean.get("level_observed_at") or common, received_at=received_at,
+            )
+        raw_temperature = next((clean.get(key) for key in ("temperature_c", "temperature", "temperatureC") if clean.get(key) is not None), None)
+        try:
+            valid_temperature = raw_temperature is not None and 0.0 < float(raw_temperature) < 90.0
+        except (TypeError, ValueError):
+            valid_temperature = False
+        if valid_temperature:
+            clean["_temperature_observed_at"] = _normalized_observed_at(
+                clean.get("temperature_observed_at") or common, received_at=received_at,
+            )
+    elif kind == "network":
+        if any(clean.get(key) is not None and str(clean.get(key)).strip() for key in ("type", "kind", "transport", "name")):
+            clean["_network_observed_at"] = _normalized_observed_at(
+                clean.get("network_observed_at") or common, received_at=received_at,
+            )
+        raw_ping = next((clean.get(key) for key in ("vps_ping_ms", "ping_ms", "latency_ms", "vps_latency_ms") if clean.get(key) is not None), None)
+        try:
+            valid_ping = raw_ping is not None and 0.0 <= float(raw_ping) < 60_000.0
+        except (TypeError, ValueError):
+            valid_ping = False
+        if valid_ping:
+            clean["_ping_observed_at"] = _normalized_observed_at(
+                clean.get("ping_observed_at") or common, received_at=received_at,
+            )
+    return clean
+
+
+def _update_worker_telemetry(record: dict[str, Any], payload: Mapping[str, Any], *, received_at: float) -> None:
+    # Ausência não renova o valor anterior. Assim um runtime que parou de medir
+    # bateria/rede não consegue manter um cache antigo artificialmente atual.
+    for kind in ("battery", "network"):
+        if kind not in payload:
+            continue
+        incoming = _stamp_telemetry(payload.get(kind), kind=kind, received_at=received_at)
+        if not incoming:
+            continue
+        previous = _safe_dict(record.get(kind), max_items=16, max_string=512)
+        merged = dict(previous)
+        if kind == "battery":
+            level_keys = ("level", "percent", "percentage")
+            temperature_keys = ("temperature_c", "temperature", "temperatureC")
+            if incoming.get("_level_observed_at") is not None:
+                for key in level_keys:
+                    merged.pop(key, None)
+                for key in level_keys:
+                    if incoming.get(key) is not None:
+                        merged[key] = incoming[key]
+                        break
+                merged["_level_observed_at"] = incoming["_level_observed_at"]
+                if "charging" in incoming:
+                    merged["charging"] = incoming["charging"]
+            if incoming.get("_temperature_observed_at") is not None:
+                for key in temperature_keys:
+                    merged.pop(key, None)
+                for key in temperature_keys:
+                    if incoming.get(key) is not None:
+                        merged[key] = incoming[key]
+                        break
+                merged["_temperature_observed_at"] = incoming["_temperature_observed_at"]
+            metric_keys = set(level_keys + temperature_keys) | {
+                "level_observed_at", "temperature_observed_at",
+                "_level_observed_at", "_temperature_observed_at", "charging",
+            }
+        else:
+            network_keys = ("type", "kind", "transport", "name")
+            ping_keys = ("vps_ping_ms", "ping_ms", "latency_ms", "vps_latency_ms")
+            if incoming.get("_network_observed_at") is not None:
+                for key in network_keys:
+                    merged.pop(key, None)
+                for key in network_keys:
+                    if str(incoming.get(key) or "").strip():
+                        merged[key] = incoming[key]
+                        break
+                merged["_network_observed_at"] = incoming["_network_observed_at"]
+            if incoming.get("_ping_observed_at") is not None:
+                for key in ping_keys:
+                    merged.pop(key, None)
+                for key in ping_keys:
+                    if incoming.get(key) is not None:
+                        merged[key] = incoming[key]
+                        break
+                merged["_ping_observed_at"] = incoming["_ping_observed_at"]
+            metric_keys = set(network_keys + ping_keys) | {
+                "network_observed_at", "ping_observed_at",
+                "_network_observed_at", "_ping_observed_at",
+            }
+        # Preserve metadados auxiliares (charging, reachable etc.) sem permitir
+        # que aliases inválidos substituam uma medição ainda fresca.
+        for key, item in incoming.items():
+            if key not in metric_keys:
+                merged[key] = item
+        record[kind] = _safe_dict(merged, max_items=16, max_string=512)
+
+
+def _remember_apk_builder_readiness(record: dict[str, Any], *, now: float) -> None:
+    status = record.get("status") if isinstance(record.get("status"), Mapping) else {}
+    builder = status.get("apk_self_builder") if isinstance(status.get("apk_self_builder"), Mapping) else {}
+    checked_at = _normalized_observed_at(
+        builder.get("checkedAt") or builder.get("updatedAt"), received_at=now,
+    ) if (builder.get("checkedAt") or builder.get("updatedAt")) else 0.0
+    max_age = max(60, min(1800, _env_int(
+        "CORE_WORKER_APK_BUILDER_READINESS_MAX_AGE_SECONDS",
+        DEFAULT_APK_BUILDER_READINESS_MAX_AGE_SECONDS,
+    )))
+    if (
+        bool(builder.get("ready"))
+        and bool(builder.get("ok", True))
+        and checked_at > 0.0
+        and 0.0 <= now - checked_at <= max_age
+    ):
+        record["apk_builder_last_ready_at"] = now
 
 
 def _job_payload_opaque_string_limit() -> int:
@@ -475,11 +734,17 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "battery": _safe_dict(record.get("battery"), max_items=12, max_string=512),
         "network": _safe_dict(record.get("network"), max_items=12, max_string=512),
         "health": _safe_dict(record.get("health"), max_items=16, max_string=1024),
-        "status": _safe_dict(record.get("status"), max_items=WORKER_STATUS_ITEM_LIMIT, max_string=WORKER_STATUS_STRING_LIMIT),
+        "status": _safe_dict(
+            record.get("status"),
+            max_items=WORKER_STATUS_ITEM_LIMIT,
+            max_string=WORKER_STATUS_STRING_LIMIT,
+            nested_max_items=WORKER_STATUS_NESTED_ITEM_LIMIT,
+        ),
         "remote_addr": _short_text(record.get("remote_addr"), limit=WORKER_SHORT_FIELD_LIMIT),
         "updater_last_delivery_at": record.get("updater_last_delivery_at"),
         "updater_last_delivery_target_version": _short_text(record.get("updater_last_delivery_target_version"), limit=48),
         "updater_last_delivery_target_hash": _short_text(record.get("updater_last_delivery_target_hash"), limit=WORKER_SHORT_FIELD_LIMIT),
+        "apk_builder_last_ready_at": record.get("apk_builder_last_ready_at"),
     }
     return public
 
@@ -577,7 +842,51 @@ def _worker_apk_self_builder_state(worker: Mapping[str, Any]) -> tuple[bool, boo
         return False, False
     status = worker.get("status") if isinstance(worker.get("status"), Mapping) else {}
     builder = status.get("apk_self_builder") if isinstance(status.get("apk_self_builder"), Mapping) else {}
-    return bool(builder.get("ready")), bool(builder.get("publishReady") or builder.get("publish_ready"))
+    try:
+        checked_at = float(builder.get("checkedAt") or builder.get("updatedAt") or 0.0)
+    except (TypeError, ValueError):
+        checked_at = 0.0
+    if checked_at > 10_000_000_000:
+        checked_at /= 1000.0
+    max_age = max(60, min(1800, _env_int(
+        "CORE_WORKER_APK_BUILDER_READINESS_MAX_AGE_SECONDS",
+        DEFAULT_APK_BUILDER_READINESS_MAX_AGE_SECONDS,
+    )))
+    now = _now()
+    received_ready_at = _epoch_seconds(worker.get("apk_builder_last_ready_at"))
+    # `apk_builder_last_ready_at` é gravado pelo relógio da VPS somente após um
+    # heartbeat ready/ok válido. Ele resolve skew do relógio Android sem aceitar
+    # freshness inventada pelo cliente.
+    fresh = (
+        checked_at > 0.0 and 0.0 <= now - checked_at <= max_age
+    ) or (
+        received_ready_at > 0.0 and 0.0 <= now - received_ready_at <= max_age
+    )
+    return bool(builder.get("ready")) and fresh, bool(builder.get("publishReady") or builder.get("publish_ready")) and fresh
+
+
+def _worker_requires_lease_token(worker: Mapping[str, Any]) -> bool:
+    capabilities = set(normalize_roles(worker.get("capabilities"), limit=WORKER_CAPABILITY_LIMIT))
+    capabilities |= set(normalize_roles(worker.get("manual_capabilities"), limit=WORKER_CAPABILITY_LIMIT))
+    return "apk-job-lease-token-v1" in capabilities
+
+
+def _clear_job_lease(job: dict[str, Any]) -> None:
+    job["lease_until"] = 0
+    job.pop("lease_token_hash", None)
+    job.pop("lease_token_issued_at", None)
+    job.pop("lease_token_required", None)
+
+
+def _lease_token_matches(job: Mapping[str, Any], worker: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    expected_hash = str(job.get("lease_token_hash") or "").strip()
+    supplied = str(payload.get("lease_token") or payload.get("leaseToken") or "").strip()
+    if supplied:
+        return bool(expected_hash) and secrets.compare_digest(expected_hash, _hash_secret(supplied))
+    # A exigência é congelada no claim. Um job/outbox iniciado no 0.8.5 não
+    # perde ownership só porque o app reiniciou como 0.8.6 e agora anuncia v1.
+    # Jobs legados sem o campo também continuam aceitos durante a migração.
+    return not bool(job.get("lease_token_required", False))
 
 
 def _public_worker_builder_preference(worker: Mapping[str, Any], job_type: str) -> tuple[Any, ...]:
@@ -610,9 +919,14 @@ def _sanitize_registry_for_storage(data: dict[str, Any]) -> None:
     for worker in workers.values():
         if not isinstance(worker, dict):
             continue
-        for key, max_items in (("battery", 12), ("network", 12), ("health", 16), ("status", 32)):
+        for key, max_items in (("battery", 12), ("network", 12), ("health", 16), ("status", WORKER_STATUS_ITEM_LIMIT)):
             if isinstance(worker.get(key), Mapping):
-                worker[key] = _safe_dict(worker.get(key), max_items=max_items, max_string=1024)
+                worker[key] = _safe_dict(
+                    worker.get(key),
+                    max_items=max_items,
+                    max_string=1024,
+                    nested_max_items=WORKER_STATUS_NESTED_ITEM_LIMIT if key == "status" else None,
+                )
     jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
     for job in jobs.values():
         if isinstance(job, dict):
@@ -628,7 +942,7 @@ class CoreWorkersRegistry:
 
     def __init__(self, path: Path | None = None):
         self.path = path or _registry_path()
-        self._lock = threading.RLock()
+        self._lock = _RegistryTransactionLock(self.path)
 
     def _empty(self) -> dict[str, Any]:
         return {"version": REGISTRY_VERSION, "pairings": {}, "workers": {}, "jobs": {}}
@@ -655,8 +969,19 @@ class CoreWorkersRegistry:
         _sanitize_registry_for_storage(data)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.path)
+        with tmp.open("w", encoding="utf-8") as output:
+            json.dump(data, output, ensure_ascii=False, indent=2, sort_keys=True)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(tmp, self.path)
+        try:
+            directory_fd = os.open(str(self.path.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
         try:
             os.chmod(self.path, 0o600)
         except Exception:
@@ -1027,10 +1352,14 @@ class CoreWorkersRegistry:
                 "parent_worker_id": _short_text(payload.get("parent_worker_id"), limit=WORKER_SHORT_FIELD_LIMIT),
                 "physical_worker_id": _short_text(payload.get("physical_worker_id") or payload.get("parent_worker_id") or worker_id, limit=WORKER_SHORT_FIELD_LIMIT),
                 "remote_addr": _short_text(remote_addr, limit=WORKER_SHORT_FIELD_LIMIT),
-                "battery": _safe_dict(payload.get("battery"), max_items=16),
-                "network": _safe_dict(payload.get("network"), max_items=16),
+                "battery": _stamp_telemetry(payload.get("battery"), kind="battery", received_at=ts),
+                "network": _stamp_telemetry(payload.get("network"), kind="network", received_at=ts),
                 "health": _safe_dict(payload.get("health"), max_items=24),
-                "status": _safe_dict(payload.get("status"), max_items=24),
+                "status": _safe_dict(
+                    payload.get("status"),
+                    max_items=24,
+                    nested_max_items=WORKER_STATUS_NESTED_ITEM_LIMIT,
+                ),
             }
             workers[worker_id] = record
             data["workers"] = workers
@@ -1113,15 +1442,18 @@ class CoreWorkersRegistry:
             record["capabilities"] = _merge_unique(capabilities, normalize_roles(record.get("manual_capabilities"), limit=WORKER_CAPABILITY_LIMIT), limit=WORKER_CAPABILITY_LIMIT)
             if tasks:
                 record["supported_tasks"] = tasks
-            for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
+            _update_worker_telemetry(record, payload, received_at=ts)
+            for key, max_items in (("health", 24), ("status", 24)):
                 if key not in payload:
                     continue
                 if key == "status":
                     _merge_worker_status(record, payload.get(key))
                 else:
                     record[key] = _safe_dict(payload.get(key), max_items=max_items)
+            _remember_apk_builder_readiness(record, now=ts)
             workers[worker_id] = record
             data["workers"] = workers
+            self._mark_satisfied_worker_updates_unlocked(data, worker_id=worker_id, worker=record, now=ts)
             self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
             self._save_unlocked(data)
             public = _compact_worker_public(record, now=ts)
@@ -1157,19 +1489,70 @@ class CoreWorkersRegistry:
                 record["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), limit=WORKER_CAPABILITY_LIMIT), limit=WORKER_CAPABILITY_LIMIT)
             if "supported_tasks" in payload:
                 record["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=WORKER_SUPPORTED_TASK_LIMIT)
-            for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
+            _update_worker_telemetry(record, payload, received_at=ts)
+            for key, max_items in (("health", 24), ("status", 24)):
                 if key not in payload:
                     continue
                 if key == "status":
                     _merge_worker_status(record, payload.get(key))
                 else:
                     record[key] = _safe_dict(payload.get(key), max_items=max_items)
+            _remember_apk_builder_readiness(record, now=ts)
             workers[worker_id] = record
             data["workers"] = workers
+            self._mark_satisfied_worker_updates_unlocked(data, worker_id=worker_id, worker=record, now=ts)
             self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
             self._save_unlocked(data)
             public = _compact_worker_public(record, now=ts)
         return {"ok": True, "worker_id": worker_id, "worker": public}
+
+    def _mark_satisfied_worker_updates_unlocked(
+        self,
+        data: dict[str, Any],
+        *,
+        worker_id: str,
+        worker: Mapping[str, Any],
+        now: float,
+    ) -> int:
+        """Fecha updates redundantes quando o heartbeat já prova versão e hash."""
+        if not _is_termux_runtime_record(worker):
+            return 0
+        actual_version = str(worker.get("version") or "").strip()
+        actual_hash = str(worker.get("source_hash") or "").strip().lower()
+        changed = 0
+        jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+        for job in jobs.values():
+            if not isinstance(job, dict) or _normalize_job_type(job.get("type")) != "worker_update":
+                continue
+            if str(job.get("status") or "") not in {"queued", "running"}:
+                continue
+            assigned = str(
+                job.get("worker_id")
+                or job.get("target_worker_id")
+                or job.get("preferred_worker_id")
+                or ""
+            )
+            if assigned != worker_id:
+                continue
+            desired = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
+            target_version = str(desired.get("version") or "").strip()
+            target_hash = str(desired.get("source_hash") or desired.get("target_source_hash") or "").strip().lower()
+            if not target_version or actual_version != target_version:
+                continue
+            if target_hash and actual_hash != target_hash:
+                continue
+            job["status"] = "succeeded"
+            job["worker_id"] = worker_id
+            job["updated_at"] = now
+            job["finished_at"] = now
+            _clear_job_lease(job)
+            job["summary"] = "runtime já confirmou a versão e fonte desejadas"
+            job["error"] = ""
+            job["result"] = {"ok": True, "confirmed_by_heartbeat": True}
+            job["payload"] = {}
+            job["payload_dropped_after_finish"] = True
+            changed += 1
+        return changed
 
     def _reconcile_jobs_from_worker_status_unlocked(self, data: dict[str, Any], *, now: float | None = None) -> int:
         """Reconcilia resultados finais e leases APK perdidos a partir do heartbeat.
@@ -1199,17 +1582,22 @@ class CoreWorkersRegistry:
             # direto de resultado se perdeu durante uma troca de processo/rede.
             result_job_id = _short_text(queue.get("last_result_job_id") or queue.get("last_completed_job_id"), limit=WORKER_SHORT_FIELD_LIMIT)
             final_status = str(queue.get("last_result_status") or queue.get("last_completed_status") or "").strip().lower()
+            result_at = _epoch_seconds(queue.get("last_result_at") or queue.get("last_completed_at"))
             if result_job_id and final_status in {"succeeded", "failed"}:
                 job = jobs.get(result_job_id)
                 if isinstance(job, dict):
                     current = str(job.get("status") or "queued").strip().lower()
                     assigned = str(job.get("worker_id") or job.get("target_worker_id") or "")
-                    if current in {"queued", "running"} and (not assigned or assigned == str(worker_id)):
+                    claim_at = _epoch_seconds(job.get("lease_token_issued_at") or job.get("started_at"))
+                    result_matches_current_lease = result_at > 0.0 and (
+                        claim_at <= 0.0 or result_at + 2.0 >= claim_at
+                    )
+                    if current == "running" and assigned == str(worker_id) and result_matches_current_lease:
                         summary = _short_text(queue.get("last_result_summary") or job.get("summary") or final_status, limit=160)
-                        finished_at = queue.get("last_result_at") or queue.get("last_completed_at") or ts
+                        finished_at = result_at
                         job["status"] = final_status
                         job["worker_id"] = str(worker_id)
-                        job["lease_until"] = 0
+                        _clear_job_lease(job)
                         job["finished_at"] = finished_at
                         job["updated_at"] = ts
                         job.pop("executor_missing_since", None)
@@ -1233,6 +1621,7 @@ class CoreWorkersRegistry:
             active_stage = _short_text(queue.get("active_job_stage"), limit=WORKER_SHORT_FIELD_LIMIT)
             capabilities = set(normalize_roles(worker.get("capabilities"), limit=WORKER_CAPABILITY_LIMIT))
             durable_executor = "apk-durable-jobs-v1" in capabilities
+            active_lease_hash = _short_text(queue.get("active_job_lease_token_hash"), limit=WORKER_SHORT_FIELD_LIMIT)
             legacy_last_job_id = _short_text(queue.get("last_job_id"), limit=WORKER_SHORT_FIELD_LIMIT)
             try:
                 legacy_last_poll_at = float(queue.get("last_poll_at") or 0.0)
@@ -1250,13 +1639,29 @@ class CoreWorkersRegistry:
                     continue
                 if _normalize_job_type(job.get("type")) not in {"apk_build_debug", "apk_publish_last"}:
                     continue
-                if durable_executor and jid == active_job_id:
+                expected_lease_hash = str(job.get("lease_token_hash") or "")
+                lease_token_required = bool(job.get("lease_token_required", False))
+                ownership_matches = (
+                    jid == active_job_id
+                    and (
+                        not lease_token_required
+                        or (bool(active_lease_hash) and secrets.compare_digest(active_lease_hash, expected_lease_hash))
+                    )
+                )
+                if durable_executor and ownership_matches:
                     if job.pop("executor_missing_since", None) is not None:
                         changed += 1
                     if active_stage:
                         job["progress_stage"] = active_stage
                     continue
-                if jid == result_job_id and final_status in {"succeeded", "failed"}:
+                current_claim_at = _epoch_seconds(job.get("lease_token_issued_at") or job.get("started_at"))
+                current_result_matches = (
+                    jid == result_job_id
+                    and final_status in {"succeeded", "failed"}
+                    and result_at > 0.0
+                    and (current_claim_at <= 0.0 or result_at + 2.0 >= current_claim_at)
+                )
+                if current_result_matches:
                     continue
                 if pending_results > 0:
                     # Resultado já está persistido no APK; dê tempo para o outbox.
@@ -1277,7 +1682,7 @@ class CoreWorkersRegistry:
                     ) or bool(
                         result_job_id
                         and result_job_id != jid
-                        and float(queue.get("last_result_at") or 0.0) > job_updated_at + confirm
+                        and result_at > job_updated_at + confirm
                     )
                     if not moved_on:
                         continue
@@ -1300,7 +1705,7 @@ class CoreWorkersRegistry:
                 if can_requeue:
                     job["status"] = "queued"
                     job["worker_id"] = ""
-                    job["lease_until"] = 0
+                    _clear_job_lease(job)
                     job["updated_at"] = ts
                     job["executor_recoveries"] = recoveries + 1
                     job["last_executor_error"] = "executor_lost_job"
@@ -1312,7 +1717,7 @@ class CoreWorkersRegistry:
                     job["error"] = ""
                 else:
                     job["status"] = "failed"
-                    job["lease_until"] = 0
+                    _clear_job_lease(job)
                     job["finished_at"] = ts
                     job["updated_at"] = ts
                     job["error"] = "executor_lost_job: APK online perdeu o job ativo"
@@ -1346,10 +1751,11 @@ class CoreWorkersRegistry:
                 if attempts < max_attempts and (not expires_at or expires_at > ts):
                     job["status"] = "queued"
                     job["worker_id"] = ""
-                    job["lease_until"] = 0
+                    _clear_job_lease(job)
                     job["updated_at"] = ts
                 else:
                     job["status"] = "failed"
+                    _clear_job_lease(job)
                     job["error"] = "lease expirou sem resultado"
                     job["finished_at"] = ts
                     job["updated_at"] = ts
@@ -1466,20 +1872,13 @@ class CoreWorkersRegistry:
                         if isinstance(parent, Mapping) and _is_termux_runtime_record(parent):
                             parent_id = candidate_parent
                 # Ações manuais no painel podem estar com o runtime APK
-                # selecionado. Durante o bootstrap, worker_update pertence sempre
-                # ao Termux; build/publicação também voltam ao pai enquanto o
-                # self-builder Android ainda não passou no preflight real.
+                # selecionado. worker_update pertence sempre ao Termux. Builds
+                # com alvo APK explícito nunca são desviados silenciosamente:
+                # uma corrida de readiness deve permanecer transitória.
                 if parent_id and kind == "worker_update":
                     record["target_worker_id"] = parent_id
                     record["routed_from_worker_id"] = requested_target_id
                     record["routing_reason"] = "apk_runtime_to_termux_bootstrap"
-                elif parent_id and kind in {"apk_build_debug", "apk_publish_last"}:
-                    builder_ready, publish_ready = _worker_apk_self_builder_state(requested_target)
-                    apk_ready = builder_ready if kind == "apk_build_debug" else (builder_ready or publish_ready)
-                    if not apk_ready:
-                        record["target_worker_id"] = parent_id
-                        record["routed_from_worker_id"] = requested_target_id
-                        record["routing_reason"] = "apk_self_builder_not_ready"
                 target = workers.get(record["target_worker_id"])
                 if not isinstance(target, Mapping):
                     raise CoreWorkerRegistryError("worker alvo não encontrado", status=404)
@@ -1507,6 +1906,60 @@ class CoreWorkersRegistry:
                     compatible_online.sort(key=_public_worker_sort_key)
                 record["preferred_worker_id"] = str(compatible_online[0].get("worker_id") or "")
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            if kind == "worker_update":
+                # Jobs sem alvo explícito ainda possuem um runtime preferido.
+                # Ele faz parte da identidade lógica do update: sem isso dois
+                # telefones poderiam compartilhar o target vazio e um update
+                # de um aparelho superseder/deduplicar o do outro.
+                target_id = str(
+                    record.get("target_worker_id")
+                    or record.get("preferred_worker_id")
+                    or ""
+                )
+                target = workers.get(target_id)
+                desired = record.get("payload") if isinstance(record.get("payload"), Mapping) else {}
+                desired_version = str(desired.get("version") or "").strip()
+                desired_hash = str(desired.get("source_hash") or desired.get("target_source_hash") or "").strip().lower()
+                if isinstance(target, Mapping):
+                    actual_version = str(target.get("version") or "").strip()
+                    actual_hash = str(target.get("source_hash") or "").strip().lower()
+                    if desired_version and actual_version == desired_version and (not desired_hash or actual_hash == desired_hash):
+                        self._mark_satisfied_worker_updates_unlocked(
+                            data, worker_id=target_id, worker=target, now=ts,
+                        )
+                        self._save_unlocked(data)
+                        return {"ok": True, "deduplicated": True, "already_satisfied": True, "job": None}
+                for existing in jobs.values():
+                    if not isinstance(existing, dict) or _normalize_job_type(existing.get("type")) != "worker_update":
+                        continue
+                    if str(existing.get("status") or "") not in {"queued", "running"}:
+                        continue
+                    assigned = str(
+                        existing.get("worker_id")
+                        or existing.get("target_worker_id")
+                        or existing.get("preferred_worker_id")
+                        or ""
+                    )
+                    if assigned != target_id:
+                        continue
+                    old_payload = existing.get("payload") if isinstance(existing.get("payload"), Mapping) else {}
+                    old_version = str(old_payload.get("version") or "").strip()
+                    old_hash = str(old_payload.get("source_hash") or old_payload.get("target_source_hash") or "").strip().lower()
+                    if old_version == desired_version and old_hash == desired_hash:
+                        # A limpeza/reconciliação executada no início da mesma
+                        # transação não pode ser perdida por este early return.
+                        self._save_unlocked(data)
+                        return {
+                            "ok": True,
+                            "deduplicated": True,
+                            "job": _compact_job_public(existing, include_result=False, now=ts),
+                        }
+                    existing["status"] = "superseded"
+                    existing["updated_at"] = ts
+                    existing["finished_at"] = ts
+                    existing["summary"] = "update substituído por uma versão/fonte mais nova"
+                    existing["error"] = ""
+                    _clear_job_lease(existing)
             jobs[job_id] = record
             data["jobs"] = jobs
             self._save_unlocked(data)
@@ -1576,6 +2029,7 @@ class CoreWorkersRegistry:
 
     def poll_job(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
         ts = _now()
+        lease_token = ""
         with self._lock:
             data = self._load_unlocked()
             self._cleanup_jobs_unlocked(data, now=ts)
@@ -1593,14 +2047,17 @@ class CoreWorkersRegistry:
                 worker["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(worker.get("supported_tasks")), limit=WORKER_SUPPORTED_TASK_LIMIT)
             if "source_hash" in payload:
                 worker["source_hash"] = _short_text(payload.get("source_hash"), limit=WORKER_SHORT_FIELD_LIMIT)
-            for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
+            _update_worker_telemetry(worker, payload, received_at=ts)
+            for key, max_items in (("health", 24), ("status", 24)):
                 if key not in payload:
                     continue
                 if key == "status":
                     _merge_worker_status(worker, payload.get(key))
                 else:
                     worker[key] = _safe_dict(payload.get(key), max_items=max_items)
+            _remember_apk_builder_readiness(worker, now=ts)
 
+            self._mark_satisfied_worker_updates_unlocked(data, worker_id=worker_id, worker=worker, now=ts)
             self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
             workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
@@ -1627,7 +2084,7 @@ class CoreWorkersRegistry:
                 status_dict["core_worker_jobs"] = queue_status
                 data["workers"][worker_id] = worker
                 self._save_unlocked(data)
-                return {"ok": True, "worker_id": worker_id, "job": None, "busy_job_id": str(active.get("job_id") or "")}
+                return {"ok": True, "worker_id": worker_id, "server_time": ts, "job": None, "busy_job_id": str(active.get("job_id") or "")}
 
             candidates = sorted(
                 [job for job in jobs.values() if isinstance(job, dict) and str(job.get("status") or "queued") == "queued"],
@@ -1671,11 +2128,15 @@ class CoreWorkersRegistry:
             })
 
             if selected is not None:
+                lease_token = secrets.token_urlsafe(32)
                 selected["status"] = "running"
                 selected["worker_id"] = worker_id
                 selected["attempts"] = int(selected.get("attempts") or 0) + 1
                 lease = max(10, min(7200, int(selected.get("lease_seconds") or DEFAULT_JOB_LEASE_SECONDS)))
                 selected["lease_until"] = ts + lease
+                selected["lease_token_hash"] = _hash_secret(lease_token)
+                selected["lease_token_issued_at"] = ts
+                selected["lease_token_required"] = _worker_requires_lease_token(worker)
                 selected["started_at"] = selected.get("started_at") or ts
                 selected["updated_at"] = ts
                 selected.pop("executor_missing_since", None)
@@ -1697,10 +2158,11 @@ class CoreWorkersRegistry:
             self._save_unlocked(data)
 
         if selected is None:
-            return {"ok": True, "worker_id": worker_id, "job": None}
+            return {"ok": True, "worker_id": worker_id, "server_time": ts, "job": None}
         return {
             "ok": True,
             "worker_id": worker_id,
+            "server_time": ts,
             "job": {
                 "job_id": str(selected.get("job_id") or ""),
                 "type": str(selected.get("type") or ""),
@@ -1712,6 +2174,8 @@ class CoreWorkersRegistry:
                     max_opaque_string=_job_payload_opaque_string_limit(),
                 ),
                 "lease_until": selected.get("lease_until"),
+                "lease_seconds": selected.get("lease_seconds"),
+                "lease_token": lease_token,
                 "attempts": int(selected.get("attempts") or 0),
             },
         }
@@ -1723,14 +2187,30 @@ class CoreWorkersRegistry:
         ts = _now()
         with self._lock:
             data = self._load_unlocked()
+            # Uma renovação atrasada não ressuscita ownership vencido. Faça a
+            # transição running -> queued/failed na mesma transação do request.
+            self._cleanup_jobs_unlocked(data, now=ts)
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             job = jobs.get(job_id)
             if not isinstance(job, dict):
                 raise CoreWorkerRegistryError("job não encontrado", status=404)
             worker_id_from_payload = payload.get("worker_id") or payload.get("id") or job.get("worker_id")
             worker_id, worker = self._authenticate_worker_unlocked(data, worker_id=worker_id_from_payload, token=token)
-            if str(job.get("worker_id") or "") != worker_id or str(job.get("status") or "") != "running":
+            if str(job.get("worker_id") or "") not in {"", worker_id}:
                 raise CoreWorkerRegistryError("job não está leased para este worker", status=409)
+            current_status = str(job.get("status") or "queued")
+            if current_status != "running" or not _lease_token_matches(job, worker, payload):
+                self._save_unlocked(data)
+                return {
+                    "ok": True,
+                    "accepted": False,
+                    "stale": True,
+                    "ownership_lost": True,
+                    "terminal": current_status not in {"queued", "running"},
+                    "worker_id": worker_id,
+                    "server_time": ts,
+                    "job": _compact_job_public(job, include_result=False, now=ts),
+                }
             action = str(payload.get("action") or "").strip().lower()
             if action in {"abandon", "requeue", "executor_lost"}:
                 recoveries = int(job.get("executor_recoveries") or 0)
@@ -1743,7 +2223,7 @@ class CoreWorkersRegistry:
                 if can_requeue:
                     job["status"] = "queued"
                     job["worker_id"] = ""
-                    job["lease_until"] = 0
+                    _clear_job_lease(job)
                     job["updated_at"] = ts
                     job["executor_recoveries"] = recoveries + 1
                     job["last_executor_error"] = "executor_restarted"
@@ -1755,7 +2235,7 @@ class CoreWorkersRegistry:
                     job["error"] = ""
                 else:
                     job["status"] = "failed"
-                    job["lease_until"] = 0
+                    _clear_job_lease(job)
                     job["finished_at"] = ts
                     job["updated_at"] = ts
                     job["error"] = "executor_lost_job: " + (summary or "APK reiniciou durante o job")
@@ -1767,7 +2247,7 @@ class CoreWorkersRegistry:
                 jobs[job_id] = job
                 data["jobs"] = jobs
                 self._save_unlocked(data)
-                return {"ok": True, "worker_id": worker_id, "requeued": can_requeue, "job": _compact_job_public(job, include_result=False, now=ts)}
+                return {"ok": True, "accepted": True, "worker_id": worker_id, "server_time": ts, "requeued": can_requeue, "job": _compact_job_public(job, include_result=False, now=ts)}
             lease = max(10, min(7200, int(job.get("lease_seconds") or DEFAULT_JOB_LEASE_SECONDS)))
             job["lease_until"] = ts + lease
             job["updated_at"] = ts
@@ -1789,7 +2269,7 @@ class CoreWorkersRegistry:
             data["jobs"] = jobs
             self._save_unlocked(data)
             public = _compact_job_public(job, include_result=False, now=ts)
-        return {"ok": True, "worker_id": worker_id, "job": public}
+        return {"ok": True, "accepted": True, "worker_id": worker_id, "server_time": ts, "job": public}
 
     def submit_job_result(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
         worker_id_from_payload = payload.get("worker_id") or payload.get("id")
@@ -1802,6 +2282,17 @@ class CoreWorkersRegistry:
         ts = _now()
         with self._lock:
             data = self._load_unlocked()
+            # Resultado entregue depois do vencimento não pode fechar uma nova
+            # tentativa. Primeiro materialize a expiração/requeue sob o lock.
+            before_jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            before_job = before_jobs.get(job_id)
+            lease_expired_during_request = bool(
+                isinstance(before_job, Mapping)
+                and str(before_job.get("status") or "") == "running"
+                and float(before_job.get("lease_until") or 0.0) > 0.0
+                and float(before_job.get("lease_until") or 0.0) <= ts
+            )
+            self._cleanup_jobs_unlocked(data, now=ts)
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             job = jobs.get(job_id)
             requested_worker_id = _safe_worker_id(worker_id_from_payload)
@@ -1849,7 +2340,7 @@ class CoreWorkersRegistry:
                 self._save_unlocked(data)
                 return {
                     "ok": True,
-                    "accepted": True,
+                    "accepted": False,
                     "stale": True,
                     "job_missing": True,
                     "summary": "resultado antigo aceito e descartado; job não existe mais no registry",
@@ -1861,14 +2352,47 @@ class CoreWorkersRegistry:
                     },
                 }
             assigned = str(job.get("worker_id") or "")
+            current_status = str(job.get("status") or "queued").strip().lower()
+            if lease_expired_during_request:
+                self._save_unlocked(data)
+                return {
+                    "ok": True,
+                    "accepted": False,
+                    "stale": True,
+                    "ownership_lost": True,
+                    "worker_id": worker_id,
+                    "server_time": ts,
+                    "job": _compact_job_public(job, include_result=False, now=ts),
+                }
+            if current_status in {"succeeded", "failed", "cancelled", "expired", "superseded"}:
+                if assigned and assigned != worker_id:
+                    raise CoreWorkerRegistryError("job pertence a outro worker", status=403)
+                self._save_unlocked(data)
+                return {
+                    "ok": True,
+                    "accepted": True,
+                    "idempotent": True,
+                    "worker_id": worker_id,
+                    "job": _compact_job_public(job, include_result=True, now=ts),
+                }
             if assigned and assigned != worker_id:
                 raise CoreWorkerRegistryError("job pertence a outro worker", status=403)
+            if current_status != "running" or not _lease_token_matches(job, worker, payload):
+                self._save_unlocked(data)
+                return {
+                    "ok": True,
+                    "accepted": False,
+                    "stale": True,
+                    "ownership_lost": True,
+                    "worker_id": worker_id,
+                    "job": _compact_job_public(job, include_result=False, now=ts),
+                }
             original_job_payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
             submitted_result = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
             job["status"] = status
             job["updated_at"] = ts
             job["finished_at"] = ts
-            job["lease_until"] = 0
+            _clear_job_lease(job)
             job["worker_id"] = worker_id
             job["result"] = _safe_dict(payload.get("result"), max_items=32, max_string=4096)
             job["payload_dropped_after_finish"] = True
@@ -1910,7 +2434,7 @@ class CoreWorkersRegistry:
             self._cleanup_jobs_unlocked(data, now=ts)
             self._save_unlocked(data)
             public = _compact_job_public(job, include_result=True, now=ts)
-        return {"ok": True, "worker_id": worker_id, "job": public}
+        return {"ok": True, "accepted": True, "worker_id": worker_id, "job": public}
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         safe_id = _short_text(job_id, limit=WORKER_SHORT_FIELD_LIMIT)
@@ -2062,6 +2586,84 @@ class CoreWorkersRegistry:
             "invalidated_running": invalidated_running,
         }
 
+    def supersede_queued_apk_jobs_for_builder(
+        self,
+        source_fingerprint: str,
+        selected_worker_id: str,
+        *,
+        reason: str = "builder APK alterado após grace de disponibilidade",
+    ) -> dict[str, Any]:
+        """Fecha somente jobs queued da mesma source presos ao builder antigo.
+
+        Um job running nunca é tocado aqui: o lease/recovery precisa primeiro
+        provar que seu executor terminou. Isso permite fallback sem criar duas
+        execuções simultâneas no mesmo aparelho físico.
+        """
+        expected = str(source_fingerprint or "").strip().lower()
+        selected_raw = str(selected_worker_id or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise CoreWorkerRegistryError("source fingerprint inválido", status=400)
+        # `_safe_worker_id` cria um id aleatório quando recebe vazio/inválido,
+        # comportamento correto no enrollment, mas perigoso numa operação de
+        # supersede: jamais feche jobs usando um target inventado.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{2,63}", selected_raw):
+            raise CoreWorkerRegistryError("builder selecionado inválido", status=400)
+        selected = _safe_worker_id(selected_raw)
+        ts = _now()
+        superseded = 0
+        running_other_builder = 0
+        with self._lock:
+            data = self._load_unlocked()
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            for job in jobs.values():
+                if not isinstance(job, dict):
+                    continue
+                if _normalize_job_type(job.get("type")) not in {"apk_build_debug", "apk_publish_last"}:
+                    continue
+                payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
+                fingerprint = str(
+                    payload.get("sourceFingerprint")
+                    or payload.get("source_fingerprint")
+                    or payload.get("sourceSha256")
+                    or payload.get("source_sha256")
+                    or ""
+                ).strip().lower()
+                if fingerprint != expected:
+                    continue
+                assigned = str(
+                    job.get("worker_id")
+                    or job.get("target_worker_id")
+                    or job.get("preferred_worker_id")
+                    or payload.get("selectedBuilderWorkerId")
+                    or ""
+                ).strip()
+                if not assigned or assigned == selected:
+                    continue
+                status = str(job.get("status") or "queued").strip().lower()
+                if status == "running":
+                    running_other_builder += 1
+                    continue
+                if status != "queued":
+                    continue
+                job["status"] = "superseded"
+                job["updated_at"] = ts
+                job["finished_at"] = ts
+                job["summary"] = _short_text(reason, limit=160)
+                job["error"] = ""
+                job["superseded_by_builder_worker_id"] = selected
+                _clear_job_lease(job)
+                superseded += 1
+            data["jobs"] = jobs
+            if superseded:
+                self._save_unlocked(data)
+        return {
+            "ok": True,
+            "source_fingerprint": expected,
+            "selected_worker_id": selected,
+            "superseded": superseded,
+            "running_other_builder": running_other_builder,
+        }
+
     def authenticate_worker(self, worker_id: str, token: str) -> dict[str, Any]:
         ts = _now()
         with self._lock:
@@ -2163,7 +2765,7 @@ class CoreWorkersRegistry:
                     job["target_worker_id"] = ""
                     job["worker_id"] = ""
                     job["status"] = "queued"
-                    job["lease_until"] = 0
+                    _clear_job_lease(job)
                     job["updated_at"] = ts
                     job["summary"] = _short_text(f"failover após remover {safe_worker_id}", limit=160)
             data["jobs"] = jobs

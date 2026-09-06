@@ -14,6 +14,7 @@ import zipfile
 import contextlib
 import fcntl
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
@@ -299,6 +300,7 @@ def _publish_desired_apk_source(
 ) -> dict[str, Any]:
     fingerprint = str(source_fingerprint or "").strip().lower()
     archive_sha = str(source_sha256 or "").strip().lower()
+    explicit_builder_selection = bool(str(selected_builder_worker_id or "").strip())
     if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
         raise RuntimeError("source fingerprint inválido para desired-source")
     if archive_sha and not re.fullmatch(r"[0-9a-f]{64}", archive_sha):
@@ -326,6 +328,17 @@ def _publish_desired_apk_source(
             loaded = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 previous = loaded
+        # A primeira gravação da rodada invalida uma source antiga antes de
+        # carregar secrets/registry. Para a MESMA source, porém, preserve o
+        # builder anterior até a seleção nova estar pronta; um publish em curso
+        # nunca deve enxergar por alguns segundos um target vazio artificial.
+        same_source = str(previous.get("sourceFingerprint") or "").strip().lower() == fingerprint
+        if same_source and not record["selectedBuilderWorkerId"]:
+            for key in (
+                "selectedBuilderWorkerId", "selectedBuilderRuntimeKind",
+                "requiredAgentSourceHash", "toolchainFingerprint",
+            ):
+                record[key] = previous.get(key) or record.get(key) or ""
         _atomic_write_json(path, record)
     changed = str(previous.get("sourceFingerprint") or "").strip().lower() != fingerprint
     invalidation: dict[str, Any] = {"ok": True, "superseded": 0, "invalidated_running": 0}
@@ -341,7 +354,20 @@ def _publish_desired_apk_source(
             # VPS ainda com registry antigo continua publicando o desired-source;
             # o endpoint /publish ainda bloqueia artefatos obsoletos por fingerprint.
             invalidation = {"ok": True, "superseded": 0, "invalidated_running": 0, "registry_legacy": True}
-    return {"record": record, "previousRecord": previous, "changed": changed, "invalidation": invalidation}
+    builder_invalidation: dict[str, Any] = {"ok": True, "superseded": 0, "running_other_builder": 0}
+    selected_worker = str(record.get("selectedBuilderWorkerId") or "").strip()
+    if explicit_builder_selection and selected_worker:
+        registry = get_core_workers_registry()
+        supersede_builder = getattr(registry, "supersede_queued_apk_jobs_for_builder", None)
+        if callable(supersede_builder):
+            builder_invalidation = supersede_builder(fingerprint, selected_worker)
+    return {
+        "record": record,
+        "previousRecord": previous,
+        "changed": changed,
+        "invalidation": invalidation,
+        "builderInvalidation": builder_invalidation,
+    }
 
 
 def _canonical_phone_worker_root() -> Path:
@@ -639,7 +665,6 @@ def _prepare_apk_source_zip() -> dict[str, Any]:
         raise FileNotFoundError(str(project))
     release_dir = _core_worker_release_dir()
     release_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = release_dir / "source-core-worker-app.zip"
     excluded_dirs = {"build", ".gradle", "releases", ".idea"}
     excluded_names = {
         ".env",
@@ -650,36 +675,114 @@ def _prepare_apk_source_zip() -> dict[str, Any]:
         "firebase-service-account.json",
     }
     excluded_suffixes = (".jks", ".keystore", ".p12", ".pem", ".key")
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for path in sorted(project.rglob("*")):
-            rel = path.relative_to(project)
-            if any(part in excluded_dirs for part in rel.parts):
-                continue
-            if path.is_dir():
-                continue
-            name = path.name.lower()
-            rel_text = rel.as_posix().lower()
-            if name in excluded_names or "service-account" in name or rel_text.endswith("/google-services.json"):
-                continue
-            if any(name.endswith(suffix) for suffix in excluded_suffixes):
-                continue
-            already_compressed = path.suffix.lower() in {".zip", ".jar", ".apk", ".so", ".gz", ".xz", ".zst", ".7z"}
-            zf.write(
-                path,
-                (Path("android/core-worker-app") / rel).as_posix(),
-                compress_type=zipfile.ZIP_STORED if already_compressed else zipfile.ZIP_DEFLATED,
-                compresslevel=None if already_compressed else 6,
-            )
-    source_bytes = zip_path.stat().st_size
-    source_sha256 = _sha256_file(zip_path)
+    source_files: list[tuple[Path, Path]] = []
+    for path in sorted(project.rglob("*")):
+        rel = path.relative_to(project)
+        if path.is_dir() or any(part in excluded_dirs for part in rel.parts):
+            continue
+        name = path.name.lower()
+        rel_text = rel.as_posix().lower()
+        if name in excluded_names or "service-account" in name or rel_text.endswith("/google-services.json"):
+            continue
+        if any(name.endswith(suffix) for suffix in excluded_suffixes):
+            continue
+        source_files.append((path, rel))
+
+    # Nunca escreva no nome que já está sendo servido. O ZIP é determinístico,
+    # fechado+fsync e só então publicado com nome content-addressed.
+    temp = release_dir / f".source-core-worker-app.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as zf:
+            for path, rel in source_files:
+                before = path.stat()
+                arcname = (Path("android/core-worker-app") / rel).as_posix()
+                info = zipfile.ZipInfo(arcname, date_time=(1980, 1, 1, 0, 0, 0))
+                info.create_system = 3
+                info.external_attr = ((before.st_mode & 0o777) | 0o100000) << 16
+                info.compress_type = (
+                    zipfile.ZIP_STORED
+                    if path.suffix.lower() in {".zip", ".jar", ".apk", ".so", ".gz", ".xz", ".zst", ".7z"}
+                    else zipfile.ZIP_DEFLATED
+                )
+                with path.open("rb") as source_fh, zf.open(info, "w", force_zip64=True) as target_fh:
+                    while True:
+                        block = source_fh.read(1024 * 1024)
+                        if not block:
+                            break
+                        target_fh.write(block)
+                after = path.stat()
+                if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+                    raise RuntimeError(f"fonte mudou enquanto o ZIP era preparado: {rel.as_posix()}")
+        with temp.open("rb") as fh:
+            os.fsync(fh.fileno())
+        source_bytes = temp.stat().st_size
+        source_sha256 = _sha256_file(temp)
+        zip_path = release_dir / f"source-core-worker-app-{source_sha256}.zip"
+        if zip_path.is_file() and zip_path.stat().st_size == source_bytes and _sha256_file(zip_path) == source_sha256:
+            temp.unlink()
+        else:
+            os.replace(temp, zip_path)
+            try:
+                directory_fd = os.open(str(release_dir), os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+    cleanup = _cleanup_apk_source_archives(release_dir, keep_filename=zip_path.name)
     return {
         "path": str(zip_path),
         "filename": zip_path.name,
         "bytes": source_bytes,
         "sha256": source_sha256,
+        "source_fingerprint": source_sha256,
         "url": f"{_public_base_url()}/core-worker/app/{zip_path.name}",
         "firebase_config_delivery": "job_payload",
+        "cleanup": cleanup,
     }
+
+
+def _cleanup_apk_source_archives(release_dir: Path, *, keep_filename: str) -> dict[str, int]:
+    """Retém sources recentes e qualquer ZIP ainda referenciado por job ativo."""
+    keep = {str(keep_filename or "")}
+    try:
+        raw = _registry_raw()
+        jobs = raw.get("jobs") if isinstance(raw.get("jobs"), dict) else {}
+        for job in jobs.values():
+            if not isinstance(job, dict) or str(job.get("status") or "") not in {"queued", "running"}:
+                continue
+            payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+            url = str(payload.get("source_zip_url") or payload.get("sourceZipUrl") or "")
+            name = Path(urllib.parse.urlsplit(url).path).name
+            if name:
+                keep.add(name)
+    except Exception:
+        # Falha ao ler ownership => não faça limpeza arriscada nesta rodada.
+        return {"removed": 0, "kept": 0}
+    candidates = sorted(
+        [path for path in release_dir.glob("source-core-worker-app*.zip") if path.is_file()],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    keep.update(path.name for path in candidates[:3])
+    removed = 0
+    for path in candidates:
+        if path.name in keep:
+            continue
+        with contextlib.suppress(OSError):
+            path.unlink()
+            removed += 1
+    cutoff = time.time() - 3600.0
+    for path in release_dir.glob(".source-core-worker-app.*.tmp"):
+        with contextlib.suppress(OSError):
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+    return {"removed": removed, "kept": len([path for path in candidates if path.exists()])}
 
 
 def _load_registry_snapshot() -> dict[str, Any]:
@@ -981,6 +1084,51 @@ def _active_job_exists(*, job_type: str, target_worker_id: str = "", summary_con
     return False
 
 
+def _active_apk_build_exists_for_physical(physical_worker_id: str) -> bool:
+    """Impede Gradle concorrente entre APK child e Termux do mesmo aparelho."""
+    wanted_physical = str(physical_worker_id or "").strip()
+    if not wanted_physical:
+        return _active_job_exists(job_type="apk_build_debug")
+    with contextlib.suppress(Exception):
+        get_core_workers_registry().snapshot(lock_timeout_seconds=0.4)
+    data = _registry_raw()
+    workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+    jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+    now = time.time()
+
+    def physical_for(worker_id: str) -> str:
+        worker = workers.get(worker_id) if isinstance(workers, dict) else None
+        if isinstance(worker, dict):
+            return str(
+                worker.get("physical_worker_id")
+                or worker.get("parent_worker_id")
+                or worker_id
+            ).strip()
+        return worker_id[:-4] if worker_id.endswith("-apk") else worker_id
+
+    for job in jobs.values():
+        if not isinstance(job, dict) or str(job.get("type") or "").replace("-", "_") != "apk_build_debug":
+            continue
+        status = str(job.get("status") or "queued").strip().lower()
+        if status not in {"queued", "running"}:
+            continue
+        expires_at = float(job.get("expires_at") or 0.0)
+        lease_until = float(job.get("lease_until") or 0.0)
+        if expires_at and expires_at <= now:
+            continue
+        if status == "running" and lease_until and lease_until <= now:
+            continue
+        owner = str(
+            job.get("worker_id")
+            or job.get("target_worker_id")
+            or job.get("preferred_worker_id")
+            or ""
+        ).strip()
+        if not owner or physical_for(owner) == wanted_physical:
+            return True
+    return False
+
+
 def _worker_declares_support(worker: dict[str, Any], task: str, required_capability: str = "phone-worker") -> bool:
     roles = {str(item) for item in worker.get("roles") or []}
     caps = {str(item) for item in worker.get("capabilities") or []} | roles
@@ -1067,6 +1215,46 @@ def _worker_toolchain_fingerprint(worker: dict[str, Any] | None) -> str:
     return ""
 
 
+def _timestamp_seconds(value: Any) -> float:
+    try:
+        result = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return result / 1000.0 if result > 10_000_000_000 else result
+
+
+def _apk_preflight_is_fresh(preflight: dict[str, Any], *, now: float | None = None) -> bool:
+    ts = time.time() if now is None else float(now)
+    checked = _timestamp_seconds(preflight.get("checkedAt") or preflight.get("updatedAt"))
+    try:
+        max_age = max(60.0, min(900.0, float(os.getenv("CORE_WORKER_APK_BUILDER_READINESS_MAX_AGE_SECONDS", "360") or 360)))
+    except Exception:
+        max_age = 360.0
+    return checked > 0.0 and 0.0 <= ts - checked <= max_age
+
+
+def _apk_ready_proof_is_fresh(worker: dict[str, Any], preflight: dict[str, Any]) -> bool:
+    if _apk_preflight_is_fresh(preflight):
+        return True
+    try:
+        max_age = max(60.0, min(900.0, float(os.getenv("CORE_WORKER_APK_BUILDER_READINESS_MAX_AGE_SECONDS", "360") or 360)))
+    except Exception:
+        max_age = 360.0
+    received_ready_at = _timestamp_seconds(worker.get("apk_builder_last_ready_at"))
+    return received_ready_at > 0.0 and 0.0 <= time.time() - received_ready_at <= max_age
+
+
+def _apk_preflight_is_transient(preflight: dict[str, Any]) -> bool:
+    state = str(preflight.get("state") or "").strip().lower()
+    update = str(preflight.get("toolchainUpdateState") or "").strip().lower()
+    summary = str(preflight.get("summary") or "").strip().lower()
+    text = " ".join((state, update, summary))
+    return any(word in text for word in (
+        "refresh", "waiting", "prepar", "download", "validat", "verif",
+        "smoke", "carreg", "provision", "checking",
+    ))
+
+
 def _select_apk_builder(
     snapshot: dict[str, Any], *, target_agent_version: str, target_agent_source_hash: str
 ) -> dict[str, Any]:
@@ -1092,14 +1280,23 @@ def _select_apk_builder(
         is_online = bool(worker.get("online"))
 
         if is_apk:
-            if not _worker_declares_support(worker, "apk_build_debug", "apk-builder"):
-                continue
             preflight = _worker_apk_builder_status(worker)
             app_code = int(preflight.get("appVersionCode") or worker.get("appVersionCode") or worker.get("versionCode") or 0)
             fingerprint = _worker_toolchain_fingerprint(worker)
-            if not preflight.get("ready") or app_code < 127 or not fingerprint:
+            caps = {str(item).strip().lower() for item in worker.get("capabilities") or []}
+            durable_base = app_code >= 132 and "apk-durable-jobs-v1" in caps
+            ready = bool(
+                durable_base
+                and preflight.get("ready")
+                and preflight.get("ok", True)
+                and _apk_ready_proof_is_fresh(worker, preflight)
+                and fingerprint
+                and {"apk-builder", "apk-self-builder"}.issubset(caps)
+                and _worker_declares_support(worker, "apk_build_debug", "apk-builder")
+            )
+            if not durable_base:
                 continue
-            if _worker_power_blocked(worker):
+            if ready and _worker_power_blocked(worker):
                 continue
             candidate = {
                 "worker": worker,
@@ -1110,14 +1307,28 @@ def _select_apk_builder(
                 "app_version_code": app_code,
                 "rank": (float(worker.get("last_seen") or worker.get("last_heartbeat_at") or 0), worker_id),
             }
-            if is_online:
+            if is_online and ready:
                 apk_candidates.append(candidate)
-            else:
+            elif is_online:
+                last_ready = _timestamp_seconds(worker.get("apk_builder_last_ready_at"))
+                readiness_grace = last_ready > 0.0 and time.time() - last_ready <= grace_seconds
+                transient_readiness = _apk_preflight_is_transient(preflight) or not _apk_preflight_is_fresh(preflight)
+                if not readiness_grace or not transient_readiness:
+                    # Estado "loading" sem prova saudável anterior não pode
+                    # reservar o builder indefinidamente e bloquear o fallback.
+                    continue
+                candidate["wait_for_online"] = True
+                candidate["wait_for_readiness"] = True
+                candidate["readiness_transient"] = True
+                candidate["reconnect_grace_seconds"] = grace_seconds
+                apk_grace_candidates.append(candidate)
+            elif not is_online:
                 try:
                     age = float(worker.get("last_seen_age_seconds"))
                 except (TypeError, ValueError):
                     age = grace_seconds + 1.0
-                if age <= grace_seconds:
+                last_ready = _timestamp_seconds(worker.get("apk_builder_last_ready_at"))
+                if age <= grace_seconds and last_ready > 0.0 and time.time() - last_ready <= grace_seconds * 2.0:
                     candidate["wait_for_online"] = True
                     candidate["reconnect_grace_seconds"] = grace_seconds
                     candidate["last_seen_age_seconds"] = age
@@ -2056,7 +2267,7 @@ def _pending_apk_build_recently_queued(pending: dict[str, Any], version_code: in
         return {}
     last_job = _registry_job_by_id(str(item.get("last_job_id") or ""))
     last_status = str(last_job.get("status") or "").strip().lower() if last_job else ""
-    if last_status in {"failed", "succeeded", "cancelled", "expired"}:
+    if last_status in {"failed", "succeeded", "cancelled", "expired", "superseded"}:
         return {}
     age = time.time() - last_at
     if age < cooldown:
@@ -2072,7 +2283,9 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
     registry = get_core_workers_registry()
     version_name, version_code = _read_android_version()
     source = _prepare_apk_source_zip()
-    source_fingerprint = str(_current_fingerprints().get("apk_source_hash") or source["sha256"])
+    # O fingerprint é o hash do ZIP imutável realmente entregue ao job. Não há
+    # um segundo scan sujeito a corrida com a criação do arquivo.
+    source_fingerprint = str(source.get("source_fingerprint") or source["sha256"])
     notification_id = f"apk-{version_code}-{source_fingerprint[:12]}"
     desired_source = _publish_desired_apk_source(
         version_name=version_name,
@@ -2195,12 +2408,16 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
             "pending": True,
             "transient": True,
             "error": "",
-            "phase": "waiting_apk_builder",
+            "phase": "waiting_apk_readiness" if builder.get("wait_for_readiness") else "waiting_apk_builder",
             "preferredBuilderWorkerId": str(builder.get("worker_id") or ""),
             "preferredBuilderRuntimeKind": "apk",
             "reconnectGraceSeconds": int(float(builder.get("reconnect_grace_seconds") or APK_BUILDER_RECONNECT_GRACE_SECONDS)),
             "updated_at": time.time(),
-            "message": "APK builder pronto acabou de desconectar; aguardando heartbeat antes de usar o Termux fallback",
+            "message": (
+                "APK online está revalidando o ambiente; aguardando readiness fresca antes de considerar o Termux"
+                if builder.get("wait_for_readiness")
+                else "APK builder pronto acabou de desconectar; aguardando heartbeat antes de usar o Termux fallback"
+            ),
         })
         pending["apk_build"] = item
         _save_pending(pending)
@@ -2334,7 +2551,7 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         pending["apk_build"] = item
         _save_pending(pending)
         return item
-    if _active_job_exists(job_type="apk_build_debug", target_worker_id=selected_worker_id, summary_contains=version_name):
+    if _active_apk_build_exists_for_physical(selected_physical_worker_id):
         item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
         item.pop("retry_after_agent_update", None)
         item.update({
@@ -2356,7 +2573,9 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
             target_worker_id=selected_worker_id,
             required_capabilities=["apk-builder"],
             ttl_seconds=7200,
-            lease_seconds=7200,
+            # Lease curto e renovável: o Gradle pode levar horas, mas executor
+            # perdido não deve deixar um running fantasma por duas horas.
+            lease_seconds=240,
             max_attempts=2,
             summary=f"build automático APK {version_name} {source_fingerprint[:12]}",
         )

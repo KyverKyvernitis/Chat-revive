@@ -31,14 +31,16 @@ def apk_worker(*, online: bool, age: float = 5.0) -> dict:
         "last_heartbeat_at": time.time() - age,
         "runtime_kind": "apk",
         "source": "core-worker-apk-agent-service",
-        "version": "0.8.2",
-        "versionCode": 129,
-        "capabilities": ["apk-native", "apk-builder", "apk-self-builder"],
+        "version": "0.8.5",
+        "versionCode": 132,
+        "apk_builder_last_ready_at": time.time() - age,
+        "capabilities": ["apk-native", "apk-builder", "apk-self-builder", "apk-durable-jobs-v1"],
         "supported_tasks": ["apk_build_debug", "apk_publish_last"],
         "battery": {"level": 80, "charging": False},
         "status": {"apk_self_builder": {
             "ready": True,
             "ok": True,
+            "checkedAt": int(time.time() * 1000),
             "smoke": {"ok": True, "fingerprint": "9" * 64},
         }},
     }
@@ -64,8 +66,8 @@ def termux_worker() -> dict:
 def test_release_versions_advance_after_failed_083_source() -> None:
     gradle = GRADLE.read_text(encoding="utf-8")
     phone = PHONE.read_text(encoding="utf-8")
-    assert 'versionCode 132' in gradle
-    assert 'versionName "0.8.5"' in gradle
+    assert 'versionCode 133' in gradle
+    assert 'versionName "0.8.6"' in gradle
     assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
 
 

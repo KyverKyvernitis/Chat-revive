@@ -173,8 +173,8 @@ def test_normal_ui_prefers_automatic_enrollment_over_core_code():
 def test_versions_advance_for_auto_enrollment_protocol():
     gradle = GRADLE.read_text(encoding="utf-8")
     phone = PHONE_WORKER_PATH.read_text(encoding="utf-8")
-    assert 'versionCode 132' in gradle
-    assert 'versionName "0.8.5"' in gradle
+    assert 'versionCode 133' in gradle
+    assert 'versionName "0.8.6"' in gradle
     assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
 
 

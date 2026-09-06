@@ -35,8 +35,8 @@ def read(path: Path) -> str:
 def test_cleanup_release_versions_are_monotonic() -> None:
     gradle = read(ANDROID / "app/build.gradle")
     phone = read(PHONE)
-    assert 'versionCode 132' in gradle
-    assert 'versionName "0.8.5"' in gradle
+    assert 'versionCode 133' in gradle
+    assert 'versionName "0.8.6"' in gradle
     assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
 
 
@@ -114,16 +114,17 @@ def test_apk_child_is_preferred_for_next_real_build() -> None:
             "last_heartbeat_at": now + 1,
             "runtime_kind": "apk",
             "source": "core-worker-apk-agent-service",
-            "version": "0.8.2",
-            "versionCode": 129,
+            "version": "0.8.5",
+            "versionCode": 132,
             "roles": ["apk-worker", "apk-builder"],
-            "capabilities": ["apk-native", "apk-builder", "apk-self-builder"],
+            "capabilities": ["apk-native", "apk-builder", "apk-self-builder", "apk-durable-jobs-v1"],
             "supported_tasks": ["apk_builder_status", "apk_build_debug", "apk_publish_last"],
             "battery": {"level": 80, "charging": False},
             "status": {"apk_self_builder": {
                 "ok": True,
                 "ready": True,
                 "state": "apk_self_builder_ready",
+                "checkedAt": int(now * 1000),
                 "smoke": {"ok": True, "fingerprint": smoke_fp},
             }},
         },

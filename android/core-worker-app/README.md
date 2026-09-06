@@ -1,4 +1,10 @@
-# Core Worker 0.8.5 — executor durável + self-build confiável
+# Core Worker 0.8.6 — ownership, staging e telemetria física
+
+A versão `0.8.6` (`versionCode 133`) adiciona token por lease, reconciliação segura do processo Gradle, download do source em partial com hash/Content-Length e promoção atômica, além de telemetria física por métrica com freshness explícita. O foreground service mantém ownership até o resultado persistido e confirmado; readiness em carregamento continua sendo estado transitório.
+
+O Phone Worker/Termux permanece em `1.11.5`: esta rodada não altera seu runtime.
+
+## Base 0.8.5 — executor durável + self-build confiável
 
 ## Interface Core simplificada
 
@@ -7,7 +13,7 @@ A página Core agora mostra apenas o que afeta o uso diário: conexão, disponib
 O estado do autobuild acompanha as mudanças persistidas em segundo plano; não é mais necessário tocar em **Sincronizar** para a faixa mudar de preparando para pronto.
 
 
-A versão `0.8.5` (`versionCode 132`) mantém o fluxo normal sem `CORE-XXXX` e endurece a execução autônoma do builder. O APK privado recebe no build apenas `parent_worker_id` e `sourceFingerprint` não secretos. No primeiro boot ele abre um challenge efêmero somente em loopback na porta 8767; o Termux 1.11.5 já autenticado valida esse challenge, pede à VPS uma credencial exclusiva para `<parent>-apk` e a entrega de volta pelo loopback. O token do Termux nunca é copiado para o APK. Reinstalações rotacionam a credencial do mesmo `<parent>-apk` em vez de criar IDs novos. O pareamento manual permanece somente como recovery legado.
+A base `0.8.5` (`versionCode 132`) introduziu o fluxo normal sem `CORE-XXXX` e a primeira execução durável do builder. O APK privado recebe no build apenas `parent_worker_id` e `sourceFingerprint` não secretos. No primeiro boot ele abre um challenge efêmero somente em loopback na porta 8767; o Termux 1.11.5 já autenticado valida esse challenge, pede à VPS uma credencial exclusiva para `<parent>-apk` e a entrega de volta pelo loopback. O token do Termux nunca é copiado para o APK. Reinstalações rotacionam a credencial do mesmo `<parent>-apk` em vez de criar IDs novos. O pareamento manual permanece somente como recovery legado.
 
 Depois do enrollment, o APK inicia automaticamente o download/validação do toolchain externo e só anuncia `apk-builder` após os smokes existentes. Rootfs/Bedrock continuam subsistemas separados e não são requisito para o autobuilder.
 

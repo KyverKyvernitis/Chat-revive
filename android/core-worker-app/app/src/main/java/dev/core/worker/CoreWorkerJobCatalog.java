@@ -54,7 +54,7 @@ public final class CoreWorkerJobCatalog {
             "core-linux-box64-glibc-preflight-v15.3.1",
             "core-linux-rootfs-glibc-intake-preflight-v17",
             "core-linux-embedded-binaries-intake-v11", "apk-runtime-autonomous",
-            "apk-durable-jobs-v1", "termux-bootstrap-builder-compatible"
+            "apk-durable-jobs-v1", "apk-job-lease-token-v1", "termux-bootstrap-builder-compatible"
     };
 
     private static final String[] ROLES = new String[] {

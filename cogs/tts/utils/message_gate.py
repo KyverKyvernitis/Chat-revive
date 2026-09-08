@@ -97,13 +97,15 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
         guild_defaults.get("tts_prefix"),
         getattr(config, "TTS_PREFIX", ""),
     )
+    speech_prefixes = routing.speech_prefixes()
+    unique_speech_prefixes = frozenset(speech_prefixes)
     for legacy_prefix in legacy_prefixes:
         if (
             legacy_prefix
             and legacy_prefix != routing.bot_prefix
             and message.content.startswith(legacy_prefix)
-            and legacy_prefix in set(routing.speech_prefixes())
-            and len(set(routing.speech_prefixes())) < len(routing.speech_prefixes())
+            and legacy_prefix in unique_speech_prefixes
+            and len(unique_speech_prefixes) < len(speech_prefixes)
         ):
             return MessageGateDecision(
                 should_process_tts=True,

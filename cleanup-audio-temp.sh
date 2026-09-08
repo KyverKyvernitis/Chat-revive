@@ -1,109 +1,97 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-
 BOT_DIR="${BOT_DIR:-/home/ubuntu/bot}"
-AUDIO_TMP_DIR="${AUDIO_TMP_DIR:-$BOT_DIR/tmp_audio}"
-RUNTIME_DIR="${RUNTIME_DIR:-$AUDIO_TMP_DIR/runtime}"
-CACHE_DIR="${CACHE_DIR:-$AUDIO_TMP_DIR/cache}"
-CREDENTIALS_DIR="${CREDENTIALS_DIR:-$AUDIO_TMP_DIR/credentials}"
-LOG_FILE="${LOG_FILE:-$BOT_DIR/cleanup-audio-temp.log}"
+export BOT_DIR
+exec python3 - <<'PY_CLEANUP'
+import contextlib
+import fcntl
+import os
+import stat
+import time
+from pathlib import Path
 
-# Limites conservadores para VPS pequena: evita tmp_audio crescer sem apagar
-# arquivos recém-criados que ainda podem estar tocando.
-RUNTIME_MAX_AGE_MINUTES="${RUNTIME_MAX_AGE_MINUTES:-360}"      # 6h
-CACHE_MAX_AGE_MINUTES="${CACHE_MAX_AGE_MINUTES:-10080}"        # 7 dias
-MAX_BYTES="${MAX_BYTES:-134217728}"                            # 128 MiB total
-CACHE_MAX_BYTES="${CACHE_MAX_BYTES:-100663296}"                # 96 MiB cache
-LOG_MAX_BYTES="${LOG_MAX_BYTES:-262144}"                       # 256 KiB
-
-ensure_required_dirs() {
-  mkdir -p "$AUDIO_TMP_DIR" "$RUNTIME_DIR" "$CACHE_DIR" "$CREDENTIALS_DIR"
-  chmod 700 "$AUDIO_TMP_DIR" "$RUNTIME_DIR" "$CACHE_DIR" "$CREDENTIALS_DIR" 2>/dev/null || true
-}
-
-ensure_required_dirs
-
-rotate_log() {
-  if [[ -f "$LOG_FILE" ]]; then
-    local size
-    size=$(stat -c '%s' "$LOG_FILE" 2>/dev/null || echo 0)
-    if [[ "$size" -gt "$LOG_MAX_BYTES" ]]; then
-      mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
-    fi
-  fi
-}
-
-log() {
-  rotate_log
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE" 2>/dev/null || true
-}
-
-dir_size() {
-  du -sb "$1" 2>/dev/null | awk '{print $1}' || echo 0
-}
-
-delete_old_files() {
-  local dir="$1"
-  local max_age="$2"
-  local label="$3"
-  [[ -d "$dir" ]] || return 0
-
-  local deleted
-  deleted=$(find "$dir" -type f -mmin +"$max_age" -print -delete 2>/dev/null | wc -l | tr -d ' ')
-  if [[ "${deleted:-0}" -gt 0 ]]; then
-    log "${label}: ${deleted} arquivo(s) antigo(s) removido(s)"
-  fi
-}
-
-trim_dir_to_limit() {
-  local dir="$1"
-  local limit="$2"
-  local label="$3"
-  [[ -d "$dir" ]] || return 0
-
-  local current_size
-  current_size=$(dir_size "$dir")
-  current_size=${current_size:-0}
-
-  if [[ "$current_size" -le "$limit" ]]; then
-    return 0
-  fi
-
-  log "${label}: acima do limite (${current_size} bytes > ${limit} bytes)"
-
-  while [[ "$current_size" -gt "$limit" ]]; do
-    local oldest_file
-    oldest_file=$(find "$dir" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -n 1 | cut -d' ' -f2-)
-    [[ -n "$oldest_file" ]] || break
-    rm -f "$oldest_file" 2>/dev/null || break
-    current_size=$(dir_size "$dir")
-    current_size=${current_size:-0}
-  done
-
-  log "${label}: reduzido para ${current_size} bytes"
-}
-
-# Arquivos de runtime: podem ser removidos mais cedo, mas a pasta runtime
-# precisa continuar existindo para tempfile.mkstemp(dir=runtime) no TTS.
-if [[ -d "$RUNTIME_DIR" ]]; then
-  find "$RUNTIME_DIR" -type f -mmin +"$RUNTIME_MAX_AGE_MINUTES" -print -delete 2>/dev/null | {
-    count=$(wc -l | tr -d ' ')
-    if [[ "${count:-0}" -gt 0 ]]; then
-      log "runtime: ${count} arquivo(s) antigo(s) removido(s)"
-    fi
-  }
-fi
-
-# Cache pode ficar mais tempo, mas não pode crescer sem limite.
-delete_old_files "$CACHE_DIR" "$CACHE_MAX_AGE_MINUTES" "cache"
-trim_dir_to_limit "$CACHE_DIR" "$CACHE_MAX_BYTES" "cache"
-trim_dir_to_limit "$AUDIO_TMP_DIR" "$MAX_BYTES" "tmp_audio"
-
-# Não delete as pastas estruturais usadas pelo TTS, mesmo se vazias.
-find "$AUDIO_TMP_DIR" -type d -empty \
-  ! -path "$AUDIO_TMP_DIR" \
-  ! -path "$RUNTIME_DIR" \
-  ! -path "$CACHE_DIR" \
-  ! -path "$CREDENTIALS_DIR" \
-  -delete 2>/dev/null || true
-ensure_required_dirs
+bot = Path(os.environ['BOT_DIR'])
+root = Path(os.getenv('AUDIO_TMP_DIR', str(bot / 'tmp_audio')))
+runtime = Path(os.getenv('RUNTIME_DIR', str(root / 'runtime')))
+cache = Path(os.getenv('CACHE_DIR', str(root / 'cache')))
+credentials = Path(os.getenv('CREDENTIALS_DIR', str(root / 'credentials')))
+log_path = Path(os.getenv('LOG_FILE', str(bot / 'cleanup-audio-temp.log')))
+def number(name, default):
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+for directory in (root, runtime, cache, credentials):
+    directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        directory.chmod(0o700)
+now = time.time()
+grace = max(180, number('TTS_CLEANUP_ACTIVE_GRACE_SECONDS', 180))
+normal_limit = number('MAX_BYTES', number('TTS_TEMP_MAX_BYTES', number('TTS_TEMP_MAX_MB', 256) * 1024 * 1024))
+cache_limit = number('CACHE_MAX_BYTES', normal_limit)
+piper_limit = number('TTS_PIPER_VPS_CACHE_MAX_BYTES', number('TTS_PIPER_VPS_CACHE_MAX_MB', 2048) * 1024 * 1024)
+normal_count = number('TTS_TEMP_MAX_FILES', 256)
+piper_count = number('TTS_PIPER_VPS_CACHE_SIZE', 2048)
+ages = {runtime: number('RUNTIME_MAX_AGE_MINUTES', 360) * 60,
+        cache: number('CACHE_MAX_AGE_MINUTES', 10080) * 60}
+rows = []
+seen = set()
+# Only audio and abandoned partial files. Credentials and voice catalog are not audio.
+for directory in (runtime, cache, root):
+    with contextlib.suppress(OSError):
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if path in seen or not entry.is_file(follow_symlinks=False):
+                    continue
+                if path.suffix.lower() not in {'.mp3', '.wav', '.ogg', '.opus', '.part', '.tmp'} and '.tmp-' not in path.name:
+                    continue
+                seen.add(path)
+                with contextlib.suppress(OSError):
+                    st = entry.stat(follow_symlinks=False)
+                    rows.append((st.st_mtime, st.st_size, path, path.name.startswith('piper_'), directory == cache))
+rows.sort(key=lambda row: row[0])
+deleted = set()
+def remove(row):
+    mtime, size, path, _, _ = row
+    if now - mtime < grace:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, 'O_NOFOLLOW', 0))
+        with os.fdopen(fd, 'rb') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            opened, current = os.fstat(handle.fileno()), path.stat()
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                return False
+            if now - current.st_mtime < grace:
+                return False
+            path.unlink()
+            deleted.add(path)
+            return True
+    except OSError:
+        return False
+for row in rows:
+    mtime, _, path, _, _ = row
+    if now - mtime > ages.get(path.parent, ages[runtime]):
+        remove(row)
+for is_piper, limit, count_limit in ((False, normal_limit, normal_count), (True, piper_limit, piper_count)):
+    group = [row for row in rows if row[3] == is_piper and row[2] not in deleted]
+    total = sum(row[1] for row in group)
+    cached = sum(row[1] for row in group if row[4])
+    count = len(group)
+    for row in group:
+        if total <= limit and count <= count_limit and (is_piper or cached <= cache_limit):
+            break
+        if total <= limit and count <= count_limit and not row[4]:
+            continue
+        if remove(row):
+            total -= row[1]
+            cached -= row[1] if row[4] else 0
+            count -= 1
+if deleted:
+    with contextlib.suppress(OSError):
+        if log_path.exists() and log_path.stat().st_size > number('LOG_MAX_BYTES', 262144):
+            os.replace(log_path, str(log_path) + '.1')
+        with log_path.open('a') as log:
+            log.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] audio: {len(deleted)} arquivos removidos\n")
+PY_CLEANUP

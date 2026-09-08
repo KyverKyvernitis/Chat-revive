@@ -173,7 +173,7 @@ TTS_EDGE_PREFETCH_CONCURRENCY = max(1, _parse_int(os.getenv("TTS_EDGE_PREFETCH_C
 
 # gTTS: executor limitado mantém a concorrência física correta mesmo quando uma
 # coroutine expira. Os timeouts nativos impedem thread zumbi em requests.
-TTS_GTTS_CONCURRENCY = _parse_int(os.getenv("TTS_GTTS_CONCURRENCY", "1"), 1)
+TTS_GTTS_CONCURRENCY = _parse_int(os.getenv("TTS_GTTS_CONCURRENCY", "2"), 2)
 TTS_GTTS_TIMEOUT_SECONDS = max(5.0, _parse_float(os.getenv("TTS_GTTS_TIMEOUT_SECONDS", "20.0"), 20.0))
 TTS_GTTS_CONNECT_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("TTS_GTTS_CONNECT_TIMEOUT_SECONDS", "3.5"), 3.5))
 TTS_GTTS_READ_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_GTTS_READ_TIMEOUT_SECONDS", "8.0"), 8.0))
@@ -181,7 +181,7 @@ TTS_GTTS_READ_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_GTTS_READ_T
 # uma sessão por thread, com rotação curta e rollback imediato por flag.
 TTS_GTTS_PERSISTENT_SESSION_ENABLED = _parse_bool(os.getenv("TTS_GTTS_PERSISTENT_SESSION_ENABLED", "true"), True)
 TTS_GTTS_SESSION_TTL_SECONDS = max(10.0, _parse_float(os.getenv("TTS_GTTS_SESSION_TTL_SECONDS", "90.0"), 90.0))
-TTS_GTTS_SESSION_MAX_REQUESTS = max(4, _parse_int(os.getenv("TTS_GTTS_SESSION_MAX_REQUESTS", "64"), 64))
+TTS_GTTS_SESSION_MAX_REQUESTS = max(4, _parse_int(os.getenv("TTS_GTTS_SESSION_MAX_REQUESTS", "256"), 256))
 TTS_GTTS_STREAMING_ENABLED = _parse_bool(os.getenv("TTS_GTTS_STREAMING_ENABLED", "true"), True)
 # Acima de 100 caracteres o gTTS divide o texto em mais de uma requisição; o
 # stream permite tocar a primeira parte enquanto as próximas são sintetizadas.
@@ -658,3 +658,12 @@ MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES = int(os.getenv("MUSIC_LAVALINK_PREM
 MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS = float(os.getenv("MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS", "18"))
 MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS = float(os.getenv("MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS", "1.5"))
 MUSIC_RESOLVING_STALE_SECONDS = float(os.getenv("MUSIC_RESOLVING_STALE_SECONDS", "45"))
+
+
+# TTS shared streaming: compressed audio budgets, bounded decoder overlap.
+TTS_STREAM_MEMORY_BUDGET_BYTES = max(1048576, _parse_int(os.getenv("TTS_STREAM_MEMORY_BUDGET_BYTES", "16777216"), 16777216))
+TTS_FFMPEG_OVERLAP_ENABLED = _parse_bool(os.getenv("TTS_FFMPEG_OVERLAP_ENABLED", "true"), True)
+TTS_FFMPEG_OVERLAP_CONCURRENCY = max(1, min(4, _parse_int(os.getenv("TTS_FFMPEG_OVERLAP_CONCURRENCY", "2"), 2)))
+# Optional: background Opus preparation consumes CPU; enable after measuring the VPS.
+TTS_PREPARED_OPUS_CACHE_ENABLED = _parse_bool(os.getenv("TTS_PREPARED_OPUS_CACHE_ENABLED", "false"), False)
+TTS_PREPARED_OPUS_CACHE_MAX_BYTES = max(524288, _parse_int(os.getenv("TTS_PREPARED_OPUS_CACHE_MAX_BYTES", "8388608"), 8388608))

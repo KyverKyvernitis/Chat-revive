@@ -1,4 +1,7 @@
 import inspect
+import json
+import tempfile
+from collections import OrderedDict
 import contextlib
 import asyncio
 import logging
@@ -17,7 +20,7 @@ from discord.ext import commands
 import config
 
 logger = logging.getLogger(__name__)
-from .audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED
+from .audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED, TTS_TEMP_DIR
 from .common import (
     _guild_scoped,
     _shorten,
@@ -135,7 +138,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self.edge_voice_names: set[str] = set()
         self.gtts_languages: dict[str, str] = get_gtts_languages()
         self.gtts_language_aliases: dict[str, str] = build_gtts_language_aliases(self.gtts_languages)
-        self._recent_tts_message_ids: dict[int, float] = {}
+        self._recent_tts_message_ids: dict[int, float] = OrderedDict()
+        self._tts_entry_seen: OrderedDict[int, float] = OrderedDict()
+        self._tts_message_tasks: dict[int, asyncio.Task] = {}
         self._voice_connect_locks: dict[int, asyncio.Lock] = {}
         self._prefix_panel_cooldowns: dict[tuple[int, int, str], float] = {}
         self._active_prefix_panels: dict[tuple[int, int, str], tuple[discord.Message, discord.ui.View]] = {}
@@ -168,12 +173,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     async def cog_load(self):
         self._voice_incident_shutdown = False
-        self._prime_tts_runtime()
-        await self._load_edge_voices()
+        await asyncio.to_thread(self._prime_tts_runtime)
+        await self._load_cached_edge_voices()
+        self._edge_voice_refresh_task = self._schedule_tts_background(self._load_edge_voices())
         self._ensure_tts_agent_health_task()
         self._ensure_voice_incident_report_worker()
         if TTS_BOOT_WARMUP_ENABLED:
-            asyncio.create_task(self._boot_warmup())
+            self._schedule_tts_background(self._boot_warmup())
         if self._voice_auto_restore_enabled:
             self._voice_restore_task = asyncio.create_task(self._restore_voice_sessions_after_ready())
         else:
@@ -2428,11 +2434,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     def _mark_tts_message_seen(self, message_id: int) -> None:
         now = time.monotonic()
-        self._recent_tts_message_ids[message_id] = now
-        cutoff = now - 30.0
-        stale = [mid for mid, ts in self._recent_tts_message_ids.items() if ts < cutoff]
-        for mid in stale:
-            self._recent_tts_message_ids.pop(mid, None)
+        recent = self._recent_tts_message_ids
+        recent.pop(message_id, None)
+        recent[message_id] = now
+        while recent:
+            first = next(iter(recent))
+            if recent[first] >= now - 30.0 and len(recent) <= 4096:
+                break
+            recent.pop(first, None)
 
     def _was_tts_message_seen(self, message_id: int) -> bool:
         ts = self._recent_tts_message_ids.get(message_id)
@@ -2466,18 +2475,44 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         # Cog também roda normalmente.
         await self.on_message(message)
 
+    async def _load_cached_edge_voices(self) -> None:
+        def read():
+            with open(os.path.join(TTS_TEMP_DIR, 'edge-voices.json'), encoding='utf-8') as handle:
+                payload = json.load(handle)
+            names = payload.get('voices', [])
+            return sorted({str(name) for name in names if isinstance(name, str) and len(name) <= 120})
+        try:
+            names = await asyncio.to_thread(read)
+            if names:
+                self.edge_voice_cache = names
+                self.edge_voice_names = set(names)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+
     async def _load_edge_voices(self):
         try:
             import edge_tts
-            voices = await edge_tts.list_voices()
-            names = sorted({v["ShortName"] for v in voices if "ShortName" in v})
+            voices = await asyncio.wait_for(edge_tts.list_voices(), timeout=5.0)
+            names = sorted({v['ShortName'] for v in voices if isinstance(v, dict) and v.get('ShortName')})
+            if not names:
+                raise RuntimeError('catálogo Edge vazio')
             self.edge_voice_cache = names
             self.edge_voice_names = set(names)
-            print(f"[tts_voice] {len(names)} vozes edge carregadas.")
-        except Exception as e:
-            print(f"[tts_voice] Falha ao carregar vozes edge: {e}")
-            self.edge_voice_cache = []
-            self.edge_voice_names = set()
+            def save():
+                fd, path = tempfile.mkstemp(prefix='edge-voices-', suffix='.json.tmp', dir=TTS_TEMP_DIR)
+                try:
+                    with os.fdopen(fd, 'w', encoding='utf-8') as output:
+                        json.dump({'updated_at': time.time(), 'voices': names}, output, ensure_ascii=False)
+                    os.replace(path, os.path.join(TTS_TEMP_DIR, 'edge-voices.json'))
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.remove(path)
+            await asyncio.to_thread(save)
+            logger.info('[tts_voice] catálogo Edge atualizado: %s vozes', len(names))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning('[tts_voice] catálogo Edge indisponível; preservando vozes conhecidas: %s', error)
 
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return make_embed(title, description, ok=ok)
@@ -2943,13 +2978,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._suppress_runtime_voice_restore(guild.id, seconds=60.0)
         self._cancel_runtime_voice_restore(guild.id)
         self._remember_expected_voice_channel(guild.id, None)
+        await self._clear_queue_only(guild, stop_playback=not self._music_player_is_active(guild.id))
         state = self._get_state(guild.id)
-        try:
-            while not state.queue.empty():
-                state.queue.get_nowait()
-                state.queue.task_done()
-        except Exception:
-            pass
         self._last_announced_author_by_guild.pop(int(guild.id), None)
         if self._music_player_is_active(guild.id):
             print(f"[tts_voice] desconexão do TTS ignorada | player de música ativo | guild={guild.id}")
@@ -3377,6 +3407,37 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        message_id = int(getattr(message, "id", 0) or 0)
+        if not message_id:
+            return await self._process_tts_message(message)
+        if not hasattr(self, "_tts_entry_seen"):
+            self._tts_entry_seen = OrderedDict()
+            self._tts_message_tasks = {}
+        now = time.monotonic()
+        seen = self._tts_entry_seen
+        while seen:
+            oldest, when = next(iter(seen.items()))
+            if when >= now - 30.0 and len(seen) <= 4096:
+                break
+            seen.pop(oldest, None)
+        if message_id in seen:
+            return
+        existing = self._tts_message_tasks.get(message_id)
+        if existing is not None:
+            return await asyncio.shield(existing)
+        # No await between lookup and reservation, so both Discord entry paths
+        # share one decision while keeping the existing antibot/role checks.
+        task = asyncio.create_task(self._process_tts_message(message))
+        self._tts_message_tasks[message_id] = task
+        def done(finished):
+            if self._tts_message_tasks.get(message_id) is finished:
+                self._tts_message_tasks.pop(message_id, None)
+            if not finished.cancelled() and finished.exception() is None:
+                seen[message_id] = time.monotonic()
+        task.add_done_callback(done)
+        return await asyncio.shield(task)
+
+    async def _process_tts_message(self, message: discord.Message):
         gate = await analyze_message_for_tts(self, message)
 
         if gate.should_dispatch_prefix_command:
@@ -4570,31 +4631,36 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     async def _clear_queue_only(self, guild: discord.Guild | None, *, stop_playback: bool = True) -> int:
         if guild is None:
             return 0
-
         state = self._get_state(guild.id)
+        state.accepting = False
+        state.generation += 1
         cleared = 0
-
-        while True:
-            try:
-                state.queue.get_nowait()
+        try:
+            while True:
+                try:
+                    item = state.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                self._decrement_pending_signature(state, item)
                 state.queue.task_done()
                 cleared += 1
-            except Exception:
-                break
-
-        vc = self._get_voice_client_for_guild(guild)
-        if stop_playback and vc and self._voice_client_is_connected(vc):
-            try:
-                if self._voice_client_is_playing_or_paused(vc):
-                    vc.stop()
-            except Exception:
-                pass
-
-        task = getattr(state, "worker_task", None)
-        if task and not task.done():
-            task.cancel()
-            state.worker_task = None
-
+            # Cancelling the worker also cancels its mixer overlay; stopping a
+            # shared voice client while music plays would stop the music itself.
+            vc = self._get_voice_client_for_guild(guild)
+            music = self._music_player_is_active(guild.id)
+            if stop_playback and not music and vc and self._voice_client_is_connected(vc):
+                with contextlib.suppress(Exception):
+                    if self._voice_client_is_playing_or_paused(vc):
+                        vc.stop()
+            task = state.worker_task
+            if task is not None and task is not asyncio.current_task() and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if state.worker_task is task:
+                state.worker_task = None
+            state.pending_signatures.clear()
+        finally:
+            state.accepting = not getattr(self, '_tts_shutting_down', False)
         return cleared
 
     async def _apply_dashboard_enabled_state(self, guild: discord.Guild | None) -> int:

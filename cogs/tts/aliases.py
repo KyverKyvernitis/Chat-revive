@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Iterable
+from functools import lru_cache
 
 
 _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
@@ -80,6 +81,7 @@ def get_prefix_command_spec(kind: str) -> dict[str, object]:
     return dict(_PREFIX_CONTROL_SPECS.get(kind, {}))
 
 
+@lru_cache(maxsize=1024)
 def get_prefixed_aliases(bot_prefix: str, kind: str, *, display: bool = False) -> tuple[str, ...]:
     spec = _PREFIX_CONTROL_SPECS.get(kind, {})
     key = "display" if display else "aliases"

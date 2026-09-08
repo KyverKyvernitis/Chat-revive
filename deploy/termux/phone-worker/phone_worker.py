@@ -101,7 +101,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.5"
+PHONE_WORKER_VERSION = "1.11.6"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2516,7 +2516,65 @@ def _tts_agent_preferred_engine(available: list[str]) -> str:
 
 
 def _tts_agent_queue_limit() -> int:
-    return max(1, min(8, _env_int("PHONE_WORKER_TTS_AGENT_CONCURRENCY", 1)))
+    return max(1, min(8, _env_int("PHONE_WORKER_TTS_AGENT_CONCURRENCY", 2)))
+
+
+def _prune_audio_cache(root, max_bytes, max_files, *, protected=None):
+    import fcntl
+    stats = []
+    with contextlib.suppress(OSError):
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if Path(entry.name).suffix.lower() not in {".mp3", ".wav", ".ogg"} or not entry.is_file(follow_symlinks=False):
+                    continue
+                with contextlib.suppress(OSError):
+                    st = entry.stat(follow_symlinks=False)
+                    stats.append((st.st_mtime, st.st_size, entry.path))
+    remaining, total = len(stats), sum(row[1] for row in stats)
+    if remaining <= max_files and total <= max_bytes:
+        return
+    fresh = time.time() - 180
+    for mtime, size, path in sorted(stats):
+        if remaining <= max_files and total <= max_bytes:
+            break
+        if mtime > fresh or (protected is not None and path == str(protected)):
+            continue
+        try:
+            with open(path, "rb") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                before, current = os.fstat(handle.fileno()), os.stat(path)
+                if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
+                    continue
+                os.unlink(path)
+                remaining -= 1
+                total -= size
+        except OSError:
+            continue
+
+
+_TTS_TRANSPORT_LOCK = threading.Lock()
+
+
+def _tts_transport_module():
+    # Health and synthesis can arrive on different HTTP threads at startup.
+    with _TTS_TRANSPORT_LOCK:
+        name = "tts_transport"
+        module = sys.modules.get(name)
+        if module is not None:
+            return module
+        path = Path(__file__).with_name("tts_transport.py")
+        if not path.is_file():
+            return None
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(name, None)
+            return None
+        return module
 
 
 def _tts_agent_snapshot() -> dict[str, Any]:
@@ -2562,6 +2620,8 @@ def _tts_agent_snapshot() -> dict[str, Any]:
         "teto": deps.get("teto") if isinstance(deps.get("teto"), dict) else _teto_status(),
         "active": active,
         "concurrency_limit": _tts_agent_queue_limit(),
+        "stream_protocol": 2 if _tts_transport_module() is not None else 0,
+        "cache_binary_protocol": 2 if _tts_transport_module() is not None else 0,
         "total": total,
         "failed": failed,
         "avg_synth_ms": avg_ms,
@@ -2574,6 +2634,8 @@ def _tts_agent_snapshot() -> dict[str, Any]:
 def _tts_agent_record_start() -> None:
     global _TTS_AGENT_ACTIVE
     with _TTS_AGENT_LOCK:
+        if _TTS_AGENT_ACTIVE >= _tts_agent_queue_limit():
+            raise RuntimeError("TTS Agent ocupado; fila local cheia")
         _TTS_AGENT_ACTIVE += 1
 
 
@@ -2940,24 +3002,38 @@ _TTS_AGENT_LAST_ERROR = ""
 _TTS_AGENT_LAST_ENGINE = ""
 _TTS_AGENT_LAST_OK_AT = 0.0
 _TTS_CACHE_MAINTENANCE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-cache-maint")
-_TTS_CACHE_MAINTENANCE_SLOTS = threading.BoundedSemaphore(2)
+_TTS_CACHE_MAINTENANCE_LOCK = threading.Lock()
+_TTS_CACHE_MAINTENANCE_PENDING = {}
+_TTS_CACHE_MAINTENANCE_RUNNING = False
+_TTS_CACHE_TOUCHES = {}
 
 
 def _submit_tts_cache_maintenance(callback, *args, **kwargs) -> bool:
-    if not _TTS_CACHE_MAINTENANCE_SLOTS.acquire(blocking=False):
-        return False
-
-    def _runner() -> None:
-        try:
-            callback(*args, **kwargs)
-        finally:
-            _TTS_CACHE_MAINTENANCE_SLOTS.release()
-
+    global _TTS_CACHE_MAINTENANCE_RUNNING
+    # One pending pass per cache category; new requests replace obsolete ones.
+    key = getattr(callback, "__name__", str(type(callback)))
+    with _TTS_CACHE_MAINTENANCE_LOCK:
+        _TTS_CACHE_MAINTENANCE_PENDING[key] = (callback, args, kwargs)
+        if _TTS_CACHE_MAINTENANCE_RUNNING:
+            return True
+        _TTS_CACHE_MAINTENANCE_RUNNING = True
+    def run():
+        global _TTS_CACHE_MAINTENANCE_RUNNING
+        while True:
+            with _TTS_CACHE_MAINTENANCE_LOCK:
+                if not _TTS_CACHE_MAINTENANCE_PENDING:
+                    _TTS_CACHE_MAINTENANCE_RUNNING = False
+                    return
+                _, (fn, positional, named) = _TTS_CACHE_MAINTENANCE_PENDING.popitem()
+            with contextlib.suppress(Exception):
+                fn(*positional, **named)
     try:
-        _TTS_CACHE_MAINTENANCE_EXECUTOR.submit(_runner)
+        _TTS_CACHE_MAINTENANCE_EXECUTOR.submit(run)
         return True
-    except Exception:
-        _TTS_CACHE_MAINTENANCE_SLOTS.release()
+    except RuntimeError:
+        with _TTS_CACHE_MAINTENANCE_LOCK:
+            _TTS_CACHE_MAINTENANCE_RUNNING = False
+            _TTS_CACHE_MAINTENANCE_PENDING.clear()
         return False
 
 
@@ -2969,14 +3045,20 @@ def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
         "yt-dlp": {"module": "yt_dlp", "pip": "yt-dlp"},
         "wavelink": {"module": "wavelink", "pip": "wavelink"},
         "aiohttp": {"module": "aiohttp", "pip": "aiohttp"},
-        "gTTS": {"module": "gtts", "pip": "gTTS"},
-        "edge-tts": {"module": "edge_tts", "pip": "edge-tts"},
+        "gTTS": {"module": "gtts", "pip": "gTTS==2.5.4"},
+        "edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.2.8"},
     }
 
 
 def _module_import_ok(module_name: str) -> tuple[bool, str]:
     try:
         importlib.import_module(module_name)
+        pins = {'edge_tts': ('edge-tts', '7.2.8'), 'gtts': ('gTTS', '2.5.4')}
+        if module_name in pins:
+            from importlib.metadata import version
+            package, required = pins[module_name]
+            if version(package) != required:
+                return False, f'{package} precisa da versão {required}'
         return True, ""
     except Exception as exc:
         return False, f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
@@ -4579,6 +4661,24 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
             return
+        if path in {"/tts-agent/synthesize.stream", "/tts-agent/cache.raw"}:
+            if not self._require_auth():
+                return
+            transport = _tts_transport_module()
+            if transport is None:
+                _error(self, HTTPStatus.NOT_FOUND, "protocolo TTS v2 indisponível")
+                return
+            try:
+                if path.endswith("cache.raw"):
+                    transport.store_binary_cache(self, sys.modules[__name__])
+                else:
+                    body = self._read_json()
+                    if body is not None:
+                        transport.serve_stream(self, body, sys.modules[__name__])
+            except Exception as exc:
+                self.close_connection = True
+                _error(self, HTTPStatus.BAD_GATEWAY, f"{type(exc).__name__}: {_short_text(exc, limit=220)}")
+            return
         if path == "/tts-agent/synthesize.raw":
             if not self._require_auth():
                 return
@@ -4778,53 +4878,25 @@ class WorkerHandler(BaseHTTPRequestHandler):
         root = self._tts_cache_root()
         for fmt in ("mp3", "wav", "ogg"):
             path = root / f"{key}.{fmt}"
-            if path.exists() and path.stat().st_size > 0:
-                return path, fmt
+            with contextlib.suppress(OSError):
+                if path.stat().st_size > 0:
+                    return path, fmt
         return None, ""
 
     def _touch_tts_cache_file(self, path: Path) -> None:
-        now = time.time()
-        with contextlib.suppress(Exception):
-            os.utime(path, (now, now))
+        now = time.monotonic()
+        key = str(path)
+        with _TTS_CACHE_MAINTENANCE_LOCK:
+            if now - _TTS_CACHE_TOUCHES.get(key, -60.0) < 30:
+                return
+            if len(_TTS_CACHE_TOUCHES) >= 4096:
+                _TTS_CACHE_TOUCHES.pop(next(iter(_TTS_CACHE_TOUCHES)))
+            _TTS_CACHE_TOUCHES[key] = now
+        with contextlib.suppress(OSError):
+            os.utime(path, None)
 
     def _prune_tts_cache(self, *, protected: Path | None = None) -> None:
-        root = self._tts_cache_root()
-        max_bytes, max_files = self._tts_cache_limits()
-        try:
-            entries = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in {".mp3", ".wav", ".ogg"}]
-        except FileNotFoundError:
-            return
-        stats: list[tuple[float, int, Path]] = []
-        total_bytes = 0
-        for path in entries:
-            try:
-                st = path.stat()
-            except FileNotFoundError:
-                continue
-            size = int(st.st_size or 0)
-            total_bytes += size
-            stats.append((float(st.st_mtime), size, path))
-        if len(stats) <= max_files and total_bytes <= max_bytes:
-            return
-        protected_path = None
-        if protected is not None:
-            with contextlib.suppress(Exception):
-                protected_path = protected.resolve()
-        for _, size, path in sorted(stats, key=lambda item: item[0]):
-            if len(stats) <= max_files and total_bytes <= max_bytes:
-                break
-            if protected_path is not None:
-                with contextlib.suppress(Exception):
-                    if path.resolve() == protected_path:
-                        continue
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-            except Exception:
-                continue
-            total_bytes = max(0, total_bytes - size)
-            stats = [item for item in stats if item[2] != path]
+        _prune_audio_cache(self._tts_cache_root(), *self._tts_cache_limits(), protected=protected)
 
     def _schedule_tts_cache_prune(self, *, protected: Path, piper: bool = False) -> bool:
         callback = self._prune_piper_cache if piper else self._prune_tts_cache
@@ -4899,11 +4971,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
         root = self._tts_cache_root()
         root.mkdir(parents=True, exist_ok=True)
         path = self._tts_cache_path(key, audio_format)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path = path.with_suffix(path.suffix + f".tmp-{os.getpid()}-{threading.get_ident()}")
         tmp_path.write_bytes(data)
         os.replace(tmp_path, path)
         self._touch_tts_cache_file(path)
-        self._prune_tts_cache(protected=path)
+        self._schedule_tts_cache_prune(protected=path)
         total_ms = (time.monotonic() - started) * 1000.0
         return {
             "ok": True,
@@ -5276,8 +5348,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if provided and requested_engine == normalized_engine and normalized_engine != "teto":
             with contextlib.suppress(Exception):
                 return self._sanitize_tts_cache_key(provided)
-        text = " ".join(str(body.get("text") or "").strip().split()).lower()
-        text = text.replace("!!", "!").replace("??", "?").replace("..", ".")
+        text = str(body.get("text") or "").strip()
         if normalized_engine == "teto":
             status = _teto_status()
             fingerprint = str(status.get("fingerprint") or "unavailable")
@@ -5298,8 +5369,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             payload = f"edge|{voice}|{rate}|{pitch}|{text}"
         else:
             language = self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language"))
-            payload = f"gtts|{language}|{text}"
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            payload = f"gtts|{language}|{body.get('tld') or 'com'}|{text}"
+        return hashlib.sha256(("tts-v2|" + payload).encode("utf-8")).hexdigest()
 
     def _tts_agent_cache_mode_allows_read(self, body: dict[str, Any]) -> bool:
         mode = str(body.get("cache_mode") or "prefer").strip().lower()
@@ -5364,8 +5435,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             tmp.write_bytes(data)
             os.replace(tmp, path)
             self._touch_tts_cache_file(path)
-            if not self._schedule_tts_cache_prune(protected=path):
-                self._prune_tts_cache(protected=path)
+            self._schedule_tts_cache_prune(protected=path)
             logs.append(f"standard-cache store {path.name} {len(data)}B")
         except Exception as exc:
             logs.append(f"standard-cache store falhou: {type(exc).__name__}: {_short_text(exc, limit=90)}")
@@ -5478,6 +5548,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 with contextlib.suppress(Exception):
                     stage_ms["android_synth"] = round(float(response.get("android_synth_ms") or response.get("worker_synth_ms") or 0), 2)
                 logs.append(f"android-native json locale={android_payload['locale']} format={audio_format} apk_ms={response.get('android_synth_ms') or response.get('worker_synth_ms') or 0} roundtrip={android_ms:.1f}ms")
+        elif engine in {"edge", "gtts"} and _tts_transport_module() is not None:
+            data = _tts_transport_module().synthesize_bytes(engine=engine, text=text,
+                voice=str(body.get("voice") or body.get("fallback_voice") or "pt-BR-FranciscaNeural"),
+                language=self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language")),
+                rate=self._normalize_tts_edge_rate(body.get("rate")),
+                pitch=self._normalize_tts_edge_pitch(body.get("pitch")),
+                tld=str(body.get("tld") or "com"), timeout=timeout, max_bytes=max_audio_bytes)
+            logs.append(f"{engine} transporte compartilhado")
         elif engine == "edge":
             try:
                 import edge_tts  # type: ignore
@@ -5495,19 +5573,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         buffer.write(chunk["data"])
                 return buffer.getvalue()
 
-            try:
-                data = asyncio.run(asyncio.wait_for(_edge_bytes(), timeout=timeout))
-            except Exception:
-                # Compatibilidade com versões antigas do edge-tts que podem não expor stream().
-                with tempfile.TemporaryDirectory(prefix="phone-worker-edge-tts-") as tmp:
-                    out_path = Path(tmp) / "speech.mp3"
-
-                    async def _save_edge() -> None:
-                        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
-                        await communicate.save(str(out_path))
-
-                    asyncio.run(asyncio.wait_for(_save_edge(), timeout=timeout))
-                    data = out_path.read_bytes() if out_path.exists() else b""
+            data = asyncio.run(asyncio.wait_for(_edge_bytes(), timeout=timeout))
             logs.append(f"edge voice={voice} rate={rate} pitch={pitch}")
         else:
             try:
@@ -5516,7 +5582,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 raise RuntimeError(f"gTTS não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
             language = self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language"))
             buffer = io.BytesIO()
-            tts = gTTS(text=text, lang=language)
+            tts = gTTS(text=text, lang=language, timeout=(min(3.5, timeout), min(8.0, timeout)))
             tts.write_to_fp(buffer)
             data = buffer.getvalue()
             logs.append(f"gtts language={language}")
@@ -5579,10 +5645,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
             teto_max_chars = max(16, _env_int("PHONE_WORKER_TETO_MAX_CHARACTERS", 180))
             if len(text) > teto_max_chars:
                 raise ValueError(f"texto grande demais para Teto ({len(text)} > {teto_max_chars})")
-        limit = _tts_agent_queue_limit()
-        with _TTS_AGENT_LOCK:
-            if _TTS_AGENT_ACTIVE >= limit:
-                raise RuntimeError("TTS Agent ocupado; fila local cheia")
         timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or os.getenv("PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS") or self.job_timeout))))
         max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
         deps = _turbo_dependency_snapshot()
@@ -5600,11 +5662,15 @@ class WorkerHandler(BaseHTTPRequestHandler):
         selected = ""
         try:
             for engine in order:
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise TimeoutError("prazo total do TTS Agent esgotado")
                 selected = engine
                 try:
                     if engine == "piper":
                         piper_body = dict(body)
                         piper_body["engine"] = "piper"
+                        piper_body["timeout_seconds"] = max(1, int(remaining))
                         piper_body.setdefault("cache_mode", "prefer")
                         result = self._synthesize_piper_bytes(piper_body, benchmark=False, raw_response=raw_response)
                         result["engine"] = "piper"
@@ -5616,15 +5682,23 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         result["total_ms"] = round(float(result.get("worker_total_ms") or elapsed_ms), 2)
                         _tts_agent_record_done(ok=True, engine="piper", elapsed_ms=elapsed_ms)
                         return result
+                    engine_body = dict(body)
+                    if engine != requested_engine:
+                        engine_body['engine'] = engine
+                        engine_body.pop('cache_key', None)
+                        for setting in ('voice', 'language', 'rate', 'pitch'):
+                            fallback_value = body.get('fallback_' + setting)
+                            if fallback_value not in (None, ''):
+                                engine_body[setting] = fallback_value
                     result = self._synthesize_standard_tts_bytes(
-                        body,
+                        engine_body,
                         engine=engine,
                         roles=roles,
                         capabilities=capabilities,
                         logs=list(base_logs),
                         started=started,
                         max_audio_bytes=max_audio_bytes,
-                        timeout=timeout,
+                        timeout=remaining,
                         raw_response=raw_response,
                     )
                     elapsed_ms = (time.monotonic() - started) * 1000.0
@@ -5732,39 +5806,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             os.utime(path, (now, now))
 
     def _prune_piper_cache(self, *, protected: Path | None = None) -> None:
-        cache_dir = self._piper_cache_dir()
-        max_bytes, max_files = self._piper_cache_limits()
-        try:
-            entries = [p for p in cache_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp3", ".wav"}]
-        except FileNotFoundError:
-            return
-        total_bytes = 0
-        stats: list[tuple[float, int, Path]] = []
-        for path in entries:
-            try:
-                st = path.stat()
-            except FileNotFoundError:
-                continue
-            total_bytes += int(st.st_size)
-            stats.append((float(st.st_mtime), int(st.st_size), path))
-        if len(stats) <= max_files and total_bytes <= max_bytes:
-            return
-        protected_path = protected.resolve() if protected else None
-        for _, size, path in sorted(stats, key=lambda item: item[0]):
-            if protected_path is not None:
-                with contextlib.suppress(Exception):
-                    if path.resolve() == protected_path:
-                        continue
-            if len(stats) <= max_files and total_bytes <= max_bytes:
-                break
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-            except Exception:
-                continue
-            total_bytes = max(0, total_bytes - size)
-            stats = [item for item in stats if item[2] != path]
+        _prune_audio_cache(self._piper_cache_dir(), *self._piper_cache_limits(), protected=protected)
 
     def _piper_cache_hit_result(self, *, path: Path, audio_format: str, key: str, roles: list[str], capabilities: list[str], logs: list[str], max_audio_bytes: int, started: float, cache_mode: str = "prefer", raw_response: bool = False) -> dict[str, Any]:
         read_started = time.monotonic()
@@ -5952,8 +5994,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 tmp_cache_path.write_bytes(data)
                 os.replace(tmp_cache_path, cache_path)
                 self._touch_piper_cache_file(cache_path)
-                if not self._schedule_tts_cache_prune(protected=cache_path, piper=True):
-                    self._prune_piper_cache(protected=cache_path)
+                self._schedule_tts_cache_prune(protected=cache_path, piper=True)
                 cache_stored = True
                 logs.append(f"cache store Piper {cache_path.name} {len(data)} B")
             except Exception as exc:
@@ -6007,8 +6048,16 @@ class WorkerHandler(BaseHTTPRequestHandler):
             out_path = tmp_dir / "speech.mp3"
             try:
                 if engine == "android_native":
+                    engine_body = dict(body)
+                    if engine != requested_engine:
+                        engine_body['engine'] = engine
+                        engine_body.pop('cache_key', None)
+                        for setting in ('voice', 'language', 'rate', 'pitch'):
+                            fallback_value = body.get('fallback_' + setting)
+                            if fallback_value not in (None, ''):
+                                engine_body[setting] = fallback_value
                     result = self._synthesize_standard_tts_bytes(
-                        body,
+                        engine_body,
                         engine="android_native",
                         roles=roles,
                         capabilities=capabilities,
@@ -6046,7 +6095,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     except Exception as exc:
                         raise RuntimeError(f"gTTS não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
                     language = self._normalize_tts_gtts_language(body.get("language"))
-                    tts = gTTS(text=text, lang=language)
+                    tts = gTTS(text=text, lang=language, timeout=(min(3.5, timeout), min(8.0, timeout)))
                     with open(out_path, "wb") as handle:
                         tts.write_to_fp(handle)
                     logs.append(f"gtts language={language}")
@@ -10590,6 +10639,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
 _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker.py": ("worker", "phone_worker.py", 0o755),
     "apk_identity.py": ("worker", "apk_identity.py", 0o644),
+    "tts_transport.py": ("worker", "tts_transport.py", 0o644),
     "phone_worker_bootstrap.py": ("worker", "phone_worker_bootstrap.py", 0o755),
     "music_agent.py": ("worker", "music_agent.py", 0o755),
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
@@ -10897,7 +10947,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
     updated_names = {str(item.get("target") or "") for item in updated}
     applied_music_agent_version = _read_music_agent_version_from_path(_phone_worker_dir() / "music_agent.py")
     music_agent_restart: dict[str, Any] | None = None
-    if {"music_agent.py", "start-phone-music-agent.sh"} & updated_names:
+    if {"music_agent.py", "tts_transport.py", "start-phone-music-agent.sh"} & updated_names:
         try:
             music_agent_restart = _run_service_action("music-agent", "restart")
         except Exception as exc:

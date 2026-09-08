@@ -51,6 +51,10 @@ def validate_voice(voice: str, edge_voice_names: set[str]) -> str:
         return EDGE_DEFAULT_VOICE
     if voice in edge_voice_names:
         return voice
+    # Offline catalogue means unknown, not invalid. Preserve plausible saved
+    # provider IDs until a successful catalogue refresh can validate them.
+    if not edge_voice_names and re.fullmatch(r"[a-z]{2,3}-[A-Z]{2}(?:-[A-Za-z0-9]+)+Neural", voice):
+        return voice
     return EDGE_DEFAULT_VOICE
 
 def get_gtts_languages() -> dict[str, str]:

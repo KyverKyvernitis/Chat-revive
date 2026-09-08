@@ -55,7 +55,10 @@ log "copiando arquivos do phone-worker"
 "${SCP_BASE[@]}" \
   "$SRC_DIR/apk_identity.py" \
   "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/apk_identity.py"
-scp -P "$PHONE_PORT" \
+"${SCP_BASE[@]}" \
+  "$SRC_DIR/tts_transport.py" \
+  "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/tts_transport.py"
+"${SCP_BASE[@]}" \
   "$SRC_DIR/music_agent.py" \
   "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/music_agent.py"
 

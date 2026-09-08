@@ -30,6 +30,7 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("phone_worker.py", 0o755),
     ("phone_worker_bootstrap.py", 0o755),
     ("apk_identity.py", 0o644),
+    ("tts_transport.py", 0o644),
     ("music_agent.py", 0o755),
     ("start-phone-worker.sh", 0o755),
     ("start-phone-music-agent.sh", 0o755),

@@ -17,6 +17,8 @@ import importlib
 import base64
 import hashlib
 import io
+import queue
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import shutil
@@ -47,7 +49,100 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.27"
+class _TimedTTSSource(discord.AudioSource):
+    def __init__(self, source, *, started, reader=None, buffered=False):
+        self.source, self.started, self.reader = source, started, reader
+        self.first_frame_ms = None
+        self.closed = False
+        self.error = None
+        self.frames = queue.Queue(maxsize=25) if buffered else None
+        self.ready = threading.Event()
+        if buffered:
+            threading.Thread(target=self._fill, name='tts-pcm-reader', daemon=True).start()
+
+    def _fill(self):
+        try:
+            while not self.closed:
+                frame = self.source.read()
+                while not self.closed:
+                    try:
+                        self.frames.put(frame, timeout=.1)
+                        self.ready.set()
+                        break
+                    except queue.Full:
+                        continue
+                if not frame:
+                    break
+        except Exception as error:
+            self.error = error
+            self.ready.set()
+        finally:
+            self.ready.set()
+
+    def read(self):
+        if self.closed:
+            return b''
+        if self.frames is None:
+            frame = self.source.read()
+        else:
+            try:
+                frame = self.frames.get_nowait()
+            except queue.Empty:
+                if self.error:
+                    raise self.error
+                return bytes(3840)  # keep the music clock running during provider stalls
+        if not frame and self.reader is not None and self.reader.error is not None:
+            raise RuntimeError('síntese progressiva incompleta') from self.reader.error
+        if frame and self.first_frame_ms is None:
+            self.first_frame_ms = (time.monotonic() - self.started) * 1000
+        return frame
+
+    def is_opus(self):
+        return self.source.is_opus()
+
+    def cleanup(self):
+        if self.closed:
+            return
+        self.closed = True
+        if self.reader is not None:
+            self.reader.close()
+        self.source.cleanup()
+
+
+_TTS_MAINTENANCE_LOCK = threading.Lock()
+_TTS_MAINTENANCE_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix='music-cache-prune')
+_TTS_MAINTENANCE_PENDING = None
+_TTS_MAINTENANCE_RUNNING = False
+_TTS_CACHE_TOUCHES = {}
+
+
+def _schedule_tts_prune(callback, path):
+    global _TTS_MAINTENANCE_PENDING, _TTS_MAINTENANCE_RUNNING
+    with _TTS_MAINTENANCE_LOCK:
+        _TTS_MAINTENANCE_PENDING = callback, path
+        if _TTS_MAINTENANCE_RUNNING:
+            return
+        _TTS_MAINTENANCE_RUNNING = True
+    def run():
+        global _TTS_MAINTENANCE_PENDING, _TTS_MAINTENANCE_RUNNING
+        while True:
+            with _TTS_MAINTENANCE_LOCK:
+                current = _TTS_MAINTENANCE_PENDING
+                _TTS_MAINTENANCE_PENDING = None
+                if current is None:
+                    _TTS_MAINTENANCE_RUNNING = False
+                    return
+            with contextlib.suppress(Exception):
+                current[0](protected=current[1])
+    try:
+        _TTS_MAINTENANCE_POOL.submit(run)
+    except RuntimeError:
+        with _TTS_MAINTENANCE_LOCK:
+            _TTS_MAINTENANCE_RUNNING = False
+            _TTS_MAINTENANCE_PENDING = None
+
+
+AGENT_VERSION = "0.3.28"
 STARTED_AT = time.time()
 
 
@@ -244,6 +339,20 @@ class AgentMixedAudioSource(discord.AudioSource):
             if not future.done():
                 future.set_exception(error)
         self.loop.call_soon_threadsafe(_set)
+
+    def cancel_tts(self, future: asyncio.Future) -> None:
+        target = None
+        with self._lock:
+            for overlay in self._overlays:
+                if overlay["future"] is future:
+                    target = overlay
+                    self._overlays.remove(overlay)
+                    break
+        if target is not None:
+            with contextlib.suppress(Exception):
+                target["source"].cleanup()
+        if not future.done():
+            future.cancel()
 
     def _limit(self, value: int) -> int:
         return max(-32768, min(32767, int(value)))
@@ -971,9 +1080,11 @@ class MusicAgent:
         if action in {"unduck", "restore_volume", "tts_restore"}:
             return await self.cmd_unduck(body)
         if action in {"voice_tts", "voice_tts_direct", "direct_tts", "tts_direct"}:
-            return await self.cmd_voice_tts(body)
+            return await self._run_tts_request(body, direct=True)
         if action in {"tts", "tts_play", "speak"}:
-            return await self.cmd_tts(body)
+            return await self._run_tts_request(body, direct=False)
+        if action == "cancel_tts":
+            return await self.cmd_cancel_tts(body)
         if action in {"prefetch", "prepare", "preload"}:
             return await self.cmd_prefetch(body)
         raise ValueError("ação do Music Agent não suportada")
@@ -1542,42 +1653,50 @@ class MusicAgent:
         return None, ""
 
     def _touch_tts_cache_file(self, path: Path) -> None:
-        now = time.time()
-        with contextlib.suppress(Exception):
-            os.utime(path, (now, now))
+        now = time.monotonic()
+        key = str(path)
+        with _TTS_MAINTENANCE_LOCK:
+            if now - _TTS_CACHE_TOUCHES.get(key, -60) < 30:
+                return
+            if len(_TTS_CACHE_TOUCHES) >= 4096:
+                _TTS_CACHE_TOUCHES.pop(next(iter(_TTS_CACHE_TOUCHES)))
+            _TTS_CACHE_TOUCHES[key] = now
+        with contextlib.suppress(OSError):
+            os.utime(path, None)
 
-    def _prune_tts_cache(self, protected: Path | None = None) -> None:
+    def _prune_tts_cache(self, *, protected: Path | None = None) -> None:
+        import fcntl
         root = self._tts_cache_root()
         max_bytes, max_files = self._tts_cache_limits()
-        try:
-            files = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in {".mp3", ".wav", ".ogg"}]
-        except FileNotFoundError:
-            return
-        stats: list[tuple[float, int, Path]] = []
-        total = 0
-        for path in files:
-            with contextlib.suppress(Exception):
-                st = path.stat()
-                size = int(st.st_size or 0)
-                total += size
-                stats.append((float(st.st_mtime), size, path))
-        if len(stats) <= max_files and total <= max_bytes:
-            return
-        protected_resolved = None
-        if protected is not None:
-            with contextlib.suppress(Exception):
-                protected_resolved = protected.resolve()
-        for _, size, path in sorted(stats, key=lambda item: item[0]):
-            if len(stats) <= max_files and total <= max_bytes:
-                break
-            if protected_resolved is not None:
-                with contextlib.suppress(Exception):
-                    if path.resolve() == protected_resolved:
+        stats = []
+        with contextlib.suppress(OSError):
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if Path(entry.name).suffix not in {'.mp3', '.wav', '.ogg'} or not entry.is_file(follow_symlinks=False):
                         continue
-            with contextlib.suppress(Exception):
-                path.unlink()
-            total = max(0, total - size)
-            stats = [item for item in stats if item[2] != path]
+                    with contextlib.suppress(OSError):
+                        st = entry.stat(follow_symlinks=False)
+                        stats.append((st.st_mtime, st.st_size, entry.path))
+        count, total = len(stats), sum(row[1] for row in stats)
+        if count <= max_files and total <= max_bytes:
+            return
+        fresh = time.time() - 180
+        for mtime, size, path in sorted(stats):
+            if count <= max_files and total <= max_bytes:
+                break
+            if mtime > fresh or protected is not None and path == str(protected):
+                continue
+            try:
+                with open(path, 'rb') as handle:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    before, current = os.fstat(handle.fileno()), os.stat(path)
+                    if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
+                        continue
+                    os.unlink(path)
+                    count -= 1
+                    total -= size
+            except OSError:
+                continue
 
     def _tts_cache_key_for_body(self, body: dict[str, Any], *, engine: str, text: str) -> str:
         requested_engine = str(body.get("engine") or engine or "gtts").strip().lower().replace("-", "_") or "gtts"
@@ -1588,14 +1707,14 @@ class MusicAgent:
         if provided and requested_engine == normalized_engine:
             with contextlib.suppress(Exception):
                 return self._sanitize_tts_cache_key(provided)
-        normalized_text = " ".join(str(text or "").strip().split()).lower().replace("!!", "!").replace("??", "?").replace("..", ".")
+        normalized_text = str(text or "").strip()
         if engine == "edge":
             voice = str(body.get("voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
             payload = f"edge|{voice}|{self._normalize_edge_rate(body.get('rate'))}|{self._normalize_edge_pitch(body.get('pitch'))}|{normalized_text}"
         else:
             language = self._normalize_tts_language(body.get("language"))
-            payload = f"gtts|{language}|{normalized_text}"
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            payload = f"gtts|{language}|{body.get('tld') or 'com'}|{normalized_text}"
+        return hashlib.sha256(("tts-v2|" + payload).encode("utf-8")).hexdigest()
 
     def _tts_cache_mode_allows_read(self, body: dict[str, Any]) -> bool:
         mode = str(body.get("cache_mode") or "prefer").strip().lower()
@@ -1632,7 +1751,7 @@ class MusicAgent:
             tmp.write_bytes(data)
             os.replace(tmp, path)
             self._touch_tts_cache_file(path)
-            self._prune_tts_cache(protected=path)
+            _schedule_tts_prune(self._prune_tts_cache, path)
             self.log("tts_cache_store", engine=engine, file=path.name, bytes=len(data))
         except Exception as exc:
             self.log("tts_cache_store_failed", engine=engine, error=f"{type(exc).__name__}: {short_text(exc, 120)}")
@@ -1654,43 +1773,38 @@ class MusicAgent:
             if cache_key and self._tts_cache_mode_allows_read(body) and self._try_read_tts_cache_to_target(key=cache_key, target=target, body=body):
                 return f"{engine}-cache"
         audio_format = "mp3"
-        data = b""
-        if engine == "edge":
+        try:
+            transport = importlib.import_module('tts_transport')
+        except ImportError:
+            transport = None
+        if transport is not None:
+            stream = transport.AudioStream(engine=engine, text=text,
+                voice=str(body.get('voice') or 'pt-BR-FranciscaNeural'),
+                language=self._normalize_tts_language(body.get('language')),
+                rate=self._normalize_edge_rate(body.get('rate')),
+                pitch=self._normalize_edge_pitch(body.get('pitch')),
+                tld=str(body.get('tld') or 'com'), timeout=float(body.get('timeout_seconds') or 30))
             try:
-                import edge_tts  # type: ignore
-            except Exception as exc:
-                raise RuntimeError(f"edge-tts ausente no worker: {type(exc).__name__}") from exc
-            voice = str(body.get("voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
-            rate = self._normalize_edge_rate(body.get("rate"))
-            pitch = self._normalize_edge_pitch(body.get("pitch"))
-            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
-            try:
-                chunks: list[bytes] = []
-                async for chunk in communicate.stream():
-                    if chunk.get("type") == "audio" and chunk.get("data"):
-                        chunks.append(bytes(chunk["data"]))
-                data = b"".join(chunks)
-            except Exception:
-                # Compatibilidade com versões antigas do edge-tts que só expõem save().
-                with tempfile.TemporaryDirectory(prefix="music-agent-edge-tts-") as tmp:
-                    tmp_path = Path(tmp) / "speech.mp3"
-                    communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
-                    await communicate.save(str(tmp_path))
-                    data = tmp_path.read_bytes() if tmp_path.exists() else b""
-        if engine == "gtts":
-            try:
-                from gtts import gTTS  # type: ignore
-            except Exception as exc:
-                raise RuntimeError(f"gTTS ausente no worker: {type(exc).__name__}") from exc
-            language = self._normalize_tts_language(body.get("language"))
-            audio_format = "mp3"
-
-            def _make_gtts_bytes() -> bytes:
+                data = await asyncio.to_thread(lambda: b''.join(stream))
+            finally:
+                stream.close()
+        elif engine == 'edge':
+            import edge_tts
+            communicate = edge_tts.Communicate(text=text, voice=str(body.get('voice') or 'pt-BR-FranciscaNeural'),
+                rate=self._normalize_edge_rate(body.get('rate')), pitch=self._normalize_edge_pitch(body.get('pitch')),
+                connect_timeout=4, receive_timeout=15)
+            chunks = []
+            async for chunk in communicate.stream():
+                if chunk.get('type') == 'audio' and chunk.get('data'):
+                    chunks.append(chunk['data'])
+            data = b''.join(chunks)
+        else:
+            from gtts import gTTS
+            def synthesize():
                 buffer = io.BytesIO()
-                gTTS(text=text, lang=language).write_to_fp(buffer)
+                gTTS(text=text, lang=self._normalize_tts_language(body.get('language')), timeout=(3.5, 8)).write_to_fp(buffer)
                 return buffer.getvalue()
-
-            data = await asyncio.to_thread(_make_gtts_bytes)
+            data = await asyncio.to_thread(synthesize)
         if not data:
             raise RuntimeError("TTS não gerou áudio")
         target.write_bytes(data)
@@ -1698,6 +1812,92 @@ class MusicAgent:
         if cache_key and self._tts_cache_enabled() and self._tts_cache_mode_allows_store(body):
             self._store_tts_cache_bytes(key=cache_key, data=data, audio_format=str(body.get("audio_format") or audio_format), engine=engine)
         return engine
+
+    def _tts_requests(self):
+        if not hasattr(self, '_active_tts_requests'):
+            self._active_tts_requests = {}
+            self._cancelled_tts_requests = {}
+        return self._active_tts_requests
+
+    async def _run_tts_request(self, body, *, direct):
+        active = self._tts_requests()
+        now = time.monotonic()
+        self._cancelled_tts_requests = {key: when for key, when in self._cancelled_tts_requests.items() if now - when < 60}
+        request = str(body.get('tts_request_id') or '')[:80]
+        key = (safe_id(body.get('guild_id')), request)
+        if request and key in self._cancelled_tts_requests:
+            return {'ok': False, 'cancelled': True, 'error': 'TTS cancelado antes da admissão'}
+        if request and key in active:
+            return {'ok': False, 'error': 'pedido TTS já está ativo'}
+        owner = asyncio.current_task()
+        if request:
+            active[key] = owner
+        try:
+            return await (self.cmd_voice_tts(body) if direct else self.cmd_tts(body))
+        finally:
+            if active.get(key) is owner:
+                active.pop(key, None)
+
+    async def cmd_cancel_tts(self, body):
+        active = self._tts_requests()
+        request = str(body.get('tts_request_id') or '')[:80]
+        if not request:
+            return {'ok': False, 'error': 'tts_request_id obrigatório'}
+        key = (safe_id(body.get('guild_id')), request)
+        if len(self._cancelled_tts_requests) >= 256:
+            self._cancelled_tts_requests.pop(next(iter(self._cancelled_tts_requests)))
+        self._cancelled_tts_requests[key] = time.monotonic()
+        task = active.get(key)
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return {'ok': True, 'cancelled': True, 'tts_request_id': request}
+
+    async def _prepare_tts_source(self, body, target, *, started):
+        text = str(body.get('text') or body.get('content') or '').strip()
+        if not text or len(text) > 1600:
+            raise ValueError('tamanho de texto TTS inválido')
+        engine = str(body.get('engine') or 'gtts').lower().replace('-', '_')
+        if engine in {'google', 'google_tts', 'googlecloud', 'google_cloud', 'gcloud'}:
+            engine = 'gtts'
+        key = self._tts_cache_key_for_body(body, engine=engine, text=text) if self._tts_cache_enabled() else ''
+        cache_hit = key and self._tts_cache_mode_allows_read(body) and await asyncio.to_thread(
+            self._try_read_tts_cache_to_target, key=key, target=target, body=body)
+        if cache_hit:
+            source = discord.FFmpegPCMAudio(str(target), executable=self.ffmpeg_executable,
+                before_options='-nostdin', options='-vn -sn -dn -loglevel warning')
+            return _TimedTTSSource(source, started=started), f'{engine}-cache'
+        try:
+            transport = importlib.import_module('tts_transport')
+        except ImportError:
+            await self._synthesize_tts_file(body, target)
+            source = discord.FFmpegPCMAudio(str(target), executable=self.ffmpeg_executable,
+                before_options='-nostdin', options='-vn -sn -dn -loglevel warning')
+            return _TimedTTSSource(source, started=started), engine
+        stream = transport.AudioStream(engine=engine, text=text,
+            voice=str(body.get('voice') or 'pt-BR-FranciscaNeural'),
+            language=self._normalize_tts_language(body.get('language')),
+            rate=self._normalize_edge_rate(body.get('rate')), pitch=self._normalize_edge_pitch(body.get('pitch')),
+            tld=str(body.get('tld') or 'com'), timeout=float(body.get('timeout_seconds') or 30))
+        publish = None
+        if key and self._tts_cache_mode_allows_store(body):
+            publish = lambda data: self._store_tts_cache_bytes(key=key, data=data, audio_format='mp3', engine=engine)
+        reader = transport.AudioReader(stream, on_complete=publish)
+        timed = None
+        try:
+            source = discord.FFmpegPCMAudio(reader, pipe=True, executable=self.ffmpeg_executable,
+                before_options='-nostdin -f mp3 -probesize 32768 -analyzeduration 0',
+                options='-vn -sn -dn -loglevel warning')
+            timed = _TimedTTSSource(source, started=started, reader=reader, buffered=True)
+            ready = await asyncio.to_thread(timed.ready.wait, min(20, float(body.get('timeout_seconds') or 30)))
+            if not ready or timed.error:
+                raise RuntimeError('TTS não preparou o primeiro PCM') from timed.error
+            return timed, engine
+        except BaseException:
+            reader.close()
+            if timed is not None:
+                timed.cleanup()
+            raise
 
     async def cmd_tts(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
@@ -1711,6 +1911,8 @@ class MusicAgent:
         timeout = max(1.0, min(90.0, float(body.get("timeout_seconds") or 30.0)))
         started = time.monotonic()
         engine = "worker"
+        tts_source = None
+        future = None
         st.ducked = True
         st.updated_at = time.time()
         try:
@@ -1734,20 +1936,23 @@ class MusicAgent:
                     tts_input = str(path)
                     engine = str(body.get("engine") or "prebuilt-b64").strip() or "prebuilt-b64"
                 else:
-                    engine = await asyncio.wait_for(self._synthesize_tts_file(body, path), timeout=max(3.0, timeout * 0.75))
-                    if not path.exists() or path.stat().st_size <= 0:
-                        raise RuntimeError("TTS não gerou áudio")
-                    tts_input = str(path)
-                tts_source = discord.FFmpegPCMAudio(tts_input, executable=self.ffmpeg_executable, before_options="-nostdin", options="-vn -sn -dn -loglevel warning")
+                    tts_source, engine = await self._prepare_tts_source(body, path, started=started)
+                if tts_source is None:
+                    tts_source = _TimedTTSSource(discord.FFmpegPCMAudio(tts_input, executable=self.ffmpeg_executable,
+                        before_options="-nostdin", options="-vn -sn -dn -loglevel warning"), started=started)
                 future = source.add_tts(tts_source, volume=max(0.0, min(2.0, env_float("MUSIC_AGENT_TTS_VOLUME", 1.0))))
                 self.log("tts_overlay_start", guild_id=guild_id, engine=engine, chars=len(str(body.get("text") or "")), prebuilt=bool(audio_url or audio_b64))
                 await asyncio.wait_for(future, timeout=timeout)
         finally:
+            if future is not None:
+                source.cancel_tts(future)
+            if tts_source is not None:
+                tts_source.cleanup()
             st.ducked = False
             st.updated_at = time.time()
         elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
         self.log("tts_overlay_done", guild_id=guild_id, elapsed_ms=round(elapsed_ms, 1))
-        return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "state": st.public()}
+        return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "first_frame_observed": tts_source.first_frame_ms is not None, "first_frame_ms": tts_source.first_frame_ms, "state": st.public()}
 
     def _get_tts_direct_lock(self, guild_id: int) -> asyncio.Lock:
         lock = self._tts_direct_locks.get(int(guild_id or 0))
@@ -1812,10 +2017,10 @@ class MusicAgent:
             loop = asyncio.get_running_loop()
             finished = loop.create_future()
             def _after(error: Exception | None) -> None:
-                if error and not finished.done():
-                    loop.call_soon_threadsafe(finished.set_exception, error)
-                elif not finished.done():
-                    loop.call_soon_threadsafe(finished.set_result, None)
+                def complete():
+                    if not finished.done():
+                        finished.set_exception(error) if error else finished.set_result(None)
+                loop.call_soon_threadsafe(complete)
 
             engine = "worker"
             with tempfile.TemporaryDirectory(prefix="music-agent-direct-tts-") as tmp:
@@ -1861,6 +2066,7 @@ class MusicAgent:
                 audio_url = str(body.get("audio_url") or body.get("url") or "").strip()
                 audio_b64 = str(body.get("audio_b64") or body.get("audioBase64") or "").strip()
                 tts_input = ""
+                audio_source = None
                 if audio_url.startswith(("http://", "https://", "file://")):
                     tts_input = audio_url
                     engine = str(body.get("engine") or "prebuilt-url").strip() or "prebuilt-url"
@@ -1874,18 +2080,16 @@ class MusicAgent:
                     engine = str(body.get("engine") or "prebuilt-b64").strip() or "prebuilt-b64"
                 else:
                     path = Path(tmp) / "tts.mp3"
-                    engine = await asyncio.wait_for(self._synthesize_tts_file(body, path), timeout=max(3.0, timeout * 0.75))
+                    audio_source, engine = await self._prepare_tts_source(body, path, started=started)
                     audio_format = "mp3"
-                    if not path.exists() or path.stat().st_size <= 0:
-                        raise RuntimeError("TTS não gerou áudio")
-                    tts_input = str(path)
-                audio_source = _build_tts_audio_source(tts_input, audio_format=audio_format)
+                if audio_source is None:
+                    audio_source = _TimedTTSSource(_build_tts_audio_source(tts_input, audio_format=audio_format), started=started)
                 play_started = time.monotonic()
                 try:
                     voice_client.play(audio_source, after=_after)
                     self.log("voice_direct_tts_start", guild_id=guild_id, engine=engine, channel=voice_channel_id, chars=len(str(body.get("text") or "")))
                     await asyncio.wait_for(finished, timeout=timeout)
-                except Exception:
+                except BaseException:
                     with contextlib.suppress(Exception):
                         if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
                             voice_client.stop()
@@ -1907,6 +2111,8 @@ class MusicAgent:
                 "voice_connected": bool(getattr(voice_client, "is_connected", lambda: False)()),
                 "playback_ms": round(playback_ms, 1),
                 "elapsed_ms": round(elapsed_ms, 1),
+                "first_frame_observed": audio_source.first_frame_ms is not None,
+                "first_frame_ms": audio_source.first_frame_ms,
                 "state": st.public(),
             }
 

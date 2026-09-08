@@ -489,9 +489,12 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
             _TTS_REQUIRED_DIRS=(root, runtime, cache),
         )
         self.paths_patch.start()
+        self.overlap_patch = patch.object(tts_audio.config, "TTS_FFMPEG_OVERLAP_ENABLED", False, create=True)
+        self.overlap_patch.start()
         tts_audio._ensure_tts_temp_dirs()
 
     async def asyncTearDown(self):
+        self.overlap_patch.stop()
         self.paths_patch.stop()
         self.temp_dir.cleanup()
 
@@ -605,15 +608,14 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
         state = GuildTTSState(queue=asyncio.Queue())
         item = self._item()
 
-        async def fake_gtts(text, language):
-            path = probe._make_runtime_temp_file(suffix=".mp3")
-            with open(path, "wb") as output:
-                output.write(b"gtts-fallback")
-            return path
+        class FakeGTTS:
+            def __init__(self, **kwargs): pass
+            def stream(self):
+                yield b"gtts-fallback"
 
         with (
             patch.object(tts_audio.edge_tts, "Communicate", FailingCommunicate),
-            patch.object(probe, "_generate_gtts_file", side_effect=fake_gtts) as gtts_mock,
+            patch.object(tts_audio, "gTTS", side_effect=FakeGTTS) as gtts_mock,
         ):
             path, should_cleanup = await probe._resolve_audio_path(
                 state,
@@ -622,7 +624,7 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertFalse(should_cleanup)
-        self.assertEqual(gtts_mock.await_count, 1)
+        self.assertEqual(gtts_mock.call_count, 1)
         with open(path, "rb") as fallback:
             self.assertEqual(fallback.read(), b"gtts-fallback")
         fallback_item = probe._build_edge_gtts_fallback_item(item)
@@ -761,14 +763,13 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
         engine_metrics["consecutive_failures"] = tts_audio.TTS_EDGE_CIRCUIT_BREAKER_FAILURES
         engine_metrics["last_error_at"] = tts_audio.time.time()
 
-        async def fake_gtts(text, language):
-            path = probe._make_runtime_temp_file(suffix=".mp3")
-            with open(path, "wb") as output:
-                output.write(b"circuit-fallback")
-            return path
+        class FakeGTTS:
+            def __init__(self, **kwargs): pass
+            def stream(self):
+                yield b"circuit-fallback"
 
         with (
-            patch.object(probe, "_generate_gtts_file", side_effect=fake_gtts),
+            patch.object(tts_audio, "gTTS", side_effect=FakeGTTS),
             patch.object(
                 probe,
                 "_prepare_edge_stream",
@@ -818,7 +819,7 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe._get_metrics_store()["edge_prebuffer_lowered"], 1)
         self.assertEqual(probe._get_metrics_store()["edge_prebuffer_raised"], 1)
 
-    async def test_mp3_input_hint_is_scoped_to_edge_fifo(self):
+    async def test_mp3_input_hint_is_scoped_to_known_mp3_fifo(self):
         probe = self._probe()
         state = GuildTTSState(queue=asyncio.Queue())
         fifo_path = probe._make_edge_stream_fifo()
@@ -850,7 +851,7 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(source_kind, "ffmpeg_pcm")
         self.assertIn("-f mp3", calls[0][1]["before_options"])
-        self.assertNotIn("-f mp3", calls[1][1]["before_options"])
+        self.assertIn("-f mp3", calls[1][1]["before_options"])
         await probe._finalize_edge_stream(handle, cancel=True)
 
     async def test_direct_worker_handoff_is_skipped_for_local_edge_fast_path(self):
@@ -896,8 +897,9 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
             patch.object(tts_audio, "TTS_SYNTH_CONCURRENCY", 3),
             patch.object(tts_audio, "TTS_EDGE_PREFETCH_CONCURRENCY", 2),
         ):
-            for _ in range(2):
+            for index in range(2):
                 item = self._item()
+                item.text += f" prefetch {index}"
                 setattr(item, "_tts_prefetch", True)
                 prefetch_handles.append(
                     await asyncio.wait_for(
@@ -907,6 +909,7 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             blocked_item = self._item()
+            blocked_item.text += " blocked prefetch"
             setattr(blocked_item, "_tts_prefetch", True)
             blocked_prefetch = asyncio.create_task(
                 probe._prepare_edge_stream(state, blocked_item, store_in_cache=False)
@@ -1007,9 +1010,12 @@ class GTTSLatencyFastPathTests(unittest.IsolatedAsyncioTestCase):
             _TTS_REQUIRED_DIRS=(root, runtime, cache),
         )
         self.paths_patch.start()
+        self.overlap_patch = patch.object(tts_audio.config, "TTS_FFMPEG_OVERLAP_ENABLED", False, create=True)
+        self.overlap_patch.start()
         tts_audio._ensure_tts_temp_dirs()
 
     async def asyncTearDown(self):
+        self.overlap_patch.stop()
         self.paths_patch.stop()
         self.temp_dir.cleanup()
 
@@ -1187,12 +1193,13 @@ class GTTSLatencyFastPathTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(entered.is_set())
             semaphore = probe._get_gtts_semaphore()
-            self.assertEqual(semaphore._value, 0)
+            slots = tts_audio.TTS_GTTS_CONCURRENCY
+            self.assertEqual(semaphore._value, slots - 1)
             release.set()
             deadline = asyncio.get_running_loop().time() + 1.0
-            while semaphore._value == 0 and asyncio.get_running_loop().time() < deadline:
+            while semaphore._value < slots and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.01)
-            self.assertEqual(semaphore._value, 1)
+            self.assertEqual(semaphore._value, slots)
 
         probe._shutdown_tts_runtime()
 

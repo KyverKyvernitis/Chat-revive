@@ -4640,6 +4640,8 @@ class AudioRouter:
             return active
         return active
 
+    _supports_tts_cached_audio = True
+
     async def play_tts_via_music_agent(
         self,
         *,
@@ -4652,6 +4654,11 @@ class AudioRouter:
         rate: str = "+0%",
         pitch: str = "+0Hz",
         timeout: float | None = None,
+        cache_key: str = "",
+        audio_b64: str = "",
+        audio_format: str = "",
+        tld: str = "com",
+        tts_request_id: str = "",
     ) -> dict[str, Any]:
         if not self.should_route_tts_to_music_agent(guild_id, channel_id):
             return {"ok": False, "tts_agent_route": False, "reason": "agent_not_owner"}
@@ -4661,6 +4668,7 @@ class AudioRouter:
             guild_id=int(guild_id),
             voice_channel_id=int(channel_id or 0),
             text=str(text or ""),
+            cache_key=cache_key, audio_b64=audio_b64, audio_format=audio_format, tld=tld, tts_request_id=tts_request_id,
             engine=str(engine or "gtts"),
             voice=str(voice or ""),
             language=str(language or "pt-br"),
@@ -4686,7 +4694,10 @@ class AudioRouter:
             "source_setup_ms": 0.0,
             "play_call_ms": 0.0,
             "playback_ms": float((result or {}).get("playback_ms") or 0.0) if isinstance(result, dict) else 0.0,
-            "playback_started_at": time.monotonic(),
+            "playback_started_at": started,
+            "first_frame_observed": False,
+            "worker_first_frame_ms": result.get('first_frame_ms') if isinstance(result, dict) else None,
+            "worker_first_frame_observed": bool(result.get('first_frame_observed')) if isinstance(result, dict) else False,
             "agent_elapsed_ms": elapsed_ms,
             "worker_result": result,
         }
@@ -5425,7 +5436,24 @@ class AudioRouter:
                 "worker_result": result,
             }
 
-        source = discord.FFmpegPCMAudio(path, before_options=before_options, options=options)
+        first_frame = {}
+        class MeasuredSource(discord.AudioSource):
+            def __init__(self, source):
+                self.source = source
+            def read(self):
+                frame = self.source.read()
+                if frame and not first_frame:
+                    first_frame['first_frame_at'] = time.monotonic()
+                    first_frame['first_frame_observed'] = True
+                return frame
+            def is_opus(self):
+                return self.source.is_opus()
+            def cleanup(self):
+                self.source.cleanup()
+        source_factory = getattr(item, '_tts_source_factory', None)
+        mixing = active_source is not None and not getattr(active_source, '_closed', True) and self._vc_is_playing_or_paused(vc)
+        raw_source = source_factory(path)[0] if callable(source_factory) and not mixing else discord.FFmpegPCMAudio(path, before_options=before_options, options=options)
+        source = MeasuredSource(raw_source)
         source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
 
         if active_source is not None and not getattr(active_source, "_closed", True) and (self._vc_is_playing_or_paused(vc)):
@@ -5440,6 +5468,9 @@ class AudioRouter:
             future = active_source.add_tts(source, volume=TTS_VOLUME)
             try:
                 await asyncio.wait_for(future, timeout=max(1.0, float(timeout)))
+            except asyncio.CancelledError:
+                active_source.cancel_tts(future)
+                raise
             except asyncio.TimeoutError:
                 active_source.cancel_tts(future)
                 playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
@@ -5454,6 +5485,7 @@ class AudioRouter:
                         "play_call_ms": play_call_ms,
                         "playback_ms": playback_ms,
                         "playback_started_at": playback_started_at,
+                **first_frame,
                         "tts_overlay_cancelled": True,
                         "tts_local_ducked": True,
                         "tts_local_duck_percent": MUSIC_TTS_LOCAL_DUCK_FACTOR * 100.0,
@@ -5466,6 +5498,7 @@ class AudioRouter:
                 "play_call_ms": play_call_ms,
                 "playback_ms": playback_ms,
                 "playback_started_at": playback_started_at,
+                **first_frame,
                 "tts_local_ducked": True,
                 "tts_local_duck_percent": MUSIC_TTS_LOCAL_DUCK_FACTOR * 100.0,
             }
@@ -5502,10 +5535,17 @@ class AudioRouter:
                 "play_call_ms": play_call_ms,
                 "playback_ms": playback_ms,
                 "playback_started_at": playback_started_at,
+                **first_frame,
                 "tts_agent_ducked": bool(agent_ducked),
                 "tts_agent_duck_percent": MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT if agent_ducked else 0,
             }
         finally:
+            if not finished.done() or finished.cancelled():
+                if getattr(vc, 'source', None) is source:
+                    with contextlib.suppress(Exception):
+                        vc.stop()
+                with contextlib.suppress(Exception):
+                    source.cleanup()
             if agent_ducked and state is not None and guild_id is not None:
                 await self._set_music_agent_ducking(int(guild_id), False, state)
 

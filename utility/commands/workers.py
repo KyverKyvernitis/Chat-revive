@@ -1307,6 +1307,20 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+
+def _load_worker_update_automation():
+    # Reuse the same manifest release as the automatic updater. An older
+    # inline updater cannot accept newly introduced runtime modules.
+    import importlib.util
+    path = _repo_root() / "scripts" / "core-worker-automation.py"
+    spec = importlib.util.spec_from_file_location("core_worker_panel_release", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("empacotador do phone-worker indisponível")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _verified_latest_apk_manifest() -> dict[str, Any]:
     """Lê latest.json, mas substitui a versão declarada pela identidade do APK."""
     release_dir = _repo_root() / "android" / "core-worker-app" / "releases"
@@ -4277,51 +4291,12 @@ class WorkersCommandMixin:
         return parsed
 
     def _build_worker_update_payload_sync(self, *, scripts_only: bool = False) -> dict[str, Any]:
-        src_dir = _repo_root() / "deploy" / "termux" / "phone-worker"
-        files: list[dict[str, Any]] = []
-        all_targets = (
-            ("phone_worker.py", 0o755),
-            ("apk_identity.py", 0o644),
-            ("music_agent.py", 0o755),
-            ("start-phone-worker.sh", 0o755),
-            ("start-phone-music-agent.sh", 0o755),
-            ("watch-phone-worker.sh", 0o755),
-            ("pair-phone-worker.sh", 0o755),
-            ("bootstrap-phone-worker.sh", 0o755),
-            ("install.sh", 0o755),
-            ("README.md", 0o644),
-            ("phone-worker.env.example", 0o600),
-        )
-        script_targets = (
-            ("start-phone-worker.sh", 0o755),
-            ("start-phone-music-agent.sh", 0o755),
-            ("watch-phone-worker.sh", 0o755),
-            ("pair-phone-worker.sh", 0o755),
-            ("bootstrap-phone-worker.sh", 0o755),
-            ("install.sh", 0o755),
-        )
-        targets = script_targets if scripts_only else all_targets
-        version = ""
-        version_re = re.compile(r'^PHONE_WORKER_VERSION\s*=\s*["\\\']([^"\\\']+)["\\\']', re.MULTILINE)
-        for name, mode in targets:
-            path = src_dir / name
-            if not path.is_file():
-                continue
-            data = path.read_bytes()
-            if name == "phone_worker.py":
-                with contextlib.suppress(Exception):
-                    match = version_re.search(data.decode("utf-8", errors="ignore"))
-                    if match:
-                        version = match.group(1)
-            files.append({
-                "target": name,
-                "mode": mode,
-                "sha256": hashlib.sha256(data).hexdigest(),
-                "data_b64": base64.b64encode(data).decode("ascii"),
-            })
-        if not files:
-            raise RuntimeError("arquivos do phone-worker não encontrados em deploy/termux/phone-worker")
-        return {"version": version or "desconhecida", "restart": not scripts_only, "scripts_only": scripts_only, "files": files}
+        automation = _load_worker_update_automation()
+        payload = automation._build_worker_update_payload(scripts_only=scripts_only)
+        payload.update(auto=False, source="workers-panel")
+        if scripts_only:
+            return payload
+        return automation._build_worker_update_artifact_payload(payload)
 
     async def _build_worker_update_payload(self, *, scripts_only: bool = False) -> dict[str, Any]:
         return await asyncio.to_thread(self._build_worker_update_payload_sync, scripts_only=scripts_only)

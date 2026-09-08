@@ -37,7 +37,7 @@ def test_cleanup_release_versions_are_monotonic() -> None:
     phone = read(PHONE)
     assert 'versionCode 133' in gradle
     assert 'versionName "0.8.6"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
+    assert 'PHONE_WORKER_VERSION = "1.11.6"' in phone
 
 
 def test_core_screen_hides_internal_runtime_noise_and_manual_recovery() -> None:

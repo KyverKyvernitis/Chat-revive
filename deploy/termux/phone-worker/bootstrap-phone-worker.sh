@@ -103,7 +103,7 @@ pkg install termux-api -y || true
 
 log "copiando/reparando scripts em $WORKER_DIR"
 mkdir -p "$WORKER_DIR"
-for f in phone_worker.py phone_worker_bootstrap.py repair-phone-worker.sh accept-core-worker-on-device.sh apk_identity.py music_agent.py start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
+for f in phone_worker.py phone_worker_bootstrap.py repair-phone-worker.sh accept-core-worker-on-device.sh apk_identity.py tts_transport.py music_agent.py start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [[ -f "$SCRIPT_DIR/$f" ]]; then
     cp "$SCRIPT_DIR/$f" "$WORKER_DIR/$f"
   fi

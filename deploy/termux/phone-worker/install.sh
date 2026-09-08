@@ -79,6 +79,7 @@ cp "$SRC_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/phone_worker_bootstrap.py"
 cp "$SRC_DIR/repair-phone-worker.sh" "$WORKER_DIR/repair-phone-worker.sh"
 cp "$SRC_DIR/accept-core-worker-on-device.sh" "$WORKER_DIR/accept-core-worker-on-device.sh"
 cp "$SRC_DIR/apk_identity.py" "$WORKER_DIR/apk_identity.py"
+cp "$SRC_DIR/tts_transport.py" "$WORKER_DIR/tts_transport.py"
 cp "$SRC_DIR/music_agent.py" "$WORKER_DIR/music_agent.py" 2>/dev/null || true
 cp "$SRC_DIR/start-phone-worker.sh" "$WORKER_DIR/start-phone-worker.sh"
 cp "$SRC_DIR/watch-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh"

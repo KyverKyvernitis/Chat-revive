@@ -52,6 +52,7 @@ DEFAULT_RETAIN_RELEASES = 3
 LEGACY_SOURCE_HASH_TARGETS = (
     "phone_worker.py",
     "apk_identity.py",
+    "tts_transport.py",
     "music_agent.py",
     "start-phone-worker.sh",
     "start-phone-music-agent.sh",

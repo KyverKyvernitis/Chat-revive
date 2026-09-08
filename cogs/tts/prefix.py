@@ -10,6 +10,7 @@ módulo só aplica e devolve a decisão pro cog principal executar.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from .aliases import extract_prefixed_argument, get_prefixed_aliases, matches_prefixed_command
@@ -44,13 +45,25 @@ def build_prefix_routing_config(
     # Cada prefixo tem um fallback hardcoded — usado quando a guild ainda
     # não configurou nada ou o doc tá faltando o campo.
     defaults = guild_defaults or {}
-    return PrefixRoutingConfig(
-        bot_prefix=str(defaults.get("bot_prefix", bot_prefix_default) or bot_prefix_default),
-        atts_prefix=str(defaults.get("atts_prefix", atts_prefix_default) or atts_prefix_default),
-        teto_prefix=str(defaults.get("teto_prefix", teto_prefix_default) or teto_prefix_default),
-        gtts_prefix=str(defaults.get("gtts_prefix", defaults.get("tts_prefix", ".")) or "."),
-        edge_prefix=str(defaults.get("edge_prefix", ",") or ","),
+    return _cached_prefix_routing(
+        str(defaults.get("bot_prefix", bot_prefix_default) or bot_prefix_default),
+        str(defaults.get("atts_prefix", atts_prefix_default) or atts_prefix_default),
+        str(defaults.get("teto_prefix", teto_prefix_default) or teto_prefix_default),
+        str(defaults.get("gtts_prefix", defaults.get("tts_prefix", ".")) or "."),
+        str(defaults.get("edge_prefix", ",") or ","),
     )
+
+
+@lru_cache(maxsize=512)
+def _cached_prefix_routing(bot, atts, teto, gtts, edge):
+    return PrefixRoutingConfig(bot, atts, teto, gtts, edge)
+
+
+@lru_cache(maxsize=512)
+def _ordered_speech_prefixes(atts, teto, edge, gtts):
+    return tuple(sorted((("android_native", atts), ("teto", teto),
+                         ("edge", edge), ("gtts", gtts)),
+                        key=lambda pair: len(pair[1]), reverse=True))
 
 
 
@@ -79,6 +92,8 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
     if not raw:
         return None
 
+    if not raw.lower().startswith(str(bot_prefix or "").lower()):
+        return None
     if matches_prefixed_command(raw, bot_prefix, kind="ping"):
         return PrefixControlCommand("ping")
     if matches_prefixed_command(raw, bot_prefix, kind="help"):
@@ -143,13 +158,8 @@ def match_engine_prefix(
     # capture configurações de vários caracteres. A ordem abaixo só desempata
     # tamanhos iguais e preserva o ATTS como primeira engine histórica.
     text = str(content or "")
-    candidates = [
-        ("android_native", str(atts_prefix or "")),
-        ("teto", str(teto_prefix or "")),
-        ("edge", str(edge_prefix or "")),
-        ("gtts", str(gtts_prefix or "")),
-    ]
-    candidates.sort(key=lambda item: len(item[1]), reverse=True)
+    candidates = _ordered_speech_prefixes(str(atts_prefix or ""), str(teto_prefix or ""),
+                                         str(edge_prefix or ""), str(gtts_prefix or ""))
     for engine, prefix in candidates:
         if prefix and text.startswith(prefix):
             return engine, prefix
